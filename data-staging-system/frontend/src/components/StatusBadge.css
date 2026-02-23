@@ -1,0 +1,64 @@
+.status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--spacing-xs);
+    padding: var(--spacing-xs) var(--spacing-sm);
+    border-radius: var(--radius-full);
+    font-size: var(--font-size-xs);
+    font-weight: var(--font-weight-medium);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.status-badge-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    animation: pulse 2s ease-in-out infinite;
+}
+
+.status-badge-success {
+    background: var(--color-success-bg);
+    color: var(--color-success);
+}
+
+.status-badge-success .status-badge-dot {
+    background: var(--color-success);
+}
+
+.status-badge-error {
+    background: var(--color-error-bg);
+    color: var(--color-error);
+}
+
+.status-badge-error .status-badge-dot {
+    background: var(--color-error);
+}
+
+.status-badge-pending {
+    background: var(--color-pending-bg);
+    color: var(--color-pending);
+}
+
+.status-badge-pending .status-badge-dot {
+    background: var(--color-pending);
+}
+
+.status-badge-processing {
+    background: var(--color-processing-bg);
+    color: var(--color-processing);
+}
+
+.status-badge-processing .status-badge-dot {
+    background: var(--color-processing);
+    animation: pulse 1s ease-in-out infinite;
+}
+
+.status-badge-default {
+    background: var(--color-bg-tertiary);
+    color: var(--color-text-muted);
+}
+
+.status-badge-default .status-badge-dot {
+    background: var(--color-text-muted);
+}

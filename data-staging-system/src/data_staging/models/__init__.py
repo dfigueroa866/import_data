@@ -1,0 +1,103 @@
+# src/data_staging/models/__init__.py
+"""
+SQLAlchemy models for the Data Staging System
+
+This package contains all database models organized by functionality:
+- base: Base classes and mixins
+- data_source: Data source configuration models
+- batch: Batch processing control models
+- load_history: Load operation tracking models
+- validation: Data validation and quality models
+"""
+
+# Import base classes first
+from .base import Base, BaseModel, TimestampMixin, AuditMixin
+from .base import StagingMetaBase, StagingDataBase, ProductionBase
+
+# Import core models
+from .data_source import DataSource, SourceLoadSummary, SourceType
+from .batch import BatchControl, BatchStatus
+from .load_history import LoadHistory, LoadType, LoadStatus
+from .validation import ValidationLog, StagingRecord, ValidationStatus, ValidationType
+
+# Import all models for Alembic autogenerate
+__all__ = [
+    # Base classes
+    'Base',
+    'BaseModel', 
+    'TimestampMixin',
+    'AuditMixin',
+    'StagingMetaBase',
+    'StagingDataBase', 
+    'ProductionBase',
+    
+    # Models
+    'DataSource',
+    'SourceLoadSummary',
+    'BatchControl',
+    'LoadHistory',
+    'ValidationLog',
+    'StagingRecord',
+    
+    # Enums
+    'SourceType',
+    'BatchStatus',
+    'LoadType',
+    'LoadStatus',
+    'ValidationStatus',
+    'ValidationType'
+]
+
+# Model registry for dynamic access
+MODEL_REGISTRY = {
+    'data_source': DataSource,
+    'source_load_summary': SourceLoadSummary,
+    'batch_control': BatchControl,
+    'load_history': LoadHistory,
+    'validation_log': ValidationLog,
+    'staging_record': StagingRecord,
+}
+
+def get_model(model_name: str):
+    """Get model class by name"""
+    return MODEL_REGISTRY.get(model_name)
+
+def get_all_models():
+    """Get all model classes"""
+    return list(MODEL_REGISTRY.values())
+
+# Schema information
+SCHEMA_MODELS = {
+    'staging_meta': [
+        DataSource,
+        SourceLoadSummary, 
+        BatchControl,
+        LoadHistory,
+        ValidationLog
+    ],
+    'staging_data': [
+        StagingRecord
+    ],
+    'm8_schema': [
+        # Production models would go here
+        # These will be created as needed for specific business domains
+    ]
+}
+
+def get_models_for_schema(schema_name: str):
+    """Get all models for a specific schema"""
+    return SCHEMA_MODELS.get(schema_name, [])
+
+# Table creation order (respects foreign key dependencies)
+CREATE_ORDER = [
+    DataSource,
+    SourceLoadSummary,
+    BatchControl, 
+    LoadHistory,
+    ValidationLog,
+    StagingRecord
+]
+
+def get_creation_order():
+    """Get models in dependency order for creation"""
+    return CREATE_ORDER

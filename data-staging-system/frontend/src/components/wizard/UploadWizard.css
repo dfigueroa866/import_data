@@ -1,0 +1,222 @@
+.upload-wizard {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 2rem;
+}
+
+.wizard-header {
+    text-align: center;
+    margin-bottom: 3rem;
+}
+
+.wizard-header h1 {
+    font-size: 2rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 0.5rem;
+}
+
+.wizard-header p {
+    color: var(--text-secondary);
+    font-size: 1rem;
+}
+
+/* Stepper */
+.wizard-stepper {
+    display: flex;
+    align-items: stretch;
+    justify-content: space-between;
+    margin-bottom: 3rem;
+    padding: 0;
+    overflow: visible;
+    /* Changed to visible to allow drop-shadows */
+    background: transparent;
+    gap: 0;
+    /* No gap, we rely on margin overlap */
+}
+
+/* Base Step Style */
+.step {
+    flex: 1;
+    position: relative;
+    padding: 1rem 1rem 1rem 2.5rem;
+    /* Indent for the arrow tail */
+    background: var(--bg-card);
+    /* Default/Pending Color */
+    color: var(--text-secondary);
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    transition: all 0.3s ease;
+
+    /* Chevron Shape */
+    clip-path: polygon(0% 0%,
+            calc(100% - 1.5rem) 0%,
+            100% 50%,
+            calc(100% - 1.5rem) 100%,
+            0% 100%,
+            1.5rem 50%);
+
+    margin-right: -1.2rem;
+    /* Overlap next step */
+
+    /* Stronger shadow for better separation of arrows in light mode */
+    filter: drop-shadow(4px 0 0 var(--color-bg-primary));
+}
+
+/* First Step: Flat Left */
+.step:first-child {
+    padding-left: 1.5rem;
+    clip-path: polygon(0% 0%,
+            calc(100% - 1.5rem) 0%,
+            100% 50%,
+            calc(100% - 1.5rem) 100%,
+            0% 100%);
+}
+
+/* Last Step: Flat Right (or Arrow Right) */
+.step:last-child {
+    margin-right: 0;
+    clip-path: polygon(0% 0%,
+            100% 0%,
+            100% 100%,
+            0% 100%,
+            1.5rem 50%);
+}
+
+/* Active State */
+.step.active {
+    background: var(--color-primary);
+    color: white;
+    filter: drop-shadow(4px 0 0 var(--color-bg-primary));
+}
+
+/* Completed State - Must override Active */
+.step.completed,
+.step.active.completed {
+    background: var(--color-success) !important;
+    /* Force green if both active/completed */
+    color: white;
+    cursor: pointer;
+    filter: drop-shadow(4px 0 0 var(--color-bg-primary));
+}
+
+/* Error State */
+.step.error,
+.step.active.error {
+    background: var(--color-danger) !important;
+    color: white;
+    filter: drop-shadow(4px 0 0 var(--color-bg-primary));
+}
+
+/* Pending State (Inactive) */
+.step:not(.active):not(.completed) {
+    background: var(--color-step-pending);
+    color: var(--color-text-secondary);
+    opacity: 1;
+    /* Changed to 1 for better visibility in light mode */
+}
+
+/* Z-Index Stacking: Left on top of Right? 
+   No, to see the "gap", the Left element (with the arrow tip) must be ON TOP of the Right element (with the indent).
+   And the Left element needs the drop-shadow to paint over the Right element.
+*/
+.step:nth-child(1) {
+    z-index: 10;
+}
+
+.step:nth-child(2) {
+    z-index: 9;
+}
+
+.step:nth-child(3) {
+    z-index: 8;
+}
+
+.step:nth-child(4) {
+    z-index: 7;
+}
+
+/* Colors for Specific States - Cleanup redundant blocks */
+/* ... */
+
+/* Content Styling */
+.step-content {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    z-index: 1;
+    /* Text above everything */
+}
+
+.step-number,
+.step-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.2);
+    /* Darker semi-transparent for better contrast on both light/dark active backgrounds */
+    font-weight: 600;
+    font-size: 0.875rem;
+    color: inherit;
+    /* Inherit text color from parent */
+}
+
+/* For pending steps in light mode, we need more contrast */
+[data-theme='light'] .step:not(.active):not(.completed) .step-number {
+    background: rgba(0, 0, 0, 0.1);
+    color: var(--color-text-secondary);
+}
+
+.step.active .step-number {
+    background: rgba(255, 255, 255, 0.25);
+    /* White tint on active (Teal) background looks good */
+    color: white;
+}
+
+.step.completed .step-number,
+.step.completed .step-icon {
+    background: rgba(255, 255, 255, 0.25);
+    color: white;
+}
+
+.step-icon {
+    font-weight: bold;
+}
+
+.step-label {
+    font-weight: 500;
+    white-space: nowrap;
+    font-size: 0.95rem;
+}
+
+/* Clear old styles */
+.step-line {
+    display: none;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .wizard-stepper {
+        flex-direction: column;
+        gap: 0.5rem;
+        background: transparent;
+        overflow: visible;
+    }
+
+    .step {
+        clip-path: none;
+        margin-right: 0;
+        padding: 1rem;
+        border-radius: 8px;
+        filter: none;
+    }
+
+    .step:first-child {
+        padding-left: 1rem;
+        clip-path: none;
+    }
+}

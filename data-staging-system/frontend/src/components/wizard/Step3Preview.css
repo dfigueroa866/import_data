@@ -1,0 +1,243 @@
+.step3-preview {
+    max-width: 1200px;
+    margin: 0 auto;
+}
+
+.step3-preview h2 {
+    color: var(--text-primary);
+    font-size: 1.75rem;
+    margin-bottom: 0.5rem;
+}
+
+.step3-loading,
+.step3-error {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+    padding: 4rem 2rem;
+}
+
+.error-icon {
+    font-size: 4rem;
+}
+
+.error-actions {
+    display: flex;
+    gap: 1rem;
+    margin-top: 1.5rem;
+}
+
+/* Summary Cards */
+.preview-summary {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 1rem;
+    margin: 2rem 0;
+}
+
+.summary-card {
+    padding: 1.5rem;
+    background: var(--bg-secondary);
+    border-radius: 8px;
+    text-align: center;
+    border-left: 4px solid var(--border-color);
+}
+
+.summary-card.total {
+    border-left-color: var(--primary-color);
+}
+
+.summary-card.valid {
+    border-left-color: var(--success-color);
+}
+
+.summary-card.warning {
+    border-left-color: #f59e0b;
+}
+
+.summary-card.error {
+    border-left-color: var(--danger-color);
+}
+
+.summary-card.duplicate {
+    border-left-color: #8b5cf6;
+}
+
+.card-value {
+    font-size: 2.5rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin-bottom: 0.5rem;
+}
+
+.card-label {
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+/* Target Info */
+.target-info {
+    padding: 1.5rem;
+    background: rgba(99, 102, 241, 0.1);
+    border-radius: 8px;
+    margin-bottom: 2rem;
+}
+
+.info-row {
+    display: flex;
+    gap: 1rem;
+    padding: 0.5rem 0;
+}
+
+.info-label {
+    font-weight: 600;
+    color: var(--primary-color);
+    min-width: 140px;
+}
+
+.info-value {
+    font-family: 'Courier New', monospace;
+    color: var(--text-primary);
+}
+
+/* Preview Table */
+.preview-table-section h3 {
+    font-size: 1.125rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 1rem;
+}
+
+.preview-table-container {
+    overflow-x: auto;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    margin-bottom: 2rem;
+}
+
+.preview-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--bg-primary);
+}
+
+.preview-table thead {
+    background: var(--bg-secondary);
+    position: sticky;
+    top: 0;
+    z-index: 1;
+}
+
+.preview-table th {
+    padding: 1rem;
+    text-align: left;
+    font-weight: 600;
+    color: var(--text-primary);
+    border-bottom: 2px solid var(--border-color);
+}
+
+.preview-table td {
+    padding: 1rem;
+    border-bottom: 1px solid var(--border-color);
+    vertical-align: top;
+}
+
+.preview-table tr:hover {
+    background: var(--bg-secondary);
+}
+
+.row-valid {
+    background: rgba(34, 197, 94, 0.05);
+}
+
+.row-warning {
+    background: rgba(245, 158, 11, 0.05);
+}
+
+.row-error {
+    background: rgba(239, 68, 68, 0.05);
+}
+
+.row-number {
+    font-weight: 600;
+    color: var(--text-tertiary);
+}
+
+.status-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    font-weight: 600;
+}
+
+.status-badge.status-valid {
+    background: var(--success-color);
+    color: white;
+}
+
+.status-badge.status-warning {
+    background: #f59e0b;
+    color: white;
+}
+
+.status-badge.status-error {
+    background: var(--danger-color);
+    color: white;
+}
+
+.data-cell {
+    font-size: 0.875rem;
+    color: var(--text-primary);
+    max-width: 250px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.data-cell:hover {
+    white-space: normal;
+    overflow: visible;
+    word-break: break-word;
+    position: relative;
+    z-index: 10;
+    background: var(--bg-primary);
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+}
+
+.issues-cell {
+    min-width: 150px;
+    max-width: 200px;
+}
+
+.issue {
+    padding: 0.25rem 0.5rem;
+    margin-bottom: 0.25rem;
+    border-radius: 4px;
+    font-size: 0.75rem;
+}
+
+.issue.warning {
+    background: rgba(245, 158, 11, 0.1);
+    color: #f59e0b;
+    border: 1px solid rgba(245, 158, 11, 0.2);
+}
+
+.issue.error {
+    background: rgba(239, 68, 68, 0.1);
+    color: var(--danger-color);
+    border: 1px solid rgba(239, 68, 68, 0.2);
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .preview-summary {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}

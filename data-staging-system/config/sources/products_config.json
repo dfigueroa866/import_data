@@ -1,0 +1,193 @@
+{
+  "source_name": "products_data",
+  "source_type": "file",
+  "description": "Data source for products table with 14 columns",
+  "connection_config": {
+    "read_options": {
+      "delimiter": ",",
+      "encoding": "utf-8",
+      "header": 0,
+      "na_values": [
+        "",
+        "NULL",
+        "null",
+        "N/A",
+        "n/a",
+        "NA"
+      ],
+      "keep_default_na": true
+    }
+  },
+  "validation_rules": {
+    "not_null": {
+      "columns": [
+        "product_id",
+        "product_name"
+      ],
+      "severity": "error"
+    },
+    "unique": {
+      "columns": [
+        "product_id"
+      ],
+      "severity": "critical"
+    },
+    "data_type": {
+      "strict": false,
+      "types": {
+        "unit_cost": "float",
+        "lead_time_days": "int",
+        "minimum_order_quantity": "int",
+        "is_active": "bool",
+        "created_at": "datetime",
+        "updated_at": "datetime"
+      },
+      "severity": "error"
+    },
+    "range": {
+      "columns": [
+        "unit_cost",
+        "lead_time_days",
+        "minimum_order_quantity"
+      ],
+      "ranges": {
+        "unit_cost": {
+          "min": 0.01,
+          "max": 1000000
+        },
+        "lead_time_days": {
+          "min": -2147483648,
+          "max": 2147483647
+        },
+        "minimum_order_quantity": {
+          "min": -2147483648,
+          "max": 2147483647
+        }
+      },
+      "severity": "error"
+    },
+    "pattern": {
+      "columns": [
+        "product_id",
+        "supplier_id"
+      ],
+      "patterns": {
+        "product_id": "^PRODUCT-[0-9]{4,8}$",
+        "supplier_id": "^SUPPLIER-[0-9]{4,8}$"
+      },
+      "severity": "error"
+    },
+    "date": {
+      "columns": [
+        "created_at",
+        "updated_at"
+      ],
+      "min_date": "1900-01-01",
+      "max_date": "2030-12-31",
+      "severity": "error"
+    },
+    "completeness": {
+      "threshold": 0.95,
+      "columns": [
+        "product_id",
+        "product_name"
+      ],
+      "severity": "warning"
+    }
+  },
+  "transformation_rules": [
+    {
+      "name": "clean_whitespace",
+      "columns": [
+        "product_id",
+        "product_name",
+        "product_code",
+        "category",
+        "subcategory",
+        "unit_of_measure",
+        "supplier_id",
+        "supplier_name"
+      ]
+    },
+    {
+      "name": "convert_types",
+      "mappings": {
+        "unit_cost": "float",
+        "lead_time_days": "int",
+        "minimum_order_quantity": "int",
+        "is_active": "bool",
+        "created_at": "datetime",
+        "updated_at": "datetime"
+      }
+    },
+    {
+      "name": "parse_dates",
+      "columns": [
+        "created_at",
+        "updated_at"
+      ]
+    },
+    {
+      "name": "handle_nulls",
+      "strategy": "fill",
+      "fill_values": {
+        "unit_of_measure": "units'::character varying",
+        "lead_time_days": "14",
+        "minimum_order_quantity": "1",
+        "is_active": "true"
+      }
+    }
+  ],
+  "target_table": "stage_products",
+  "target_schema": "staging_data",
+  "production_table": "products",
+  "production_schema": "public",
+  "is_active": true,
+  "processing_config": {
+    "batch_size": 5000,
+    "max_retries": 3,
+    "timeout_seconds": 300
+  },
+  "tags": [
+    "products",
+    "product-data"
+  ],
+  "owner": "data_team@company.com",
+  "data_quality_config": {
+    "quality_threshold": 90,
+    "auto_quarantine": true,
+    "quarantine_threshold": 70,
+    "profiling_enabled": true,
+    "monitoring_enabled": true
+  },
+  "notification_config": {
+    "on_success": {
+      "email": [
+        "data_team@company.com"
+      ]
+    },
+    "on_failure": {
+      "email": [
+        "data_alerts@company.com"
+      ],
+      "escalation": true
+    },
+    "on_warning": {
+      "email": [
+        "data_warnings@company.com"
+      ]
+    }
+  },
+  "metadata": {
+    "created_by": "ddl_config_creator",
+    "created_at": "2024-01-01T00:00:00Z",
+    "version": "1.0",
+    "source_table": "m8_schema.products",
+    "column_count": 14,
+    "has_foreign_keys": false,
+    "has_unique_constraints": true,
+    "business_context": {
+      "criticality": "medium"
+    }
+  }
+}

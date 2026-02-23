@@ -1,0 +1,78 @@
+# Python
+venv/
+env/
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Environment variables
+.env
+.env.local
+.env.production
+.env.development
+
+# Node / JS
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+dist/
+build/
+
+# Editor / IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+logs/
+*.log
+data-staging-system/logs/
+log_staging_data.log
+
+# Project Specific Data
+data-staging-system/data/uploads/*
+!data-staging-system/data/uploads/.gitkeep
+data-staging-system/data/staging/*
+!data-staging-system/data/staging/.gitkeep
+data-staging-system/data/temp/*
+!data-staging-system/data/temp/.gitkeep
+data-staging-system/data/archive/*
+!data-staging-system/data/archive/.gitkeep
+data-staging-system/backups/*
+!data-staging-system/backups/.gitkeep
+
+# Other temp files
+*.tmp
+*.temp
+validation_output.txt

@@ -1,0 +1,29 @@
+{
+  "products": [
+    {
+      "id": 1,
+      "name": "Laptop Pro",
+      "category": "Electronics",
+      "price": 999.99,
+      "stock": 50
+    },
+    {
+      "id": 2,
+      "name": "Wireless Mouse",
+      "category": "Accessories",
+      "price": 29.99,
+      "stock": 200
+    },
+    {
+      "id": 3,
+      "name": "Mechanical Keyboard",
+      "category": "Accessories",
+      "price": 79.99,
+      "stock": 150
+    }
+  ],
+  "metadata": {
+    "version": "1.0",
+    "created": "2025-07-22T00:31:18.928470"
+  }
+}

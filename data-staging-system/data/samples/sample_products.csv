@@ -1,0 +1,9 @@
+product_id,name,category,price,cost,stock,supplier,description,is_active
+EL-001,Laptop Pro 15",Electronics,1299.99,900.00,25,TechCorp,High-performance laptop for professionals,true
+AC-002,Wireless Mouse,Accessories,49.99,25.00,150,AccessoryInc,Ergonomic wireless mouse with precision tracking,true
+AC-003,Mechanical Keyboard,Accessories,129.99,80.00,75,KeyboardCo,RGB mechanical keyboard for gaming and typing,true
+EL-004,4K Monitor 27",Electronics,399.99,250.00,20,DisplayTech,Ultra-high definition 4K monitor,true
+AC-005,USB-C Hub,Accessories,89.99,45.00,100,HubMaker,Multi-port USB-C hub with HDMI and charging,true
+EL-006,Bluetooth Headphones,Electronics,249.99,150.00,50,AudioPro,Noise-canceling wireless headphones,true
+AC-007,Phone Stand,Accessories,19.99,8.00,200,StandCorp,Adjustable phone stand for desk use,true
+EL-008,Tablet 10",Electronics,549.99,350.00,30,TabletTech,10-inch tablet for productivity and entertainment,true

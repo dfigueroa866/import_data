@@ -1,0 +1,50 @@
+{
+  "csv_source": {
+    "source_name": "customers_csv",
+    "source_type": "file",
+    "file_path": "./data/sample/customers_sample.csv",
+    "read_options": {
+      "delimiter": ",",
+      "encoding": "utf-8",
+      "header": 0
+    },
+    "validation_rules": {
+      "not_null": {
+        "columns": [
+          "customer_id",
+          "name",
+          "email"
+        ]
+      },
+      "unique": {
+        "columns": [
+          "customer_id",
+          "email"
+        ]
+      },
+      "email": {
+        "columns": [
+          "email"
+        ]
+      }
+    },
+    "transformation_rules": [
+      {
+        "name": "clean_whitespace"
+      },
+      {
+        "name": "standardize_case",
+        "case": "lower",
+        "columns": [
+          "email"
+        ]
+      },
+      {
+        "name": "parse_dates",
+        "columns": [
+          "registration_date"
+        ]
+      }
+    ]
+  }
+}
