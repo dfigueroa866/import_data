@@ -1,6 +1,4 @@
-﻿# Crear nuevo requirements.txt limpio
-cat > requirements.txt << 'EOF'
-# Core web framework
+﻿# Core web framework
 fastapi>=0.128.0
 uvicorn[standard]>=0.40.0
 
@@ -37,4 +35,3 @@ pytest-cov>=7.0.0
 
 # Supabase
 supabase>=2.27.2
-EOF

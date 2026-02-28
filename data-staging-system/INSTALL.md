@@ -110,12 +110,13 @@ make test-run
 make run
 
 # Start dashboard (in another terminal)
-make dashboard
+cd frontend
+npm run dev
 ```
 
 ## 📍 Access Points
 
 - **API**: http://localhost:8000
 - **Docs**: http://localhost:8000/docs  
-- **Dashboard**: http://localhost:8501
+- **Dashboard**: http://localhost:5173
 - **Health**: http://localhost:8000/health

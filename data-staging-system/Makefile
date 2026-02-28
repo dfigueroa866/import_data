@@ -78,9 +78,9 @@ dev:
 
 dashboard:
 	@echo "$(GREEN)📊 Starting Dashboard...$(NC)"
-	@echo "$(BLUE)📍 Dashboard will be available at: http://localhost:8501$(NC)"
+	@echo "$(BLUE)📍 Dashboard will be available at: http://localhost:5173$(NC)"
 	@echo ""
-	$(PYTHON) run_dashboard.py
+	cd frontend && npm run dev
 
 test-run:
 	@echo "$(GREEN)🧪 Running tests...$(NC)"

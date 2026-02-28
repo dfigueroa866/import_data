@@ -4,8 +4,8 @@ import importlib
 def check_dependencies():
     """Check if required Python packages are installed"""
     
-    core_packages = ['fastapi', 'sqlalchemy', 'pydantic', 'uvicorn', 'streamlit', 'pandas']
-    optional_packages = ['psycopg2', 'plotly', 'requests', 'dotenv', 'supabase']
+    core_packages = ['fastapi', 'sqlalchemy', 'pydantic', 'uvicorn', 'pandas']
+    optional_packages = ['psycopg2', 'requests', 'dotenv', 'supabase']
     
     missing_core = []
     missing_optional = []

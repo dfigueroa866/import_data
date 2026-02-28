@@ -23,17 +23,6 @@ from data_staging.database import get_database_manager
 
 logger = logging.getLogger(__name__)
 
-# Configure global file logging
-try:
-    file_handler = logging.FileHandler('log_staging_data.log')
-    file_handler.setLevel(logging.INFO)
-    file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    file_handler.setFormatter(file_formatter)
-    logging.getLogger().addHandler(file_handler)
-    logger.info("File logging enabled: log_staging_data.log")
-except Exception as e:
-    logger.error(f"Failed to setup file logging: {e}")
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

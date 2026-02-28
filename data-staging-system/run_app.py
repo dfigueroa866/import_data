@@ -91,8 +91,17 @@ def setup_logging():
     sql_logger.propagate = False # Do not bubble up to root (avoids duplication in app.log)
 
     # Uvicorn - Ensure it uses our handlers
-    logging.getLogger("uvicorn").handlers = [app_handler, error_handler, console_handler]
-    logging.getLogger("uvicorn.access").handlers = [app_handler, console_handler]
+    uvicorn_logger = logging.getLogger("uvicorn")
+    uvicorn_logger.handlers = [app_handler, error_handler, console_handler]
+    uvicorn_logger.propagate = False
+    
+    uvicorn_error = logging.getLogger("uvicorn.error")
+    uvicorn_error.handlers = [app_handler, error_handler, console_handler]
+    uvicorn_error.propagate = False
+    
+    uvicorn_access = logging.getLogger("uvicorn.access")
+    uvicorn_access.handlers = [app_handler, console_handler]
+    uvicorn_access.propagate = False
     
     # Silence watchfiles logger
     logging.getLogger("watchfiles").setLevel(logging.ERROR)
