@@ -37,46 +37,85 @@
     margin: 2rem 0;
 }
 
-.summary-card {
+.validation-alert {
+    padding: 1rem;
+    border-radius: 8px;
+    margin-bottom: 1.5rem;
+    font-weight: 600;
+}
+
+.validation-alert.error {
+    background: rgba(239, 68, 68, 0.1);
+    color: var(--danger-color);
+    border: 1px solid rgba(239, 68, 68, 0.2);
+}
+
+.validation-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 1.5rem;
+}
+
+.stat-pair {
+    display: flex;
+    flex-direction: column;
     padding: 1.5rem;
     background: var(--bg-secondary);
     border-radius: 8px;
-    text-align: center;
-    border-left: 4px solid var(--border-color);
+    border: 1px solid var(--border-color);
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
 }
 
-.summary-card.total {
-    border-left-color: var(--primary-color);
+.stat-pair.error-state {
+    border-color: var(--danger-color);
+    background: rgba(239, 68, 68, 0.03);
 }
 
-.summary-card.valid {
-    border-left-color: var(--success-color);
+.stat-compare {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 1rem;
 }
 
-.summary-card.warning {
-    border-left-color: #f59e0b;
+.stat-box {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    flex: 1;
+    min-width: 0;
+    padding: 0 0.5rem;
 }
 
-.summary-card.error {
-    border-left-color: var(--danger-color);
-}
-
-.summary-card.duplicate {
-    border-left-color: #8b5cf6;
-}
-
-.card-value {
-    font-size: 2.5rem;
+.stat-box .value {
+    font-size: clamp(1.1rem, 1.5vw, 1.75rem);
     font-weight: 700;
     color: var(--text-primary);
-    margin-bottom: 0.5rem;
+    word-break: break-all;
+    text-align: center;
 }
 
-.card-label {
-    font-size: 0.875rem;
+.stat-box .label {
+    font-size: 0.75rem;
     color: var(--text-secondary);
     text-transform: uppercase;
-    letter-spacing: 0.5px;
+    margin-top: 0.25rem;
+}
+
+.arrow {
+    font-size: 1.5rem;
+    color: var(--text-tertiary);
+    margin: 0 1rem;
+}
+
+.diff-alert {
+    margin-top: 1rem;
+    padding-top: 0.75rem;
+    border-top: 1px dashed var(--danger-color);
+    color: var(--danger-color);
+    font-weight: 600;
+    font-size: 0.875rem;
+    text-align: center;
 }
 
 /* Target Info */
@@ -104,135 +143,91 @@
     color: var(--text-primary);
 }
 
-/* Preview Table */
-.preview-table-section h3 {
-    font-size: 1.125rem;
-    font-weight: 600;
-    color: var(--text-primary);
-    margin-bottom: 1rem;
-}
-
-.preview-table-container {
-    overflow-x: auto;
-    border-radius: 8px;
+/* Detailed Validation Report */
+.validation-report {
+    background-color: var(--bg-secondary);
     border: 1px solid var(--border-color);
-    margin-bottom: 2rem;
+    border-radius: 8px;
+    padding: 1.5rem;
+    margin-top: 2rem;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
 }
 
-.preview-table {
-    width: 100%;
-    border-collapse: collapse;
-    background: var(--bg-primary);
-}
-
-.preview-table thead {
-    background: var(--bg-secondary);
-    position: sticky;
-    top: 0;
-    z-index: 1;
-}
-
-.preview-table th {
-    padding: 1rem;
-    text-align: left;
-    font-weight: 600;
+.report-title {
+    margin-top: 0;
+    margin-bottom: 1.5rem;
     color: var(--text-primary);
-    border-bottom: 2px solid var(--border-color);
-}
-
-.preview-table td {
-    padding: 1rem;
-    border-bottom: 1px solid var(--border-color);
-    vertical-align: top;
-}
-
-.preview-table tr:hover {
-    background: var(--bg-secondary);
-}
-
-.row-valid {
-    background: rgba(34, 197, 94, 0.05);
-}
-
-.row-warning {
-    background: rgba(245, 158, 11, 0.05);
-}
-
-.row-error {
-    background: rgba(239, 68, 68, 0.05);
-}
-
-.row-number {
+    font-size: 1.2rem;
     font-weight: 600;
-    color: var(--text-tertiary);
-}
-
-.status-badge {
-    display: inline-flex;
+    display: flex;
     align-items: center;
-    justify-content: center;
-    width: 28px;
-    height: 28px;
-    border-radius: 50%;
+    gap: 0.5rem;
+}
+
+.report-title::before {
+    content: '📋';
+    font-size: 1.4rem;
+}
+
+.report-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.report-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 0;
+    font-size: 0.95rem;
+}
+
+.report-label {
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+.report-value {
+    color: var(--text-primary);
+    font-weight: 600;
+    font-family: 'Courier New', monospace;
+    font-size: 1rem;
+}
+
+.report-item.text-danger .report-value {
+    color: var(--danger-color);
+}
+
+.report-item.text-success .report-value {
+    color: var(--success-color);
+}
+
+.report-item.text-info .report-value {
+    color: var(--primary-color);
+}
+
+.report-divider {
+    border: 0;
+    border-top: 1px dashed var(--border-color);
+    margin: 0.5rem 0;
+}
+
+.report-status {
+    padding: 0.25rem 0.75rem;
+    border-radius: 9999px;
+    font-size: 0.85rem;
     font-weight: 600;
 }
 
-.status-badge.status-valid {
-    background: var(--success-color);
-    color: white;
+.report-status.success {
+    background-color: rgba(16, 185, 129, 0.1);
+    color: var(--success-color);
 }
 
-.status-badge.status-warning {
-    background: #f59e0b;
-    color: white;
-}
-
-.status-badge.status-error {
-    background: var(--danger-color);
-    color: white;
-}
-
-.data-cell {
-    font-size: 0.875rem;
-    color: var(--text-primary);
-    max-width: 250px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-.data-cell:hover {
-    white-space: normal;
-    overflow: visible;
-    word-break: break-word;
-    position: relative;
-    z-index: 10;
-    background: var(--bg-primary);
-    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-}
-
-.issues-cell {
-    min-width: 150px;
-    max-width: 200px;
-}
-
-.issue {
-    padding: 0.25rem 0.5rem;
-    margin-bottom: 0.25rem;
-    border-radius: 4px;
-    font-size: 0.75rem;
-}
-
-.issue.warning {
-    background: rgba(245, 158, 11, 0.1);
-    color: #f59e0b;
-    border: 1px solid rgba(245, 158, 11, 0.2);
-}
-
-.issue.error {
-    background: rgba(239, 68, 68, 0.1);
+.report-status.error {
+    background-color: rgba(239, 68, 68, 0.1);
     color: var(--danger-color);
-    border: 1px solid rgba(239, 68, 68, 0.2);
 }
 
 /* Responsive */

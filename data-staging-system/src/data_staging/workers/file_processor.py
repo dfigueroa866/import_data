@@ -252,6 +252,37 @@ def process_file_job(payload: Dict[str, Any]):
 
         logger.info(f"Target schema loaded: {len(target_column_types)} columns for validation")
 
+        # FETCH FOREIGN KEYS
+        foreign_keys_data = {}
+        if target_schema and target_table:
+            try:
+                cursor.execute("""
+                    SELECT
+                        kcu.column_name,
+                        ccu.table_schema AS foreign_table_schema,
+                        ccu.table_name AS foreign_table_name,
+                        ccu.column_name AS foreign_column_name
+                    FROM
+                        information_schema.table_constraints AS tc
+                        JOIN information_schema.key_column_usage AS kcu
+                          ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
+                        JOIN information_schema.constraint_column_usage AS ccu
+                          ON ccu.constraint_name = tc.constraint_name AND ccu.table_schema = tc.table_schema
+                    WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_name=%s AND tc.table_schema=%s
+                """, (target_table, target_schema))
+                
+                for fk in cursor.fetchall():
+                    col_name, f_schema, f_table, f_col = fk
+                    try:
+                        cursor.execute(f"SELECT DISTINCT {f_col} FROM {f_schema}.{f_table} WHERE {f_col} IS NOT NULL")
+                        valid_values = {str(r[0]).strip() for r in cursor.fetchall()}
+                        foreign_keys_data[col_name] = valid_values
+                        logger.info(f"Loaded {len(valid_values)} valid keys for FK {col_name}")
+                    except Exception as sub_e:
+                        logger.warning(f"Failed to load values for FK {col_name}: {sub_e}")
+            except Exception as e:
+                logger.error(f"Failed to query foreign keys: {e}")
+
         # 3. Procesar archivo por chunks
         if not file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
@@ -271,7 +302,8 @@ def process_file_job(payload: Dict[str, Any]):
             encoding=encoding,
             direct_load=direct_load,
             target_schema=target_schema,
-            target_table=target_table
+            target_table=target_table,
+            foreign_keys_data=foreign_keys_data
         )
         
         # 4. Actualizar batch a COMPLETED
@@ -295,11 +327,23 @@ def process_file_job(payload: Dict[str, Any]):
         
         logger.info(f"Batch {batch_id} completed: {stats['total_inserted']} records processed")
         
-        # 5. Auto-production si está habilitado (placeholder por ahora)
+        # 5. Auto-production si está habilitado
         if auto_production:
-            logger.info(f"Auto-production enabled for batch {batch_id}")
-            logger.warning("Auto-production requested but not implemented yet")
-            # TODO: Implementar process_staging_to_production_sync
+            logger.info(f"Auto-production enabled for batch {batch_id}. Queueing promotion job.")
+            from data_staging.workers.job_queue import create_job
+            
+            promote_job_id = create_job(
+                database_url=str(settings.DATABASE_URL),
+                job_type="PROMOTE_BATCH",
+                payload={
+                    "batch_id": batch_id,
+                    "target_schema": target_schema,
+                    "target_table": target_table,
+                    "dedup_columns": dedup_columns
+                },
+                priority=10
+            )
+            logger.info(f"Created promotion job {promote_job_id} for batch {batch_id}")
         
     except Exception as e:
         conn.rollback()
@@ -373,6 +417,20 @@ def create_staging_table(conn: psycopg2.extensions.connection, table_name: str):
     """)
     
     conn.commit()
+
+    # Parche: Asegurar que nuevas columnas existan en tablas staging legado
+    try:
+        cursor.execute(f"""
+            ALTER TABLE staging_data.{table_name}
+            ADD COLUMN IF NOT EXISTS data_quality_score NUMERIC(5,2) DEFAULT 95.0,
+            ADD COLUMN IF NOT EXISTS error_details JSONB,
+            ADD COLUMN IF NOT EXISTS is_duplicate BOOLEAN DEFAULT false;
+        """)
+        conn.commit()
+    except Exception as e:
+        logger.warning(f"Failed to alter staging table {table_name}. Might be fine: {e}")
+        conn.rollback()
+        
     logger.info(f"Staging table staging_data.{table_name} ready")
 
 
@@ -391,7 +449,8 @@ def process_file_in_chunks(
     encoding: str = "utf-8",
     direct_load: bool = False,
     target_schema: Optional[str] = None,
-    target_table: Optional[str] = None
+    target_table: Optional[str] = None,
+    foreign_keys_data: Optional[Dict[str, set]] = None
 ) -> Dict[str, Any]:
     """
     Procesa archivo en chunks usando Polars.
@@ -446,7 +505,8 @@ def process_file_in_chunks(
                     not_null_columns=not_null_columns,
                     direct_load=direct_load,
                     target_schema=target_schema,
-                    target_table=target_table
+                    target_table=target_table,
+                    foreign_keys_data=foreign_keys_data
                 )
                 
                 total_inserted += stats['inserted']
@@ -562,7 +622,8 @@ def process_single_chunk(
     not_null_columns: Optional[Dict[str, bool]] = None,
     direct_load: bool = False,
     target_schema: Optional[str] = None,
-    target_table: Optional[str] = None
+    target_table: Optional[str] = None,
+    foreign_keys_data: Optional[Dict[str, set]] = None
 ):
     """Helper to process a single chunk dataframe."""
     logger.info("--- WORKER CODE VERSION CHECK: NO TRUNCATE_ARG ---")
@@ -576,7 +637,8 @@ def process_single_chunk(
         column_mapping=column_mapping,
         selected_columns=selected_columns,
         target_column_types=target_column_types,
-        not_null_columns=not_null_columns
+        not_null_columns=not_null_columns,
+        foreign_keys_data=foreign_keys_data
     )
     
     # Carga Directa (COPY a Prod) vs Staging
@@ -646,7 +708,8 @@ def validate_and_prepare_chunk(
     column_mapping: Optional[Dict] = None,
     selected_columns: Optional[List[str]] = None,
     target_column_types: Optional[Dict[str, str]] = None,
-    not_null_columns: Optional[Dict[str, bool]] = None
+    not_null_columns: Optional[Dict[str, bool]] = None,
+    foreign_keys_data: Optional[Dict[str, set]] = None
 ) -> List[Dict[str, Any]]:
     """
     Valida y prepara registros de un chunk.
@@ -733,16 +796,36 @@ def validate_and_prepare_chunk(
 
                 target_type = target_column_types[col_name].lower()
                 is_not_null = (not_null_columns or {}).get(col_name, False)
+                has_foreign_key = bool(foreign_keys_data and col_name in foreign_keys_data)
+                
+                # Check for emptiness (None, empty string, or NaN)
+                import math
+                is_empty = (
+                    value is None or 
+                    str(value).strip() == "" or 
+                    str(value).strip().lower() == "nan" or
+                    str(value).strip().lower() == "null" or
+                    (isinstance(value, float) and math.isnan(value))
+                )
 
-                # Validar NULL en columnas NOT NULL
-                if (value is None or value == "") and is_not_null:
-                    validation_status = "FAILED"
-                    error_list.append(f"NULL value not allowed for '{col_name}' (NOT NULL constraint)")
-                    continue
-
-                # Solo validar tipo si hay valor
-                if value is None or value == "":
-                    continue
+                # Validar NULL en columnas NOT NULL o llaves foráneas requeridas
+                if is_empty:
+                    if is_not_null or has_foreign_key:
+                        validation_status = "FAILED"
+                        error_list.append(f"Empty value not allowed for '{col_name}' (Database NOT NULL constraint or Foreign Key)")
+                    continue  # IF it's intentionally empty and allowed by schema, simply skip further string analysis
+                
+                # Validate Foreign Key integrity
+                if has_foreign_key:
+                    val_str = str(value).strip()
+                    # Normalizamos los floats enteros que polars pudo haber exportado (ej: 10001.0 -> 10001)
+                    if val_str.endswith(".0"):
+                        val_str = val_str[:-2]
+                        
+                    if val_str not in foreign_keys_data[col_name]:
+                        validation_status = "FAILED"
+                        error_list.append(f"Foreign Key violation for '{col_name}': '{value}' not found in target table lookup")
+                        continue
 
                 # Log debug for first row only
                 if i == 0:

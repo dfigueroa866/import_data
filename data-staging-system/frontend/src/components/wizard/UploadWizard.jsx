@@ -16,6 +16,7 @@ const UploadWizard = () => {
         selectedTable: '',
         sourceName: '',
         batchId: '',
+        processType: '',
 
         // Step 2 data
         columnMappings: {},
@@ -63,6 +64,7 @@ const UploadWizard = () => {
             selectedTable: '',
             sourceName: '',
             batchId: '',
+            processType: '',
             columnMappings: {},
             columnToggles: {},
             dedupColumns: '',
@@ -176,7 +178,7 @@ const UploadWizard = () => {
                         ) : (
                             <span className="step-number">4</span>
                         )}
-                        <span className="step-label">Process to Staging</span>
+                        <span className="step-label">Process to Production</span>
                     </div>
                 </div>
             </div>

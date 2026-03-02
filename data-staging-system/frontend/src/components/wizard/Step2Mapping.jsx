@@ -162,7 +162,7 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
             };
 
             // Save to backend
-            await saveColumnMapping(wizardData.batchId, mappingData);
+            await saveColumnMapping(wizardData.batchId, mappingData, wizardData.processType);
 
             // Update wizard data
             updateWizardData({

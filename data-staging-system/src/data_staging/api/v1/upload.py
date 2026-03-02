@@ -467,6 +467,7 @@ class ProcessRequest(BaseModel):
     columns: Optional[List[str]] = None  # Lista de columnas a procesar
     column_mapping: Optional[Dict[str, ColumnMapping]] = None  # Mapeo de columnas
     direct_load: bool = False  # Si es true, carga directamente a producción (bypass staging)
+    auto_production: bool = False  # Si es true, encola PROMOTE_BATCH al final automáticamente
 
 @router.post("/batch/{batch_id}/process")
 async def process_batch(
@@ -507,6 +508,10 @@ async def process_batch(
         if request.direct_load:
             metadata["direct_load"] = True
             logger.info(f"Direct load requested for batch {batch_id}")
+            
+        if request.auto_production:
+            metadata["auto_production"] = True
+            logger.info(f"Auto-production enabled for batch {batch_id}")
         
         # 4. Guardar metadata actualizado
         db.execute(text("""
@@ -521,7 +526,7 @@ async def process_batch(
         db.commit()
         
         # 5. Obtener file_path
-        file_path = metadata.get("file_path")
+        file_path = metadata.get("aggregated_file_path") or metadata.get("file_path")
         if not file_path:
             file_path = str(settings.upload_path / f"{batch_id}_{batch.file_name}")
             
@@ -978,6 +983,7 @@ async def save_column_mapping(
             "column_mappings": mapping_data.get("column_mappings", {}),
             "column_toggles": mapping_data.get("column_toggles", {}),
             "dedup_columns": mapping_data.get("dedup_columns"),
+            "process_type": mapping_data.get("process_type"),
             "wizard_step": 2
         })
         
@@ -1050,88 +1056,35 @@ async def generate_preview(
         if isinstance(metadata, str):
             metadata = json.loads(metadata)
         
-        # 2. Get file path and mappings
-        file_path = Path(metadata.get("file_path", ""))
-        if not file_path.exists():
-            raise HTTPException(status_code=404, detail="File not found")
-        
+        # 2. Extract mappings and process_type
+        file_path = metadata.get("file_path", "")
         column_mappings = metadata.get("column_mappings", {})
         column_toggles = metadata.get("column_toggles", {})
-        dedup_columns = metadata.get("dedup_columns", "")
-        
-        # 3. Read sample data (first 20 rows)
+        process_type = metadata.get("process_type", "Other")
         file_analysis = metadata.get("file_analysis", {})
         encoding = file_analysis.get("encoding", "utf-8")
         delimiter = file_analysis.get("delimiter", ",")
         
-        sample_df = pl.read_csv(file_path, n_rows=20, encoding=encoding, separator=delimiter, ignore_errors=True, truncate_ragged_lines=True)
+        # 3. Process aggregation
+        from data_staging.services.aggregation_service import process_aggregation, AggregationError
         
-        # 4. Apply mappings and generate preview
-        preview_data = []
-        valid_count = 0
-        warning_count = 0
-        error_count = 0
+        try:
+            agg_stats, agg_file_path = process_aggregation(
+                file_path=file_path,
+                column_mappings=column_mappings,
+                column_toggles=column_toggles,
+                process_type=process_type,
+                encoding=encoding,
+                delimiter=delimiter
+            )
+        except AggregationError as ae:
+            raise HTTPException(status_code=400, detail=str(ae))
         
-        # Convert to list of dicts for iteration
-        sample_rows = sample_df.head(20).to_dicts()
+        # 4. Save path to aggregated file so worker uses it if Weekly/Monthly
+        if process_type in ["Weekly", "Monthly"] and not agg_stats.get("has_error"):
+            metadata["aggregated_file_path"] = str(agg_file_path)
         
-        for idx, row in enumerate(sample_rows):
-            original = row
-            processed = {}
-            warnings = []
-            errors = []
-            
-            # Apply mappings
-            for file_col, mapping_config in column_mappings.items():
-                if column_toggles.get(file_col, True):  # If toggle is ON
-                    target = mapping_config.get("target")
-                    default_value = mapping_config.get("default_value")
-                    
-                    if target:
-                        # Get value from file or use default
-                        value = original.get(file_col)
-                        if value is None or value == "" or (isinstance(value, float) and str(value) == 'nan'):
-                            if default_value:
-                                processed[target] = default_value
-                                warnings.append(f"Default value applied to {target}")
-                            else:
-                                processed[target] = None
-                        else:
-                            processed[target] = value
-            
-            # Determine status
-            if errors:
-                status = "error"
-                error_count += 1
-            elif warnings:
-                status = "warning"
-                warning_count += 1
-            else:
-                status = "valid"
-                valid_count += 1
-            
-            preview_data.append({
-                "row_number": idx + 1,
-                "original": original,
-                "processed": processed,
-                "status": status,
-                "warnings": warnings,
-                "errors": errors
-            })
-        
-        # 5. Calculate full file stats (estimate)
-        total_rows = file_analysis.get("estimated_total_rows", len(sample_df))
-        
-        # 6. Check for duplicates if dedup_columns specified
-        duplicate_count = 0
-        if dedup_columns and dedup_columns.strip():
-            dedup_cols = [col.strip() for col in dedup_columns.split(",")]
-            # Check in sample
-            processed_df = pd.DataFrame([item["processed"] for item in preview_data])
-            if all(col in processed_df.columns for col in dedup_cols):
-                duplicate_count = processed_df.duplicated(subset=dedup_cols).sum()
-        
-        # 7. Update metadata
+        # 5. Update metadata
         metadata["wizard_step"] = 3
         metadata["preview_generated"] = True
         
@@ -1148,22 +1101,16 @@ async def generate_preview(
         
         logger.info(f"Preview generated for batch {batch_id}")
         
+        preview_data = agg_stats.pop("preview_data", [])
+
         return {
             "batch_id": batch_id,
-            "total_rows": total_rows,
-            "valid_rows": valid_count,
-            "warning_rows": warning_count,
-            "error_rows": error_count,
-            "duplicate_rows": duplicate_count,
-            "preview_data": preview_data,
-            "validation_summary": {
-                "missing_required_fields": 0,  # TODO: implement
-                "invalid_data_types": error_count,
-                "duplicates_found": duplicate_count
-            },
+            "validation_summary": agg_stats,
             "target_schema": metadata.get("target_schema"),
             "target_table": metadata.get("target_table"),
-            "staging_table": batch.source_name
+            "staging_table": batch.source_name,
+            "process_type": process_type,
+            "preview_data": preview_data
         }
         
     except HTTPException:
@@ -1287,7 +1234,7 @@ def create_job(
         db.execute(query, {
             "job_id": job_id,
             "job_type": job_type,
-            "payload": json.dumps(payload),
+            "payload": json.dumps(payload, default=str),
             "priority": priority
         })
         db.commit()

@@ -20,7 +20,7 @@ El proceso inicia cuando un usuario o sistema externo envía un archivo para su 
 *   **Parámetros Clave**:
     *   `source_name`: Identificador del origen (ej. `sales_transactions`).
     *   `auto_process`: Si es `True`, inicia la ingesta a staging inmediatamente.
-    *   `auto_production`: Si es `True`, promueve los datos a producción automáticamente al terminar el staging.
+    *   `auto_production`: Si es `True`, promueve los datos a producción automáticamente al terminar el staging. (Útil para integraciones vía API automática, en la interfaz visual está desactivado por defecto).
     *   `production_table`: Tabla final de destino.
 *   **Acción del Sistema**:
     *   El servidor recibe el archivo y lo guarda en la carpeta `data/uploads/` con un ID único (Batch ID) para evitar colisiones.
@@ -37,7 +37,7 @@ Una vez guardado el archivo, el sistema libera la conexión del usuario (respond
     *   Después de cada bloque, el sistema verifica que los registros sean visibles en la base de datos antes de continuar con el siguiente.
 
 ### 3. Promoción a Producción
-Esta es la etapa crítica donde los datos pasan de ser "temporales" (Staging) a estar "disponibles" (Producción). Si `auto_production=True` fue activado, esto sucede inmediatamente después de cargar el último bloque de staging.
+Esta es la etapa crítica donde los datos pasan de ser "temporales" (Staging) a estar "disponibles" (Producción). En el flujo de la interfaz de usuario, este es un paso de **confirmación manual** que permite revisar los errores antes de hacer efectivos los cambios. Alternativamente, si la carga se hace vía API directa con `auto_production=True`, la promoción sucede automáticamente después de cargar el último bloque.
 
 *   **Procesamiento por Lotes (Batch Processing)**:
     *   Para optimizar el rendimiento y no bloquear la base de datos, la promoción se realiza en **lotes de 5,000 registros**.

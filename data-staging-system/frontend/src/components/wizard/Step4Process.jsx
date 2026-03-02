@@ -30,8 +30,8 @@ const Step4Process = ({ wizardData, updateWizardData, resetWizard, onComplete })
             setProcessing(true);
             setError('');
 
-            // Trigger processing with Direct Load enabled for WAL optimization
-            await startProcessing(wizardData.batchId, { direct_load: true });
+            // Trigger processing with auto-promotion enabled to allow graceful row rejection then direct Prod
+            await startProcessing(wizardData.batchId, { auto_production: false });
 
             // Start polling for progress
             const pollInterval = setInterval(async () => {
@@ -39,14 +39,16 @@ const Step4Process = ({ wizardData, updateWizardData, resetWizard, onComplete })
                 setProgress(progressData);
 
                 // Check if completed
-                if (progressData.status === 'COMPLETED' || progressData.status === 'PROMOTED') {
+                if (progressData.status === 'PROMOTED') {
                     clearInterval(pollInterval);
                     setCompleted(true);
                     setProcessing(false);
-                    // If direct load was used (or it jumped to PROMOTED), we are already done
-                    if (progressData.direct_load || progressData.status === 'PROMOTED') {
-                        setPromoteSuccess(true);
-                    }
+                    setPromoteSuccess(true);
+                } else if (!progressData.auto_production && progressData.status === 'COMPLETED') {
+                    // Fallback in case backend doesn't support auto_production correctly
+                    clearInterval(pollInterval);
+                    setCompleted(true);
+                    setProcessing(false);
                 } else if (progressData.status === 'FAILED') {
                     clearInterval(pollInterval);
                     setError(progressData.error_message || 'Processing failed');

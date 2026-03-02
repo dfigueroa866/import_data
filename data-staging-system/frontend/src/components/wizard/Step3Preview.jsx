@@ -35,86 +35,8 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
         }
     };
 
-    const getStatusColor = (status) => {
-        switch (status) {
-            case 'valid': return 'green';
-            case 'warning': return 'orange';
-            case 'error': return 'red';
-            default: return 'gray';
-        }
-    };
-
-    const getStatusIcon = (status) => {
-        switch (status) {
-            case 'valid': return '✓';
-            case 'warning': return '⚠';
-            case 'error': return '✕';
-            default: return '○';
-        }
-    };
-
-    const renderPreviewTable = () => {
-        try {
-            if (!previewData?.preview_data || previewData.preview_data.length === 0) {
-                return <div className="no-data-message">No preview data available.</div>;
-            }
-
-            const firstRow = previewData.preview_data[0];
-            const processedKeys = firstRow && firstRow.processed ? Object.keys(firstRow.processed) : [];
-
-            if (processedKeys.length === 0) {
-                return <div className="no-data-message">No processed columns found in the preview data.</div>;
-            }
-
-            return (
-                <table className="preview-table">
-                    <thead>
-                        <tr>
-                            <th>#</th>
-                            <th>Status</th>
-                            {processedKeys.map((key) => (
-                                <th key={key}>{key}</th>
-                            ))}
-                            <th>Issues</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {previewData.preview_data.map((row, idx) => {
-                            const processed = row.processed || {};
-                            return (
-                                <tr key={idx} className={`row-${row.status}`}>
-                                    <td className="row-number">{row.row_number}</td>
-                                    <td className="row-status">
-                                        <span className={`status-badge status-${row.status}`}>
-                                            {getStatusIcon(row.status)}
-                                        </span>
-                                    </td>
-                                    {processedKeys.map((key) => (
-                                        <td key={key} className="data-cell">
-                                            {typeof processed[key] === 'object' && processed[key] !== null
-                                                ? JSON.stringify(processed[key])
-                                                : String(processed[key] !== undefined && processed[key] !== null ? processed[key] : '')}
-                                        </td>
-                                    ))}
-                                    <td className="issues-cell">
-                                        {row.warnings?.map((warning, i) => (
-                                            <div key={i} className="issue warning">⚠ {warning}</div>
-                                        ))}
-                                        {row.errors?.map((error, i) => (
-                                            <div key={i} className="issue error">✕ {error}</div>
-                                        ))}
-                                    </td>
-                                </tr>
-                            );
-                        })}
-                    </tbody>
-                </table>
-            );
-        } catch (err) {
-            console.error("Table Render Error:", err);
-            return <div className="error-message">Error rendering table: {err.message}</div>;
-        }
-    };
+    const val = previewData?.validation_summary || {};
+    const processType = previewData?.process_type || 'Other';
 
     if (loading) {
         return (
@@ -165,31 +87,176 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
         <div className="step3-preview">
             <h2>Step 3: Preview & Validate</h2>
             <p className="step-description">
-                Review transformed data and validation results before processing to staging.
+                Review transformed data and validation results before continuing.
             </p>
 
-            {/* Summary Cards */}
-            <div className="preview-summary">
-                <div className="summary-card total">
-                    <div className="card-value">{previewData.total_rows || 0}</div>
-                    <div className="card-label">Total Rows</div>
-                </div>
-                {/* Removed Valid card as requested */}
-                <div className="summary-card warning">
-                    <div className="card-value">{previewData.warning_rows || 0}</div>
-                    <div className="card-label">Warnings</div>
-                </div>
-                <div className="summary-card error">
-                    <div className="card-value">{previewData.error_rows || 0}</div>
-                    <div className="card-label">Errors</div>
-                </div>
-                {(previewData.duplicate_rows || 0) > 0 && (
-                    <div className="summary-card duplicate">
-                        <div className="card-value">{previewData.duplicate_rows}</div>
-                        <div className="card-label">Duplicates</div>
+            {/* Validation Dashboard */}
+            {processType !== 'Other' ? (
+                <>
+                    {val.has_error && (
+                        <div className="validation-alert error">
+                            ⚠ Error de Validación: {val.error_detail}
+                        </div>
+                    )}
+                    <div className="preview-summary validation-grid">
+                        <div className="summary-card stat-pair">
+                            <div className="card-label">Filas</div>
+                            <div className="stat-compare">
+                                <div className="stat-box">
+                                    <span className="value">{val.total_rows?.toLocaleString() || 0}</span>
+                                    <span className="label">Originales</span>
+                                </div>
+                                <span className="arrow">→</span>
+                                <div className="stat-box">
+                                    <span className="value">{val.grouped_rows?.toLocaleString() || 0}</span>
+                                    <span className="label">Agrupadas</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className={`summary-card stat-pair ${val.diff_qty !== 0 ? 'error-state' : ''}`}>
+                            <div className="card-label">Cantidades (QTY)</div>
+                            <div className="stat-compare">
+                                <div className="stat-box">
+                                    <span className="value">{val.orig_qty?.toLocaleString() || 0}</span>
+                                    <span className="label">Original</span>
+                                </div>
+                                <span className="arrow">→</span>
+                                <div className="stat-box">
+                                    <span className="value">{val.agg_qty?.toLocaleString() || 0}</span>
+                                    <span className="label">Agrupado</span>
+                                </div>
+                            </div>
+                            {val.diff_qty !== 0 && (
+                                <div className="diff-alert">
+                                    Diferencia: {val.diff_qty}
+                                </div>
+                            )}
+                        </div>
+
+                        {val.orig_total > 0 && (
+                            <div className={`summary-card stat-pair ${Math.abs(val.diff_total || 0) > 0.001 ? 'error-state' : ''}`}>
+                                <div className="card-label">Montos (Total Price)</div>
+                                <div className="stat-compare">
+                                    <div className="stat-box">
+                                        <span className="value">${val.orig_total?.toLocaleString() || 0}</span>
+                                        <span className="label">Original</span>
+                                    </div>
+                                    <span className="arrow">→</span>
+                                    <div className="stat-box">
+                                        <span className="value">${val.agg_total?.toLocaleString() || 0}</span>
+                                        <span className="label">Agrupado</span>
+                                    </div>
+                                </div>
+                                {Math.abs(val.diff_total || 0) > 0.001 && (
+                                    <div className="diff-alert">
+                                        Diferencia: ${val.diff_total}
+                                    </div>
+                                )}
+                            </div>
+                        )}
                     </div>
-                )}
-            </div>
+
+                    {/* Detailed Validation Report */}
+                    <div className="validation-report">
+                        <h4 className="report-title">Reporte de Agregación y Validaciones (Basado en weekly.py)</h4>
+                        <div className="report-grid">
+                            <div className="report-item">
+                                <span className="report-label">Filas Originales Previas a Limpieza (Drop NA):</span>
+                                <span className="report-value">{val.df_before_dropna?.toLocaleString() || val.total_rows?.toLocaleString() || 0}</span>
+                            </div>
+                            <div className="report-item text-danger">
+                                <span className="report-label">Filas Eliminadas por Nulos en Columnas Requeridas:</span>
+                                <span className="report-value">- {val.dropped_rows?.toLocaleString() || 0}</span>
+                            </div>
+                            <div className="report-item">
+                                <span className="report-label">Filas Limpias Efectivas previas al agrupamiento:</span>
+                                <span className="report-value">{val.df_after_dropna?.toLocaleString() || val.total_rows?.toLocaleString() || 0}</span>
+                            </div>
+
+                            <hr className="report-divider" />
+
+                            <div className="report-item">
+                                <span className="report-label">Total de Filas Consolidadas post-agrupamiento:</span>
+                                <span className="report-value">{val.grouped_rows?.toLocaleString() || 0}</span>
+                            </div>
+                            <div className="report-item text-success">
+                                <span className="report-label">Ahorro de Filas (Filas Comprimidas):</span>
+                                <span className="report-value">- {val.consolidated_rows?.toLocaleString() || 0}</span>
+                            </div>
+                            <div className="report-item text-info">
+                                <span className="report-label">Factor métrico de compresión:</span>
+                                <span className="report-value badge">{val.compression_factor || 1}x</span>
+                            </div>
+
+                            <hr className="report-divider" />
+
+                            <div className="report-item">
+                                <span className="report-label">Validación de Integridad de Sumatorias por Location (Loc):</span>
+                                <span className={`report-status ${val.loc_diff_count === 0 ? 'success' : 'error'}`}>
+                                    {val.loc_diff_count === 0 ? 'OK ✓ No hay diferencias' : `${val.loc_diff_count} anomalías detectadas ⚠`}
+                                </span>
+                            </div>
+                            <div className="report-item">
+                                <span className="report-label">Validación de Integridad de Sumatorias por Producto (dmd_unit):</span>
+                                <span className={`report-status ${val.dmd_unit_diff_count === 0 ? 'success' : 'error'}`}>
+                                    {val.dmd_unit_diff_count === 0 ? 'OK ✓ No hay diferencias' : `${val.dmd_unit_diff_count} anomalías detectadas ⚠`}
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+                </>
+            ) : (
+                <div className="preview-summary validation-grid">
+                    <div className="summary-card stat-pair">
+                        <div className="card-label">Modo: Other (Carga Directa)</div>
+                        <div className="stat-compare">
+                            <div className="stat-box">
+                                <span className="value">{val.total_rows?.toLocaleString() || 0}</span>
+                                <span className="label">Originales</span>
+                            </div>
+                            <span className="arrow">→</span>
+                            <div className="stat-box">
+                                <span className="value">0</span>
+                                <span className="label">Agrupadas</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Preview Table */}
+            {previewData?.preview_data && previewData.preview_data.length > 0 ? (
+                <div className="preview-table-container" style={{ marginTop: '2rem' }}>
+                    <h3>Data Preview (First 20 Aggregated Rows)</h3>
+                    <div className="table-wrapper">
+                        <table className="preview-table">
+                            <thead>
+                                <tr>
+                                    {Object.keys(previewData.preview_data[0]).map((key) => (
+                                        <th key={key}>{key}</th>
+                                    ))}
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {previewData.preview_data.map((row, index) => (
+                                    <tr key={index}>
+                                        {Object.values(row).map((val, i) => (
+                                            <td key={i}>{val !== null ? String(val) : ''}</td>
+                                        ))}
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            ) : (
+                <div className="preview-table-container" style={{ marginTop: '2rem', padding: '1rem', background: '#ffebee', color: '#c62828', borderRadius: '4px' }}>
+                    <h3>Data Preview Not Available</h3>
+                    <p>Debug info: previewData.preview_data type is {typeof previewData?.preview_data}</p>
+                    <pre style={{ maxWidth: '100%', overflow: 'auto' }}>{JSON.stringify(previewData, null, 2)}</pre>
+                </div>
+            )}
 
             {/* Target Info */}
             <div className="target-info">
@@ -207,14 +274,6 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                 </div>
             </div>
 
-            {/* Preview Data Table */}
-            <div className="preview-table-section">
-                <h3>Data Preview (First 20 Rows)</h3>
-                <div className="preview-table-container">
-                    {renderPreviewTable()}
-                </div>
-            </div>
-
             <div className="step-actions">
                 <Button variant="secondary" onClick={prevStep}>
                     ← Back to Mapping
@@ -223,7 +282,7 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                     variant="primary"
                     onClick={nextStep}
                 >
-                    Process to Staging →
+                    Confirm & Process →
                 </Button>
             </div>
         </div>

@@ -11,6 +11,7 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
     const [tables, setTables] = useState([]);
     const [selectedSchema, setSelectedSchema] = useState(wizardData.selectedSchema || '');
     const [selectedTable, setSelectedTable] = useState(wizardData.selectedTable || '');
+    const [processType, setProcessType] = useState(wizardData.processType || '');
     const [loading, setLoading] = useState(false);
     const [uploading, setUploading] = useState(false);
     const [error, setError] = useState('');
@@ -98,6 +99,10 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
             setError('Please select a file');
             return;
         }
+        if (!processType) {
+            setError('Please select a Process Type (Weekly/Monthly/Other)');
+            return;
+        }
         if (!selectedSchema) {
             setError('Please select a schema');
             return;
@@ -112,7 +117,7 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
             setError('');
 
             // Upload file and get headers
-            const response = await uploadFileTemp(file, selectedSchema, selectedTable);
+            const response = await uploadFileTemp(file, selectedSchema, selectedTable, processType);
 
             // Update wizard data
             updateWizardData({
@@ -123,6 +128,7 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
                 selectedTable: selectedTable,
                 sourceName: response.source_name,
                 batchId: response.batch_id,
+                processType: processType,
                 estimatedRows: response.estimated_rows,
                 fileType: response.file_type
             });
@@ -174,6 +180,7 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
                                             fileName: '',
                                             fileHeaders: [],
                                             batchId: '',
+                                            processType: '',
                                             sourceName: '',
                                             estimatedRows: 0,
                                             fileType: null
@@ -204,7 +211,22 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
 
                 {/* Schema & Table Selection */}
                 <div className="selection-section">
-                    <h3>Select Production Table</h3>
+                    <h3>Select Configuration</h3>
+
+                    <div className="form-group">
+                        <label htmlFor="processType">Process Type *</label>
+                        <select
+                            id="processType"
+                            value={processType}
+                            onChange={(e) => setProcessType(e.target.value)}
+                            disabled={loading}
+                        >
+                            <option value="">-- Select Process Type --</option>
+                            <option value="Weekly">Weekly</option>
+                            <option value="Monthly">Monthly</option>
+                            <option value="Other">Other</option>
+                        </select>
+                    </div>
 
                     <div className="form-group">
                         <label htmlFor="schema">Schema *</label>
@@ -258,7 +280,7 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
                 <Button
                     variant="primary"
                     onClick={handleSubmit}
-                    disabled={!file || !selectedSchema || !selectedTable || uploading}
+                    disabled={!file || !selectedSchema || !selectedTable || !processType || uploading}
                 >
                     {uploading ? (
                         <>

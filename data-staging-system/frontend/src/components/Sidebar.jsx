@@ -49,6 +49,11 @@ const Sidebar = () => {
                     <NavLink
                         key={item.path}
                         to={item.path}
+                        onClick={(e) => {
+                            if (item.path === '/upload' && window.location.pathname === '/upload') {
+                                window.location.reload();
+                            }
+                        }}
                         className={({ isActive }) =>
                             `sidebar-link ${isActive ? 'sidebar-link-active' : ''}`
                         }

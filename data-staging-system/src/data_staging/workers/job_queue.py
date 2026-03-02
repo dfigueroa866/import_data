@@ -242,7 +242,7 @@ def create_job(database_url: str, job_type: str, payload: Dict[str, Any], priori
             INSERT INTO staging_meta.job_queue (job_type, payload, priority)
             VALUES (%s, %s, %s)
             RETURNING job_id
-        """, (job_type, json.dumps(payload), priority))
+        """, (job_type, json.dumps(payload, default=str), priority))
         
         job_id = cursor.fetchone()[0]
         conn.commit()

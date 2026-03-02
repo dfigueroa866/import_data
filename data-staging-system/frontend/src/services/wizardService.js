@@ -8,12 +8,13 @@ import api from './api';
  * Upload file for wizard (temp upload with header parsing)
  * Step 1 - Returns batch_id and file headers
  */
-export const uploadFileTemp = async (file, targetSchema = null, targetTable = null) => {
+export const uploadFileTemp = async (file, targetSchema = null, targetTable = null, processType = null) => {
     try {
         const formData = new FormData();
         formData.append('file', file);
         if (targetSchema) formData.append('target_schema', targetSchema);
         if (targetTable) formData.append('target_table', targetTable);
+        if (processType) formData.append('process_type', processType);
 
         const response = await api.post('/api/v1/upload/file-temp', formData, {
             headers: {
@@ -31,8 +32,11 @@ export const uploadFileTemp = async (file, targetSchema = null, targetTable = nu
  * Save column mappings for a batch
  * Step 2 - Saves mappings, toggles, and dedup columns
  */
-export const saveColumnMapping = async (batchId, mappingData) => {
+export const saveColumnMapping = async (batchId, mappingData, processType = null) => {
     try {
+        if (processType) {
+            mappingData.process_type = processType;
+        }
         const response = await api.post(`/api/v1/upload/batch/${batchId}/mapping`, mappingData);
         return response.data;
     } catch (error) {
