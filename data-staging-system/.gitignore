@@ -1,0 +1,30 @@
+# Entorno Virtual Python
+venv/
+env/
+.env
+
+# Logs
+logs/
+*.log
+
+# Cargas y Data Local
+data/uploads/
+temp_uploads/
+*.csv
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+.pytest_cache/
+.coverage
+
+# Herramientas
+.vscode/
+
+# Frontend
+frontend/node_modules/
+frontend/build/
+frontend/dist/
+frontend/.env

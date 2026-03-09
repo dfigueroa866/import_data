@@ -1329,83 +1329,53 @@ async def download_rejected_records(
     db: Session = Depends(get_database_session)
 ):
     """
-    Download rejected records as CSV
+    Descarga los registros rechazados desde el archivo en disco generado durante la validación.
+    No accede a ninguna tabla en BD — cero WAL, cero espacio extra en Supabase.
     """
     try:
-        # Get staging table name
-        batch = db.execute(text("SELECT source_name FROM staging_meta.batch_control WHERE batch_id = :batch_id"), {"batch_id": batch_id}).fetchone()
+        # Obtener ruta del archivo desde metadata del batch
+        batch = db.execute(
+            text("SELECT metadata FROM staging_meta.batch_control WHERE batch_id = :batch_id"),
+            {"batch_id": batch_id}
+        ).fetchone()
+
         if not batch:
             raise HTTPException(status_code=404, detail="Batch not found")
-            
-        staging_table = batch.source_name
-        
-        # Function to check if table exists
-        def check_table_exists(table_name):
-            return db.execute(text(f"""
-                SELECT EXISTS (
-                    SELECT 1 FROM information_schema.tables 
-                    WHERE table_schema = 'staging_data' 
-                    AND table_name = :table_name
-                )
-            """), {"table_name": table_name}).scalar()
-            
-        # 1. Try exact match
-        if not check_table_exists(staging_table):
-            # 2. Try with stage_ prefix (standard worker logic)
-            safe_name = staging_table.lower().replace(' ', '_').replace('-', '_')
-            staging_table = f"stage_{safe_name}"
-            
-            if not check_table_exists(staging_table):
-                 # 3. Try removing stage_ if it was double added? Unlikely but safe
-                 if staging_table.startswith("stage_stage_"):
-                     staging_table = staging_table.replace("stage_stage_", "stage_")
-                     if not check_table_exists(staging_table):
-                         raise HTTPException(status_code=404, detail=f"Staging data not found (table {staging_table} missing)")
-                 else:
-                     raise HTTPException(status_code=404, detail=f"Staging data not found (table {batch.source_name} or {staging_table} missing)")
-        
-        # Generator function for streaming CSV
-        async def iter_csv():
-            # CSV Header
-            yield "batch_id,source_row_number,validation_status,error_details,raw_data\n"
-            
-            # Query in chunks
-            stmt = text(f"""
-                SELECT batch_id, source_row_number, validation_status, error_details, raw_data
-                FROM staging_data.{staging_table}
-                WHERE batch_id = :batch_id
-                AND validation_status != 'PASSED'
-            """).execution_options(yield_per=1000)
-            
-            result_proxy = db.execute(stmt, {"batch_id": batch_id})
-            
-            for row in result_proxy:
-                # Format row as CSV line
-                # Simple CSV escaping for now
-                def escape_csv(val):
-                    if val is None: return ""
-                    s = str(val).replace('"', '""')
-                    if ',' in s or '"' in s or '\n' in s:
-                        return f'"{s}"'
-                    return s
-                
-                line = [
-                    escape_csv(row.batch_id),
-                    escape_csv(row.source_row_number),
-                    escape_csv(row.validation_status),
-                    escape_csv(row.error_details),
-                    escape_csv(row.raw_data)
-                ]
-                yield ",".join(line) + "\n"
+
+        metadata = batch.metadata or {}
+        if isinstance(metadata, str):
+            import json as _json
+            metadata = _json.loads(metadata)
+
+        rejected_file_path = metadata.get("rejected_temp_file")
+
+        if not rejected_file_path or not Path(rejected_file_path).exists():
+            # Si no hay archivo = no hubo rechazados, devolver CSV vacío
+            async def empty_csv():
+                yield "source_row_number\tvalidation_status\terror_details\traw_data\n"
+
+            return StreamingResponse(
+                empty_csv(),
+                media_type="text/csv",
+                headers={"Content-Disposition": f"attachment; filename=rejected_records_{batch_id}.csv"}
+            )
+
+        # Streaming directo desde disco — sin cargar todo en memoria
+        def stream_file():
+            with open(rejected_file_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    yield line
 
         return StreamingResponse(
-            iter_csv(),
+            stream_file(),
             media_type="text/csv",
             headers={"Content-Disposition": f"attachment; filename=rejected_records_{batch_id}.csv"}
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error downloading rejected: {e}")
+        logger.error(f"Error downloading rejected records: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 @router.delete("/batch/{batch_id}")
 async def delete_batch(

@@ -52,7 +52,7 @@ def start_workers(num_workers: int = 3):
             database_url=str(settings.DATABASE_URL),
             worker_id=worker_id,
             poll_interval=5,
-            use_notify=True  # Usar LISTEN/NOTIFY
+            use_notify=False  # Disabled LISTEN/NOTIFY string connection tie for Supabase pooler
         )
         
         # Registrar handlers
@@ -104,7 +104,8 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
     
     # Número de workers (configurable)
-    num_workers = 3  # getattr(settings, 'num_workers', 3)
+    # Reducido a 1 para evitar agotar el pool de 15 conexiones (Supabase Port 5432)
+    num_workers = 1  # getattr(settings, 'num_workers', 3)
     
     logger.info("=" * 50)
     logger.info("Data Staging Workers")

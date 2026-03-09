@@ -5,6 +5,7 @@ import re
 import numpy as np
 import io
 import csv
+import uuid
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 from pathlib import Path
@@ -15,8 +16,8 @@ from data_staging.config import settings
 logger = logging.getLogger(__name__)
 
 # Configuración de tamaños para procesamiento
-CHUNK_SIZE_RECORDS = 100000
-BATCH_SIZE_INSERT = 10000
+CHUNK_SIZE_RECORDS = 1000000
+BATCH_SIZE_INSERT = 50000
 
 # Regex para caracteres de control inválidos que rompen CSV/JSON
 INVALID_CHARS_REGEX = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
@@ -220,15 +221,35 @@ def process_file_job(payload: Dict[str, Any]):
         delimiter = file_analysis.get("delimiter", ",")
         encoding = file_analysis.get("encoding", "utf-8")
 
-        # 3. Crear tabla staging si no existe (siempre se crea para logs de error)
+        # 3. Preparar archivos en disco (válidos y rechazados) — sin tablas staging en BD
+        temp_dir = Path(settings.TEMP_PATH) if hasattr(settings, 'TEMP_PATH') else Path("temp_uploads")
+        temp_dir.mkdir(parents=True, exist_ok=True)
+
+        valid_temp_file   = temp_dir / f"{batch_id}_valid_records.csv"
+        rejected_temp_file = temp_dir / f"{batch_id}_rejected_records.csv"
+
+        # staging_table sigue existiendo como nombre lógico pero ya NO se crea ni se usa en BD.
+        # Se mantiene la variable por compatibilidad con firmas internas que aún la reciben.
         safe_source_name = source_name.lower().replace(' ', '_').replace('-', '_')
-        staging_table = f"stage_{safe_source_name}"
-        create_staging_table(conn, staging_table)
-        
-        # LIMPIEZA: Eliminar registros previos de este batch para evitar duplicados en reintentos
-        cursor.execute(f"DELETE FROM staging_data.{staging_table} WHERE batch_id = %s", (batch_id,))
+        staging_table = f"stage_{safe_source_name}"  # solo nombre lógico, no se crea
+
+        # Persistir rutas en metadata para que promotion_worker y el endpoint de descarga las encuentren
+        cursor.execute("""
+            UPDATE staging_meta.batch_control
+            SET metadata = COALESCE(metadata, '{}'::jsonb)
+                        || jsonb_build_object(
+                               'valid_temp_file',    %s::text,
+                               'rejected_temp_file', %s::text
+                           )
+            WHERE batch_id = %s
+        """, (str(valid_temp_file), str(rejected_temp_file), batch_id))
         conn.commit()
-        logger.info(f"Cleared previous staging data for batch {batch_id} in {staging_table}")
+
+        # LIMPIEZA: si es un reintento borrar archivos previos del mismo batch
+        for f in (valid_temp_file, rejected_temp_file):
+            if f.exists():
+                f.unlink()
+        logger.info(f"Disk files prepared for batch {batch_id}")
         
         not_null_columns = {}
         if not target_column_types and target_schema and target_table:
@@ -283,7 +304,7 @@ def process_file_job(payload: Dict[str, Any]):
             except Exception as e:
                 logger.error(f"Failed to query foreign keys: {e}")
 
-        # 3. Procesar archivo por chunks
+        # 4. Procesar archivo por chunks
         if not file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
 
@@ -295,15 +316,17 @@ def process_file_job(payload: Dict[str, Any]):
             source_name=source_name,
             column_mapping=column_mapping,
             selected_columns=selected_columns,
-            job_id=job_id,  # Para reportar progreso
-            target_column_types=target_column_types,  # Pass schema for validation
+            job_id=job_id,
+            target_column_types=target_column_types,
             not_null_columns=not_null_columns,
             delimiter=delimiter,
             encoding=encoding,
             direct_load=direct_load,
             target_schema=target_schema,
             target_table=target_table,
-            foreign_keys_data=foreign_keys_data
+            foreign_keys_data=foreign_keys_data,
+            valid_temp_file=valid_temp_file,
+            rejected_temp_file=rejected_temp_file
         )
         
         # 4. Actualizar batch a COMPLETED
@@ -450,7 +473,9 @@ def process_file_in_chunks(
     direct_load: bool = False,
     target_schema: Optional[str] = None,
     target_table: Optional[str] = None,
-    foreign_keys_data: Optional[Dict[str, set]] = None
+    foreign_keys_data: Optional[Dict[str, set]] = None,
+    valid_temp_file: Optional[Path] = None,
+    rejected_temp_file: Optional[Path] = None
 ) -> Dict[str, Any]:
     """
     Procesa archivo en chunks usando Polars.
@@ -506,7 +531,9 @@ def process_file_in_chunks(
                     direct_load=direct_load,
                     target_schema=target_schema,
                     target_table=target_table,
-                    foreign_keys_data=foreign_keys_data
+                    foreign_keys_data=foreign_keys_data,
+                    valid_temp_file=valid_temp_file,
+                    rejected_temp_file=rejected_temp_file
                 )
                 
                 total_inserted += stats['inserted']
@@ -561,7 +588,9 @@ def process_file_in_chunks(
                     not_null_columns=not_null_columns,
                     direct_load=direct_load,
                     target_schema=target_schema,
-                    target_table=target_table
+                    target_table=target_table,
+                    valid_temp_file=valid_temp_file,
+                    rejected_temp_file=rejected_temp_file
                 )
                 
                 total_inserted += stats['inserted']
@@ -623,7 +652,9 @@ def process_single_chunk(
     direct_load: bool = False,
     target_schema: Optional[str] = None,
     target_table: Optional[str] = None,
-    foreign_keys_data: Optional[Dict[str, set]] = None
+    foreign_keys_data: Optional[Dict[str, set]] = None,
+    valid_temp_file: Optional[Path] = None,
+    rejected_temp_file: Optional[Path] = None
 ):
     """Helper to process a single chunk dataframe."""
     logger.info("--- WORKER CODE VERSION CHECK: NO TRUNCATE_ARG ---")
@@ -641,54 +672,76 @@ def process_single_chunk(
         foreign_keys_data=foreign_keys_data
     )
     
-    # Carga Directa (COPY a Prod) vs Staging
+    # Carga Directa (COPY a Prod) vs Temp File (Post-Staging Validation)
+    
+    passed_records = [r for r in processed_records if r["validation_status"] == "PASSED"]
+    failed_records = [r for r in processed_records if r["validation_status"] == "FAILED"]
+    
+    db_inserted = 0
+    db_rejected = 0
+
     if direct_load and target_schema and target_table:
-        db_inserted = 0
-        db_rejected = 0
-        
-        # 1. Identificar registros PASSED
-        passed_records = [r for r in processed_records if r["validation_status"] == "PASSED"]
-        failed_records = [r for r in processed_records if r["validation_status"] == "FAILED"]
-        
-        # 2. Inyectar PASSED directamente vía COPY
+        # Modo ultra-rápido: pasa a prod directo
         if passed_records:
-            # IMPORTANTE: Solo incluir columnas que están en el mapping.
-            # Esto permite que los DEFAULTS de la base de datos funcionen para columnas no mapeadas.
             target_cols = [c for c in column_mapping.keys() if c in target_column_types]
-            
-            # Si no hay mapeo, NO caemos en fallback de todas las columnas si es direct_load
-            # porque eso suele romper los defaults de la BD.
-            if not target_cols:
-                logger.warning(f"No mapped columns found for direct ingestion of batch {batch_id}. Skipping COPY.")
-                db_inserted = 0
-            else:
-                # DEBUG: Imprimir columnas a ingerir
-                logger.info(f"DIRECT INGESTION: Targeting columns: {target_cols}")
-                
+            if target_cols:
                 ingestor = DirectIngestor(conn, target_schema, target_table, target_cols)
                 ingestor.add_records(passed_records)
                 ingestor.flush()
                 db_inserted = len(passed_records)
-        
-        if failed_records:
-            _, db_rejected = insert_records_in_batches(
-                conn=conn,
-                staging_table=staging_table,
-                records=failed_records,
-                batch_size=BATCH_SIZE_INSERT
-            )
-    else:
-        # Comportamiento tradicional: todo a Staging
-        db_inserted, db_rejected = insert_records_in_batches(
-            conn=conn,
-            staging_table=staging_table,
-            records=processed_records,
-            batch_size=BATCH_SIZE_INSERT
-        )
-    
+    elif valid_temp_file:
+        # Modo estándar: escribir PASSED a CSV temporal local
+        if passed_records:
+            target_cols = [c for c in column_mapping.keys() if c in target_column_types] if target_column_types else list(column_mapping.keys())
+            
+            # Write to temporary file line by line
+            file_exists = valid_temp_file.exists()
+            with open(valid_temp_file, "a", encoding="utf-8", newline="") as f:
+                writer = csv.writer(f, delimiter="\t", lineterminator="\n", quoting=csv.QUOTE_MINIMAL)
+                if not file_exists:
+                    # Opcionalmente escribir headers (no para postgres COPY si se especifica los cols exactos)
+                    # Pero ayuda para debuggear
+                    writer.writerow(target_cols + ['_batch_id_', '_source_row_number_'])
+                
+                for pr in passed_records:
+                    p_data = json.loads(pr["processed_data"])
+                    
+                    row_values = []
+                    for col in target_cols:
+                        val = p_data.get(col)
+                        if val is None or val == "" or (isinstance(val, float) and np.isnan(val)):
+                            row_values.append("\\N") # Postgres NULL
+                        else:
+                            s_val = str(val).replace("\t", " ").replace("\n", " ").replace("\r", " ")
+                            row_values.append(s_val)
+                    
+                    # Añadir metadata
+                    row_values.append(pr["batch_id"])
+                    row_values.append(str(pr["source_row_number"]))
+                    writer.writerow(row_values)
+            
+            db_inserted = len(passed_records)
+
+    # FALLIDOS → archivo en disco (no staging en BD, cero WAL)
+    if failed_records and rejected_temp_file is not None:
+        file_exists = rejected_temp_file.exists()
+        with open(rejected_temp_file, "a", encoding="utf-8", newline="") as rf:
+            writer = csv.writer(rf, delimiter="\t", lineterminator="\n", quoting=csv.QUOTE_MINIMAL)
+            if not file_exists:
+                writer.writerow(["source_row_number", "validation_status",
+                                  "error_details", "raw_data"])
+            for fr in failed_records:
+                writer.writerow([
+                    fr["source_row_number"],
+                    fr["validation_status"],
+                    fr.get("error_details") or "",
+                    fr.get("raw_data") or ""
+                ])
+        db_rejected = len(failed_records)
+
     # Calcular stats reales basados en validación
-    invalid_count = sum(1 for r in processed_records if r["validation_status"] == "FAILED")
-    valid_count = len(processed_records) - invalid_count
+    invalid_count = len(failed_records)
+    valid_count = len(passed_records)
     
     # Calcular score promedio
     chunk_quality = np.mean([r["data_quality_score"] for r in processed_records]) if processed_records else 0
