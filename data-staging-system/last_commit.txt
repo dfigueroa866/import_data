@@ -1,0 +1,2611 @@
+commit 1d11b6514d35f16246cfba35086ed238d16e67f8
+Author: David Figueroa <dfigueroa866@gmail.com>
+Date:   Mon Mar 9 13:49:02 2026 -0600
+
+    Commit solo archivos delimitados comas - commit
+
+diff --git a/data-staging-system/.gitignore b/data-staging-system/.gitignore
+new file mode 100644
+index 0000000..bd4dc46
+--- /dev/null
++++ b/data-staging-system/.gitignore
+@@ -0,0 +1,30 @@
++# Entorno Virtual Python
++venv/
++env/
++.env
++
++# Logs
++logs/
++*.log
++
++# Cargas y Data Local
++data/uploads/
++temp_uploads/
++*.csv
++
++# Python Cache
++__pycache__/
++*.py[cod]
++*$py.class
++*.pyc
++.pytest_cache/
++.coverage
++
++# Herramientas
++.vscode/
++
++# Frontend
++frontend/node_modules/
++frontend/build/
++frontend/dist/
++frontend/.env
+diff --git a/data-staging-system/run_workers.py b/data-staging-system/run_workers.py
+index 98b8125..6da3311 100644
+--- a/data-staging-system/run_workers.py
++++ b/data-staging-system/run_workers.py
+@@ -52,7 +52,7 @@ def start_workers(num_workers: int = 3):
+             database_url=str(settings.DATABASE_URL),
+             worker_id=worker_id,
+             poll_interval=5,
+-            use_notify=True  # Usar LISTEN/NOTIFY
++            use_notify=False  # Disabled LISTEN/NOTIFY string connection tie for Supabase pooler
+         )
+         
+         # Registrar handlers
+@@ -104,7 +104,8 @@ def main():
+     signal.signal(signal.SIGTERM, signal_handler)
+     
+     # Número de workers (configurable)
+-    num_workers = 3  # getattr(settings, 'num_workers', 3)
++    # Reducido a 1 para evitar agotar el pool de 15 conexiones (Supabase Port 5432)
++    num_workers = 1  # getattr(settings, 'num_workers', 3)
+     
+     logger.info("=" * 50)
+     logger.info("Data Staging Workers")
+diff --git a/data-staging-system/src/data_staging/api/v1/upload.py b/data-staging-system/src/data_staging/api/v1/upload.py
+index ebd16b4..e9fcc3a 100644
+--- a/data-staging-system/src/data_staging/api/v1/upload.py
++++ b/data-staging-system/src/data_staging/api/v1/upload.py
+@@ -1329,83 +1329,53 @@ async def download_rejected_records(
+     db: Session = Depends(get_database_session)
+ ):
+     """
+-    Download rejected records as CSV
++    Descarga los registros rechazados desde el archivo en disco generado durante la validación.
++    No accede a ninguna tabla en BD — cero WAL, cero espacio extra en Supabase.
+     """
+     try:
+-        # Get staging table name
+-        batch = db.execute(text("SELECT source_name FROM staging_meta.batch_control WHERE batch_id = :batch_id"), {"batch_id": batch_id}).fetchone()
++        # Obtener ruta del archivo desde metadata del batch
++        batch = db.execute(
++            text("SELECT metadata FROM staging_meta.batch_control WHERE batch_id = :batch_id"),
++            {"batch_id": batch_id}
++        ).fetchone()
++
+         if not batch:
+             raise HTTPException(status_code=404, detail="Batch not found")
+-            
+-        staging_table = batch.source_name
+-        
+-        # Function to check if table exists
+-        def check_table_exists(table_name):
+-            return db.execute(text(f"""
+-                SELECT EXISTS (
+-                    SELECT 1 FROM information_schema.tables 
+-                    WHERE table_schema = 'staging_data' 
+-                    AND table_name = :table_name
+-                )
+-            """), {"table_name": table_name}).scalar()
+-            
+-        # 1. Try exact match
+-        if not check_table_exists(staging_table):
+-            # 2. Try with stage_ prefix (standard worker logic)
+-            safe_name = staging_table.lower().replace(' ', '_').replace('-', '_')
+-            staging_table = f"stage_{safe_name}"
+-            
+-            if not check_table_exists(staging_table):
+-                 # 3. Try removing stage_ if it was double added? Unlikely but safe
+-                 if staging_table.startswith("stage_stage_"):
+-                     staging_table = staging_table.replace("stage_stage_", "stage_")
+-                     if not check_table_exists(staging_table):
+-                         raise HTTPException(status_code=404, detail=f"Staging data not found (table {staging_table} missing)")
+-                 else:
+-                     raise HTTPException(status_code=404, detail=f"Staging data not found (table {batch.source_name} or {staging_table} missing)")
+-        
+-        # Generator function for streaming CSV
+-        async def iter_csv():
+-            # CSV Header
+-            yield "batch_id,source_row_number,validation_status,error_details,raw_data\n"
+-            
+-            # Query in chunks
+-            stmt = text(f"""
+-                SELECT batch_id, source_row_number, validation_status, error_details, raw_data
+-                FROM staging_data.{staging_table}
+-                WHERE batch_id = :batch_id
+-                AND validation_status != 'PASSED'
+-            """).execution_options(yield_per=1000)
+-            
+-            result_proxy = db.execute(stmt, {"batch_id": batch_id})
+-            
+-            for row in result_proxy:
+-                # Format row as CSV line
+-                # Simple CSV escaping for now
+-                def escape_csv(val):
+-                    if val is None: return ""
+-                    s = str(val).replace('"', '""')
+-                    if ',' in s or '"' in s or '\n' in s:
+-                        return f'"{s}"'
+-                    return s
+-                
+-                line = [
+-                    escape_csv(row.batch_id),
+-                    escape_csv(row.source_row_number),
+-                    escape_csv(row.validation_status),
+-                    escape_csv(row.error_details),
+-                    escape_csv(row.raw_data)
+-                ]
+-                yield ",".join(line) + "\n"
++
++        metadata = batch.metadata or {}
++        if isinstance(metadata, str):
++            import json as _json
++            metadata = _json.loads(metadata)
++
++        rejected_file_path = metadata.get("rejected_temp_file")
++
++        if not rejected_file_path or not Path(rejected_file_path).exists():
++            # Si no hay archivo = no hubo rechazados, devolver CSV vacío
++            async def empty_csv():
++                yield "source_row_number\tvalidation_status\terror_details\traw_data\n"
++
++            return StreamingResponse(
++                empty_csv(),
++                media_type="text/csv",
++                headers={"Content-Disposition": f"attachment; filename=rejected_records_{batch_id}.csv"}
++            )
++
++        # Streaming directo desde disco — sin cargar todo en memoria
++        def stream_file():
++            with open(rejected_file_path, "r", encoding="utf-8") as f:
++                for line in f:
++                    yield line
+ 
+         return StreamingResponse(
+-            iter_csv(),
++            stream_file(),
+             media_type="text/csv",
+             headers={"Content-Disposition": f"attachment; filename=rejected_records_{batch_id}.csv"}
+         )
+ 
++    except HTTPException:
++        raise
+     except Exception as e:
+-        logger.error(f"Error downloading rejected: {e}")
++        logger.error(f"Error downloading rejected records: {e}")
+         raise HTTPException(status_code=500, detail=str(e))
+ @router.delete("/batch/{batch_id}")
+ async def delete_batch(
+diff --git a/data-staging-system/src/data_staging/api/v1/upload.py.backup b/data-staging-system/src/data_staging/api/v1/upload.py.backup
+deleted file mode 100644
+index d8733c7..0000000
+--- a/data-staging-system/src/data_staging/api/v1/upload.py.backup
++++ /dev/null
+@@ -1,593 +0,0 @@
+-# src/data_staging/api/v1/upload.py - Complete File Upload Implementation
+-
+-from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks, Depends
+-from fastapi.responses import JSONResponse
+-from sqlalchemy.orm import Session
+-from sqlalchemy import text
+-import uuid
+-import os
+-import shutil
+-from pathlib import Path
+-from datetime import datetime
+-import pandas as pd
+-import json
+-from typing import List, Optional, Dict, Any
+-import logging
+-
+-from data_staging.database import get_database_session
+-from data_staging.config import settings
+-from data_staging.utils.file_handler import FileHandler
+-from data_staging.core.validators.data_validator import DataValidator
+-from data_staging.core.etl.engine import ETLEngine
+-
+-logger = logging.getLogger(__name__)
+-
+-router = APIRouter(prefix="/upload", tags=["upload"])
+-
+-class FileUploadService:
+-    """Service for handling file uploads and processing"""
+-    
+-    def __init__(self):
+-        self.upload_dir = Path(settings.UPLOAD_PATH)
+-        self.temp_dir = Path(settings.TEMP_PATH)
+-        self.allowed_extensions = settings.ALLOWED_FILE_EXTENSIONS
+-        self.max_file_size = settings.MAX_FILE_SIZE
+-        
+-        # Ensure directories exist
+-        self.upload_dir.mkdir(parents=True, exist_ok=True)
+-        self.temp_dir.mkdir(parents=True, exist_ok=True)
+-    
+-    def validate_file(self, file: UploadFile) -> Dict[str, Any]:
+-        """Validate uploaded file"""
+-        errors = []
+-        
+-        # Check file extension
+-        file_ext = Path(file.filename).suffix.lower()
+-        if file_ext not in self.allowed_extensions:
+-            errors.append(f"File extension {file_ext} not allowed. Allowed: {self.allowed_extensions}")
+-        
+-        # Check file size (if we can get it)
+-        if hasattr(file, 'size') and file.size:
+-            if file.size > self.max_file_size:
+-                errors.append(f"File size {file.size} exceeds maximum {self.max_file_size} bytes")
+-        
+-        # Check filename
+-        if not file.filename or len(file.filename) == 0:
+-            errors.append("Filename is required")
+-        
+-        return {
+-            "valid": len(errors) == 0,
+-            "errors": errors,
+-            "file_extension": file_ext,
+-            "file_size": getattr(file, 'size', None)
+-        }
+-    
+-    async def save_file(self, file: UploadFile, batch_id: str) -> Path:
+-        """Save uploaded file to disk"""
+-        # Create unique filename
+-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+-        file_ext = Path(file.filename).suffix
+-        safe_filename = f"{batch_id}_{timestamp}_{file.filename}"
+-        file_path = self.upload_dir / safe_filename
+-        
+-        try:
+-            # Save file
+-            with open(file_path, "wb") as buffer:
+-                content = await file.read()
+-                buffer.write(content)
+-            
+-            logger.info(f"File saved: {file_path}")
+-            return file_path
+-            
+-        except Exception as e:
+-            logger.error(f"Error saving file: {e}")
+-            raise HTTPException(status_code=500, detail=f"Error saving file: {str(e)}")
+-    
+-    def detect_file_type(self, file_path: Path) -> str:
+-        """Detect file type and structure"""
+-        file_ext = file_path.suffix.lower()
+-        
+-        if file_ext in ['.csv']:
+-            return 'csv'
+-        elif file_ext in ['.xlsx', '.xls']:
+-            return 'excel'
+-        elif file_ext in ['.json']:
+-            return 'json'
+-        elif file_ext in ['.parquet']:
+-            return 'parquet'
+-        else:
+-            return 'unknown'
+-    
+-    def analyze_file_structure(self, file_path: Path) -> Dict[str, Any]:
+-        """Analyze file structure and extract metadata"""
+-        file_type = self.detect_file_type(file_path)
+-        
+-        try:
+-            if file_type == 'csv':
+-                # Analyze CSV
+-                sample_df = pd.read_csv(file_path, nrows=100)
+-                return {
+-                    "file_type": file_type,
+-                    "columns": list(sample_df.columns),
+-                    "column_types": sample_df.dtypes.astype(str).to_dict(),
+-                    "sample_rows": len(sample_df),
+-                    "estimated_total_rows": self._estimate_csv_rows(file_path),
+-                    "sample_data": sample_df.head(5).to_dict('records'),
+-                    "delimiter": ",",
+-                    "encoding": "utf-8"
+-                }
+-            
+-            elif file_type == 'excel':
+-                # Analyze Excel
+-                excel_file = pd.ExcelFile(file_path)
+-                sheet_names = excel_file.sheet_names
+-                
+-                # Read first sheet
+-                sample_df = pd.read_excel(file_path, sheet_name=sheet_names[0], nrows=100)
+-                
+-                return {
+-                    "file_type": file_type,
+-                    "sheet_names": sheet_names,
+-                    "default_sheet": sheet_names[0],
+-                    "columns": list(sample_df.columns),
+-                    "column_types": sample_df.dtypes.astype(str).to_dict(),
+-                    "sample_rows": len(sample_df),
+-                    "sample_data": sample_df.head(5).to_dict('records')
+-                }
+-            
+-            elif file_type == 'json':
+-                # Analyze JSON
+-                with open(file_path, 'r', encoding='utf-8') as f:
+-                    data = json.load(f)
+-                
+-                if isinstance(data, list) and len(data) > 0:
+-                    # Array of objects
+-                    sample_df = pd.json_normalize(data[:100])
+-                    return {
+-                        "file_type": file_type,
+-                        "structure": "array",
+-                        "columns": list(sample_df.columns),
+-                        "column_types": sample_df.dtypes.astype(str).to_dict(),
+-                        "sample_rows": len(sample_df),
+-                        "estimated_total_rows": len(data),
+-                        "sample_data": data[:5]
+-                    }
+-                elif isinstance(data, dict):
+-                    # Single object or nested structure
+-                    return {
+-                        "file_type": file_type,
+-                        "structure": "object",
+-                        "keys": list(data.keys()),
+-                        "sample_data": data
+-                    }
+-            
+-            else:
+-                return {
+-                    "file_type": file_type,
+-                    "error": f"Unsupported file type: {file_type}"
+-                }
+-                
+-        except Exception as e:
+-            logger.error(f"Error analyzing file {file_path}: {e}")
+-            return {
+-                "file_type": file_type,
+-                "error": f"Error analyzing file: {str(e)}"
+-            }
+-    
+-    def _estimate_csv_rows(self, file_path: Path) -> int:
+-        """Estimate total rows in CSV file"""
+-        try:
+-            with open(file_path, 'r', encoding='utf-8') as f:
+-                # Count lines (rough estimate)
+-                lines = sum(1 for _ in f)
+-                return max(0, lines - 1)  # Subtract header
+-        except:
+-            return 0
+-
+-# Global service instance
+-upload_service = FileUploadService()
+-
+-@router.post("/file")
+-async def upload_file(
+-    background_tasks: BackgroundTasks,
+-    file: UploadFile = File(...),
+-    source_name: Optional[str] = None,
+-    auto_process: bool = True,
+-    db: Session = Depends(get_database_session)
+-):
+-    """
+-    Upload a file for processing
+-    
+-    - **file**: The file to upload
+-    - **source_name**: Optional source name (will be auto-detected if not provided)
+-    - **auto_process**: Whether to automatically start processing
+-    """
+-    
+-    # Generate batch ID
+-    batch_id = str(uuid.uuid4())
+-    
+-    try:
+-        # Validate file
+-        validation = upload_service.validate_file(file)
+-        if not validation["valid"]:
+-            raise HTTPException(
+-                status_code=400, 
+-                detail=f"File validation failed: {', '.join(validation['errors'])}"
+-            )
+-        
+-        # Save file
+-        file_path = await upload_service.save_file(file, batch_id)
+-        file_size = file_path.stat().st_size
+-        
+-        # Analyze file structure
+-        file_analysis = upload_service.analyze_file_structure(file_path)
+-        
+-        # Determine source name
+-        if not source_name:
+-            source_name = f"{file.filename}_{datetime.now().strftime('%Y%m%d')}"
+-        
+-        # Create batch control record
+-        batch_data = {
+-            "batch_id": batch_id,
+-            "source_name": source_name,
+-            "source_type": "file",
+-            "file_name": file.filename,
+-            "file_size": file_size,
+-            "records_count": file_analysis.get("estimated_total_rows", 0),
+-            "status": "UPLOADED",
+-            "metadata": json.dumps({
+-                "file_path": str(file_path),
+-                "file_analysis": file_analysis,
+-                "upload_timestamp": datetime.now().isoformat(),
+-                "auto_process": auto_process
+-            })
+-        }
+-        
+-        # Insert batch record
+-        insert_query = text("""
+-            INSERT INTO staging_meta.batch_control 
+-            (batch_id, source_name, source_type, file_name, file_size, records_count, status, metadata)
+-            VALUES (:batch_id, :source_name, :source_type, :file_name, :file_size, :records_count, :status, :metadata)
+-        """)
+-        
+-        db.execute(insert_query, batch_data)
+-        db.commit()
+-        
+-        # Schedule processing if auto_process is enabled
+-        if auto_process:
+-            background_tasks.add_task(process_file_async, batch_id, str(file_path), source_name)
+-        
+-        return {
+-            "batch_id": batch_id,
+-            "message": "File uploaded successfully",
+-            "file_name": file.filename,
+-            "file_size": file_size,
+-            "source_name": source_name,
+-            "file_analysis": file_analysis,
+-            "auto_process": auto_process,
+-            "status": "uploaded" if not auto_process else "processing"
+-        }
+-        
+-    except HTTPException:
+-        raise
+-    except Exception as e:
+-        logger.error(f"Error uploading file: {e}")
+-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+-
+-@router.get("/batch/{batch_id}/status")
+-async def get_batch_status(batch_id: str, db: Session = Depends(get_database_session)):
+-    """Get status of a batch upload"""
+-    
+-    try:
+-        # Get batch info
+-        result = db.execute(text("""
+-            SELECT batch_id, source_name, source_type, file_name, file_size, 
+-                   records_count, status, created_at, started_at, completed_at, 
+-                   error_message, metadata
+-            FROM staging_meta.batch_control 
+-            WHERE batch_id = :batch_id
+-        """), {"batch_id": batch_id})
+-        
+-        batch = result.fetchone()
+-        if not batch:
+-            raise HTTPException(status_code=404, detail="Batch not found")
+-        
+-        # Get processing history
+-        result = db.execute(text("""
+-            SELECT load_id, load_type, target_table, records_inserted, records_updated,
+-                   records_rejected, data_quality_score, load_start_time, load_end_time,
+-                   duration_seconds, status, error_details
+-            FROM staging_meta.load_history 
+-            WHERE batch_id = :batch_id
+-            ORDER BY load_start_time DESC
+-        """), {"batch_id": batch_id})
+-        
+-        load_history = []
+-        for row in result:
+-            load_history.append({
+-                "load_id": row.load_id,
+-                "load_type": row.load_type,
+-                "target_table": row.target_table,
+-                "records_inserted": row.records_inserted,
+-                "records_updated": row.records_updated,
+-                "records_rejected": row.records_rejected,
+-                "data_quality_score": row.data_quality_score,
+-                "load_start_time": row.load_start_time.isoformat() if row.load_start_time else None,
+-                "load_end_time": row.load_end_time.isoformat() if row.load_end_time else None,
+-                "duration_seconds": row.duration_seconds,
+-                "status": row.status,
+-                "error_details": row.error_details
+-            })
+-        
+-        # Parse metadata
+-        metadata = json.loads(batch.metadata) if batch.metadata else {}
+-        
+-        return {
+-            "batch_id": batch.batch_id,
+-            "source_name": batch.source_name,
+-            "source_type": batch.source_type,
+-            "file_name": batch.file_name,
+-            "file_size": batch.file_size,
+-            "records_count": batch.records_count,
+-            "status": batch.status,
+-            "created_at": batch.created_at.isoformat() if batch.created_at else None,
+-            "started_at": batch.started_at.isoformat() if batch.started_at else None,
+-            "completed_at": batch.completed_at.isoformat() if batch.completed_at else None,
+-            "error_message": batch.error_message,
+-            "metadata": metadata,
+-            "load_history": load_history
+-        }
+-        
+-    except HTTPException:
+-        raise
+-    except Exception as e:
+-        logger.error(f"Error getting batch status: {e}")
+-        raise HTTPException(status_code=500, detail=f"Error retrieving status: {str(e)}")
+-
+-@router.post("/batch/{batch_id}/process")
+-async def process_batch(
+-    batch_id: str, 
+-    background_tasks: BackgroundTasks,
+-    db: Session = Depends(get_database_session)
+-):
+-    """Manually trigger processing of an uploaded batch"""
+-    
+-    try:
+-        # Get batch info
+-        result = db.execute(text("""
+-            SELECT batch_id, source_name, status, metadata
+-            FROM staging_meta.batch_control 
+-            WHERE batch_id = :batch_id
+-        """), {"batch_id": batch_id})
+-        
+-        batch = result.fetchone()
+-        if not batch:
+-            raise HTTPException(status_code=404, detail="Batch not found")
+-        
+-        if batch.status not in ["UPLOADED", "FAILED"]:
+-            raise HTTPException(
+-                status_code=400, 
+-                detail=f"Batch cannot be processed. Current status: {batch.status}"
+-            )
+-        
+-        # Parse metadata to get file path
+-        metadata = json.loads(batch.metadata) if batch.metadata else {}
+-        file_path = metadata.get("file_path")
+-        
+-        if not file_path or not Path(file_path).exists():
+-            raise HTTPException(status_code=400, detail="File not found for processing")
+-        
+-        # Schedule processing
+-        background_tasks.add_task(process_file_async, batch_id, file_path, batch.source_name)
+-        
+-        # Update status
+-        db.execute(text("""
+-            UPDATE staging_meta.batch_control 
+-            SET status = 'PROCESSING', started_at = CURRENT_TIMESTAMP
+-            WHERE batch_id = :batch_id
+-        """), {"batch_id": batch_id})
+-        db.commit()
+-        
+-        return {
+-            "batch_id": batch_id,
+-            "message": "Processing started",
+-            "status": "processing"
+-        }
+-        
+-    except HTTPException:
+-        raise
+-    except Exception as e:
+-        logger.error(f"Error processing batch: {e}")
+-        raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
+-
+-@router.get("/batches")
+-async def list_batches(
+-    limit: int = 50,
+-    offset: int = 0,
+-    status: Optional[str] = None,
+-    source_name: Optional[str] = None,
+-    db: Session = Depends(get_database_session)
+-):
+-    """List uploaded batches with optional filtering"""
+-    
+-    try:
+-        # Build query with filters
+-        where_conditions = []
+-        params = {"limit": limit, "offset": offset}
+-        
+-        if status:
+-            where_conditions.append("status = :status")
+-            params["status"] = status
+-        
+-        if source_name:
+-            where_conditions.append("source_name ILIKE :source_name")
+-            params["source_name"] = f"%{source_name}%"
+-        
+-        where_clause = "WHERE " + " AND ".join(where_conditions) if where_conditions else ""
+-        
+-        query = text(f"""
+-            SELECT batch_id, source_name, source_type, file_name, file_size,
+-                   records_count, status, created_at, completed_at, error_message
+-            FROM staging_meta.batch_control 
+-            {where_clause}
+-            ORDER BY created_at DESC
+-            LIMIT :limit OFFSET :offset
+-        """)
+-        
+-        result = db.execute(query, params)
+-        
+-        batches = []
+-        for row in result:
+-            batches.append({
+-                "batch_id": row.batch_id,
+-                "source_name": row.source_name,
+-                "source_type": row.source_type,
+-                "file_name": row.file_name,
+-                "file_size": row.file_size,
+-                "records_count": row.records_count,
+-                "status": row.status,
+-                "created_at": row.created_at.isoformat() if row.created_at else None,
+-                "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+-                "error_message": row.error_message
+-            })
+-        
+-        # Get total count
+-        count_query = text(f"""
+-            SELECT COUNT(*) FROM staging_meta.batch_control {where_clause}
+-        """)
+-        total_count = db.execute(count_query, params).scalar()
+-        
+-        return {
+-            "batches": batches,
+-            "total": total_count,
+-            "limit": limit,
+-            "offset": offset
+-        }
+-        
+-    except Exception as e:
+-        logger.error(f"Error listing batches: {e}")
+-        raise HTTPException(status_code=500, detail=f"Error retrieving batches: {str(e)}")
+-
+-async def process_file_async(batch_id: str, file_path: str, source_name: str):
+-    """Background task to process uploaded file"""
+-    
+-    try:
+-        logger.info(f"Starting async processing for batch {batch_id}")
+-        
+-        # Get database session
+-        from data_staging.database import get_database_manager
+-        db_manager = get_database_manager()
+-        
+-        with db_manager.get_session() as db:
+-            # Update status to processing
+-            db.execute(text("""
+-                UPDATE staging_meta.batch_control 
+-                SET status = 'PROCESSING', started_at = CURRENT_TIMESTAMP
+-                WHERE batch_id = :batch_id
+-            """), {"batch_id": batch_id})
+-            db.commit()
+-            
+-            # Create load history record
+-            load_id = str(uuid.uuid4())
+-            start_time = datetime.now()
+-            
+-            db.execute(text("""
+-                INSERT INTO staging_meta.load_history 
+-                (load_id, batch_id, source_name, load_type, load_start_time, status)
+-                VALUES (:load_id, :batch_id, :source_name, 'FILE_UPLOAD', :start_time, 'IN_PROGRESS')
+-            """), {
+-                "load_id": load_id,
+-                "batch_id": batch_id,
+-                "source_name": source_name,
+-                "start_time": start_time
+-            })
+-            db.commit()
+-            
+-            try:
+-                # Initialize file handler and validator
+-                file_handler = FileHandler()
+-                validator = DataValidator()
+-                
+-                # Read and process file
+-                df = file_handler.read_file(Path(file_path))
+-                
+-                if df is not None and not df.empty:
+-                    records_count = len(df)
+-                    
+-                    # Validate data
+-                    validation_result = validator.validate_dataframe(df)
+-                    quality_score = validation_result.get("overall_score", 0)
+-                    
+-                    # For now, just log the results
+-                    # In a full implementation, you would:
+-                    # 1. Save to staging table
+-                    # 2. Apply transformations
+-                    # 3. Load to target table
+-                    
+-                    logger.info(f"Processed {records_count} records with quality score {quality_score}")
+-                    
+-                    # Update successful completion
+-                    end_time = datetime.now()
+-                    duration = int((end_time - start_time).total_seconds())
+-                    
+-                    db.execute(text("""
+-                        UPDATE staging_meta.load_history 
+-                        SET load_end_time = :end_time, duration_seconds = :duration,
+-                            status = 'COMPLETED', records_inserted = :records_count,
+-                            data_quality_score = :quality_score
+-                        WHERE load_id = :load_id
+-                    """), {
+-                        "load_id": load_id,
+-                        "end_time": end_time,
+-                        "duration": duration,
+-                        "records_count": records_count,
+-                        "quality_score": quality_score
+-                    })
+-                    
+-                    db.execute(text("""
+-                        UPDATE staging_meta.batch_control 
+-                        SET status = 'COMPLETED', completed_at = CURRENT_TIMESTAMP,
+-                            records_count = :records_count
+-                        WHERE batch_id = :batch_id
+-                    """), {
+-                        "batch_id": batch_id,
+-                        "records_count": records_count
+-                    })
+-                    
+-                else:
+-                    raise Exception("No data found in file or file is empty")
+-            
+-            except Exception as e:
+-                # Update failure status
+-                error_msg = str(e)
+-                logger.error(f"Processing failed for batch {batch_id}: {error_msg}")
+-                
+-                end_time = datetime.now()
+-                duration = int((end_time - start_time).total_seconds())
+-                
+-                db.execute(text("""
+-                    UPDATE staging_meta.load_history 
+-                    SET load_end_time = :end_time, duration_seconds = :duration,
+-                        status = 'FAILED', error_details = :error_msg
+-                    WHERE load_id = :load_id
+-                """), {
+-                    "load_id": load_id,
+-                    "end_time": end_time,
+-                    "duration": duration,
+-                    "error_msg": error_msg
+-                })
+-                
+-                db.execute(text("""
+-                    UPDATE staging_meta.batch_control 
+-                    SET status = 'FAILED', completed_at = CURRENT_TIMESTAMP,
+-                        error_message = :error_msg
+-                    WHERE batch_id = :batch_id
+-                """), {
+-                    "batch_id": batch_id,
+-                    "error_msg": error_msg
+-                })
+-            
+-            db.commit()
+-            
+-    except Exception as e:
+-        logger.error(f"Critical error in async processing for batch {batch_id}: {e}")
+\ No newline at end of file
+diff --git a/data-staging-system/src/data_staging/api/v1/upload.py.original b/data-staging-system/src/data_staging/api/v1/upload.py.original
+deleted file mode 100644
+index 392ca1a..0000000
+--- a/data-staging-system/src/data_staging/api/v1/upload.py.original
++++ /dev/null
+@@ -1,593 +0,0 @@
+-# src/data_staging/api/v1/upload.py - Complete File Upload Implementation
+-
+-from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks, Depends
+-from fastapi.responses import JSONResponse
+-from sqlalchemy.orm import Session
+-from sqlalchemy import text
+-import uuid
+-import os
+-import shutil
+-from pathlib import Path
+-from datetime import datetime
+-import pandas as pd
+-import json
+-from typing import List, Optional, Dict, Any
+-import logging
+-
+-from data_staging.database import get_database_session
+-from data_staging.config import settings
+-from data_staging.utils.file_handler import FileHandler
+-from data_staging.core.validators.data_validator import DataValidator
+-from data_staging.core.etl.engine import ETLEngine
+-
+-logger = logging.getLogger(__name__)
+-
+-router = APIRouter(prefix="/upload", tags=["upload"])
+-
+-class FileUploadService:
+-    """Service for handling file uploads and processing"""
+-    
+-    def __init__(self):
+-        self.upload_dir = Path(settings.UPLOAD_PATH)
+-        self.temp_dir = Path(settings.TEMP_PATH)
+-        self.allowed_extensions = settings.ALLOWED_FILE_EXTENSIONS
+-        self.max_file_size = settings.MAX_FILE_SIZE
+-        
+-        # Ensure directories exist
+-        self.upload_dir.mkdir(parents=True, exist_ok=True)
+-        self.temp_dir.mkdir(parents=True, exist_ok=True)
+-    
+-    def validate_file(self, file: UploadFile) -> Dict[str, Any]:
+-        """Validate uploaded file"""
+-        errors = []
+-        
+-        # Check file extension
+-        file_ext = Path(file.filename).suffix.lower()
+-        if file_ext not in self.allowed_extensions:
+-            errors.append(f"File extension {file_ext} not allowed. Allowed: {self.allowed_extensions}")
+-        
+-        # Check file size (if we can get it)
+-        if hasattr(file, 'size') and file.size:
+-            if file.size > self.max_file_size:
+-                errors.append(f"File size {file.size} exceeds maximum {self.max_file_size} bytes")
+-        
+-        # Check filename
+-        if not file.filename or len(file.filename) == 0:
+-            errors.append("Filename is required")
+-        
+-        return {
+-            "valid": len(errors) == 0,
+-            "errors": errors,
+-            "file_extension": file_ext,
+-            "file_size": getattr(file, 'size', None)
+-        }
+-    
+-    async def save_file(self, file: UploadFile, batch_id: str) -> Path:
+-        """Save uploaded file to disk"""
+-        # Create unique filename
+-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+-        file_ext = Path(file.filename).suffix
+-        safe_filename = f"{batch_id}_{timestamp}_{file.filename}"
+-        file_path = self.upload_dir / safe_filename
+-        
+-        try:
+-            # Save file
+-            with open(file_path, "wb") as buffer:
+-                content = await file.read()
+-                buffer.write(content)
+-            
+-            logger.info(f"File saved: {file_path}")
+-            return file_path
+-            
+-        except Exception as e:
+-            logger.error(f"Error saving file: {e}")
+-            raise HTTPException(status_code=500, detail=f"Error saving file: {str(e)}")
+-    
+-    def detect_file_type(self, file_path: Path) -> str:
+-        """Detect file type and structure"""
+-        file_ext = file_path.suffix.lower()
+-        
+-        if file_ext in ['.csv']:
+-            return 'csv'
+-        elif file_ext in ['.xlsx', '.xls']:
+-            return 'excel'
+-        elif file_ext in ['.json']:
+-            return 'json'
+-        elif file_ext in ['.parquet']:
+-            return 'parquet'
+-        else:
+-            return 'unknown'
+-    
+-    def analyze_file_structure(self, file_path: Path) -> Dict[str, Any]:
+-        """Analyze file structure and extract metadata"""
+-        file_type = self.detect_file_type(file_path)
+-        
+-        try:
+-            if file_type == 'csv':
+-                # Analyze CSV
+-                sample_df = pd.read_csv(file_path, nrows=100)
+-                return {
+-                    "file_type": file_type,
+-                    "columns": list(sample_df.columns),
+-                    "column_types": sample_df.dtypes.astype(str).to_dict(),
+-                    "sample_rows": len(sample_df),
+-                    "estimated_total_rows": self._estimate_csv_rows(file_path),
+-                    "sample_data": sample_df.head(5).to_dict('records'),
+-                    "delimiter": ",",
+-                    "encoding": "utf-8"
+-                }
+-            
+-            elif file_type == 'excel':
+-                # Analyze Excel
+-                excel_file = pd.ExcelFile(file_path)
+-                sheet_names = excel_file.sheet_names
+-                
+-                # Read first sheet
+-                sample_df = pd.read_excel(file_path, sheet_name=sheet_names[0], nrows=100)
+-                
+-                return {
+-                    "file_type": file_type,
+-                    "sheet_names": sheet_names,
+-                    "default_sheet": sheet_names[0],
+-                    "columns": list(sample_df.columns),
+-                    "column_types": sample_df.dtypes.astype(str).to_dict(),
+-                    "sample_rows": len(sample_df),
+-                    "sample_data": sample_df.head(5).to_dict('records')
+-                }
+-            
+-            elif file_type == 'json':
+-                # Analyze JSON
+-                with open(file_path, 'r', encoding='utf-8') as f:
+-                    data = json.load(f)
+-                
+-                if isinstance(data, list) and len(data) > 0:
+-                    # Array of objects
+-                    sample_df = pd.json_normalize(data[:100])
+-                    return {
+-                        "file_type": file_type,
+-                        "structure": "array",
+-                        "columns": list(sample_df.columns),
+-                        "column_types": sample_df.dtypes.astype(str).to_dict(),
+-                        "sample_rows": len(sample_df),
+-                        "estimated_total_rows": len(data),
+-                        "sample_data": data[:5]
+-                    }
+-                elif isinstance(data, dict):
+-                    # Single object or nested structure
+-                    return {
+-                        "file_type": file_type,
+-                        "structure": "object",
+-                        "keys": list(data.keys()),
+-                        "sample_data": data
+-                    }
+-            
+-            else:
+-                return {
+-                    "file_type": file_type,
+-                    "error": f"Unsupported file type: {file_type}"
+-                }
+-                
+-        except Exception as e:
+-            logger.error(f"Error analyzing file {file_path}: {e}")
+-            return {
+-                "file_type": file_type,
+-                "error": f"Error analyzing file: {str(e)}"
+-            }
+-    
+-    def _estimate_csv_rows(self, file_path: Path) -> int:
+-        """Estimate total rows in CSV file"""
+-        try:
+-            with open(file_path, 'r', encoding='utf-8') as f:
+-                # Count lines (rough estimate)
+-                lines = sum(1 for _ in f)
+-                return max(0, lines - 1)  # Subtract header
+-        except:
+-            return 0
+-
+-# Global service instance
+-upload_service = FileUploadService()
+-
+-@router.post("/file")
+-async def upload_file(
+-    background_tasks: BackgroundTasks,
+-    file: UploadFile = File(...),
+-    source_name: Optional[str] = None,
+-    auto_process: bool = True,
+-    db: Session = Depends(get_database_session)
+-):
+-    """
+-    Upload a file for processing
+-    
+-    - **file**: The file to upload
+-    - **source_name**: Optional source name (will be auto-detected if not provided)
+-    - **auto_process**: Whether to automatically start processing
+-    """
+-    
+-    # Generate batch ID
+-    batch_id = str(uuid.uuid4())
+-    
+-    try:
+-        # Validate file
+-        validation = upload_service.validate_file(file)
+-        if not validation["valid"]:
+-            raise HTTPException(
+-                status_code=400, 
+-                detail=f"File validation failed: {', '.join(validation['errors'])}"
+-            )
+-        
+-        # Save file
+-        file_path = await upload_service.save_file(file, batch_id)
+-        file_size = file_path.stat().st_size
+-        
+-        # Analyze file structure
+-        file_analysis = upload_service.analyze_file_structure(file_path)
+-        
+-        # Determine source name
+-        if not source_name:
+-            source_name = f"{file.filename}_{datetime.now().strftime('%Y%m%d')}"
+-        
+-        # Create batch control record
+-        batch_data = {
+-            "batch_id": batch_id,
+-            "source_name": source_name,
+-            "source_type": "file",
+-            "file_name": file.filename,
+-            "file_size": file_size,
+-            "records_count": file_analysis.get("estimated_total_rows", 0),
+-            "status": "UPLOADED",
+-            "metadata": json.dumps({
+-                "file_path": str(file_path),
+-                "file_analysis": file_analysis,
+-                "upload_timestamp": datetime.now().isoformat(),
+-                "auto_process": auto_process
+-            })
+-        }
+-        
+-        # Insert batch record
+-        insert_query = text("""
+-            INSERT INTO staging_meta.batch_control 
+-            (batch_id, source_name, source_type, file_name, file_size, records_count, status, metadata)
+-            VALUES (:batch_id, :source_name, :source_type, :file_name, :file_size, :records_count, :status, :metadata)
+-        """)
+-        
+-        db.execute(insert_query, batch_data)
+-        db.commit()
+-        
+-        # Schedule processing if auto_process is enabled
+-        if auto_process:
+-            background_tasks.add_task(process_file_async, batch_id, str(file_path), source_name)
+-        
+-        return {
+-            "batch_id": batch_id,
+-            "message": "File uploaded successfully",
+-            "file_name": file.filename,
+-            "file_size": file_size,
+-            "source_name": source_name,
+-            "file_analysis": file_analysis,
+-            "auto_process": auto_process,
+-            "status": "uploaded" if not auto_process else "processing"
+-        }
+-        
+-    except HTTPException:
+-        raise
+-    except Exception as e:
+-        logger.error(f"Error uploading file: {e}")
+-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+-
+-@router.get("/batch/{batch_id}/status")
+-async def get_batch_status(batch_id: str, db: Session = Depends(get_database_session)):
+-    """Get status of a batch upload"""
+-    
+-    try:
+-        # Get batch info
+-        result = db.execute(text("""
+-            SELECT batch_id, source_name, source_type, file_name, file_size, 
+-                   records_count, status, created_at, started_at, completed_at, 
+-                   error_message, metadata
+-            FROM staging_meta.batch_control 
+-            WHERE batch_id = :batch_id
+-        """), {"batch_id": batch_id})
+-        
+-        batch = result.fetchone()
+-        if not batch:
+-            raise HTTPException(status_code=404, detail="Batch not found")
+-        
+-        # Get processing history
+-        result = db.execute(text("""
+-            SELECT load_id, load_type, target_table, records_inserted, records_updated,
+-                   records_rejected, data_quality_score, load_start_time, load_end_time,
+-                   duration_seconds, status, error_details
+-            FROM staging_meta.load_history 
+-            WHERE batch_id = :batch_id
+-            ORDER BY load_start_time DESC
+-        """), {"batch_id": batch_id})
+-        
+-        load_history = []
+-        for row in result:
+-            load_history.append({
+-                "load_id": row.load_id,
+-                "load_type": row.load_type,
+-                "target_table": row.target_table,
+-                "records_inserted": row.records_inserted,
+-                "records_updated": row.records_updated,
+-                "records_rejected": row.records_rejected,
+-                "data_quality_score": row.data_quality_score,
+-                "load_start_time": row.load_start_time.isoformat() if row.load_start_time else None,
+-                "load_end_time": row.load_end_time.isoformat() if row.load_end_time else None,
+-                "duration_seconds": row.duration_seconds,
+-                "status": row.status,
+-                "error_details": row.error_details
+-            })
+-        
+-        # Parse metadata
+-        metadata = json.loads(batch.metadata) if batch.metadata else {}
+-        
+-        return {
+-            "batch_id": batch.batch_id,
+-            "source_name": batch.source_name,
+-            "source_type": batch.source_type,
+-            "file_name": batch.file_name,
+-            "file_size": batch.file_size,
+-            "records_count": batch.records_count,
+-            "status": batch.status,
+-            "created_at": batch.created_at.isoformat() if batch.created_at else None,
+-            "started_at": batch.started_at.isoformat() if batch.started_at else None,
+-            "completed_at": batch.completed_at.isoformat() if batch.completed_at else None,
+-            "error_message": batch.error_message,
+-            "metadata": metadata,
+-            "load_history": load_history
+-        }
+-        
+-    except HTTPException:
+-        raise
+-    except Exception as e:
+-        logger.error(f"Error getting batch status: {e}")
+-        raise HTTPException(status_code=500, detail=f"Error retrieving status: {str(e)}")
+-
+-@router.post("/batch/{batch_id}/process")
+-async def process_batch(
+-    batch_id: str, 
+-    background_tasks: BackgroundTasks,
+-    db: Session = Depends(get_database_session)
+-):
+-    """Manually trigger processing of an uploaded batch"""
+-    
+-    try:
+-        # Get batch info
+-        result = db.execute(text("""
+-            SELECT batch_id, source_name, status, metadata
+-            FROM staging_meta.batch_control 
+-            WHERE batch_id = :batch_id
+-        """), {"batch_id": batch_id})
+-        
+-        batch = result.fetchone()
+-        if not batch:
+-            raise HTTPException(status_code=404, detail="Batch not found")
+-        
+-        if batch.status not in ["UPLOADED", "FAILED"]:
+-            raise HTTPException(
+-                status_code=400, 
+-                detail=f"Batch cannot be processed. Current status: {batch.status}"
+-            )
+-        
+-        # Parse metadata to get file path
+-        metadata = json.loads(batch.metadata) if batch.metadata else {}
+-        file_path = metadata.get("file_path")
+-        
+-        if not file_path or not Path(file_path).exists():
+-            raise HTTPException(status_code=400, detail="File not found for processing")
+-        
+-        # Schedule processing
+-        background_tasks.add_task(process_file_async, batch_id, file_path, batch.source_name)
+-        
+-        # Update status
+-        db.execute(text("""
+-            UPDATE staging_meta.batch_control 
+-            SET status = 'PROCESSING', started_at = CURRENT_TIMESTAMP
+-            WHERE batch_id = :batch_id
+-        """), {"batch_id": batch_id})
+-        db.commit()
+-        
+-        return {
+-            "batch_id": batch_id,
+-            "message": "Processing started",
+-            "status": "processing"
+-        }
+-        
+-    except HTTPException:
+-        raise
+-    except Exception as e:
+-        logger.error(f"Error processing batch: {e}")
+-        raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
+-
+-@router.get("/batches")
+-async def list_batches(
+-    limit: int = 50,
+-    offset: int = 0,
+-    status: Optional[str] = None,
+-    source_name: Optional[str] = None,
+-    db: Session = Depends(get_database_session)
+-):
+-    """List uploaded batches with optional filtering"""
+-    
+-    try:
+-        # Build query with filters
+-        where_conditions = []
+-        params = {"limit": limit, "offset": offset}
+-        
+-        if status:
+-            where_conditions.append("status = :status")
+-            params["status"] = status
+-        
+-        if source_name:
+-            where_conditions.append("source_name ILIKE :source_name")
+-            params["source_name"] = f"%{source_name}%"
+-        
+-        where_clause = "WHERE " + " AND ".join(where_conditions) if where_conditions else ""
+-        
+-        query = text(f"""
+-            SELECT batch_id, source_name, source_type, file_name, file_size,
+-                   records_count, status, created_at, completed_at, error_message
+-            FROM staging_meta.batch_control 
+-            {where_clause}
+-            ORDER BY created_at DESC
+-            LIMIT :limit OFFSET :offset
+-        """)
+-        
+-        result = db.execute(query, params)
+-        
+-        batches = []
+-        for row in result:
+-            batches.append({
+-                "batch_id": row.batch_id,
+-                "source_name": row.source_name,
+-                "source_type": row.source_type,
+-                "file_name": row.file_name,
+-                "file_size": row.file_size,
+-                "records_count": row.records_count,
+-                "status": row.status,
+-                "created_at": row.created_at.isoformat() if row.created_at else None,
+-                "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+-                "error_message": row.error_message
+-            })
+-        
+-        # Get total count
+-        count_query = text(f"""
+-            SELECT COUNT(*) FROM staging_meta.batch_control {where_clause}
+-        """)
+-        total_count = db.execute(count_query, params).scalar()
+-        
+-        return {
+-            "batches": batches,
+-            "total": total_count,
+-            "limit": limit,
+-            "offset": offset
+-        }
+-        
+-    except Exception as e:
+-        logger.error(f"Error listing batches: {e}")
+-        raise HTTPException(status_code=500, detail=f"Error retrieving batches: {str(e)}")
+-
+-async def process_file_async(batch_id: str, file_path: str, source_name: str):
+-    """Background task to process uploaded file"""
+-    
+-    try:
+-        logger.info(f"Starting async processing for batch {batch_id}")
+-        
+-        # Get database session
+-        from data_staging.database import get_database_manager
+-        db_manager = get_database_manager()
+-        
+-        with db_manager.get_session() as db:
+-            # Update status to processing
+-            db.execute(text("""
+-                UPDATE staging_meta.batch_control 
+-                SET status = 'PROCESSING', started_at = CURRENT_TIMESTAMP
+-                WHERE batch_id = :batch_id
+-            """), {"batch_id": batch_id})
+-            db.commit()
+-            
+-            # Create load history record
+-            load_id = str(uuid.uuid4())
+-            start_time = datetime.now()
+-            
+-            db.execute(text("""
+-                INSERT INTO staging_meta.load_history 
+-                (load_id, batch_id, source_name, load_type, load_start_time, status)
+-                VALUES (:load_id, :batch_id, :source_name, 'FILE_UPLOAD', :start_time, 'IN_PROGRESS')
+-            """), {
+-                "load_id": load_id,
+-                "batch_id": batch_id,
+-                "source_name": source_name,
+-                "start_time": start_time
+-            })
+-            db.commit()
+-            
+-            try:
+-                # Initialize file handler and validator
+-                file_handler = FileHandler()
+-                validator = DataValidator()
+-                
+-                # Read and process file
+-                df = file_handler.read_file(Path(file_path))
+-                
+-                if df is not None and not df.empty:
+-                    records_count = len(df)
+-                    
+-                    # Validate data
+-                    validation_result = validator.validate_dataframe(df)
+-                    quality_score = validation_result.get("overall_score", 0)
+-                    
+-                    # For now, just log the results
+-                    # In a full implementation, you would:
+-                    # 1. Save to staging table
+-                    # 2. Apply transformations
+-                    # 3. Load to target table
+-                    
+-                    logger.info(f"Processed {records_count} records with quality score {quality_score}")
+-                    
+-                    # Update successful completion
+-                    end_time = datetime.now()
+-                    duration = int((end_time - start_time).total_seconds())
+-                    
+-                    db.execute(text("""
+-                        UPDATE staging_meta.load_history 
+-                        SET load_end_time = :end_time, duration_seconds = :duration,
+-                            status = 'COMPLETED', records_inserted = :records_count,
+-                            data_quality_score = :quality_score
+-                        WHERE load_id = :load_id
+-                    """), {
+-                        "load_id": load_id,
+-                        "end_time": end_time,
+-                        "duration": duration,
+-                        "records_count": records_count,
+-                        "quality_score": quality_score
+-                    })
+-                    
+-                    db.execute(text("""
+-                        UPDATE staging_meta.batch_control 
+-                        SET status = 'COMPLETED', completed_at = CURRENT_TIMESTAMP,
+-                            records_count = :records_count
+-                        WHERE batch_id = :batch_id
+-                    """), {
+-                        "batch_id": batch_id,
+-                        "records_count": records_count
+-                    })
+-                    
+-                else:
+-                    raise Exception("No data found in file or file is empty")
+-            
+-            except Exception as e:
+-                # Update failure status
+-                error_msg = str(e)
+-                logger.error(f"Processing failed for batch {batch_id}: {error_msg}")
+-                
+-                end_time = datetime.now()
+-                duration = int((end_time - start_time).total_seconds())
+-                
+-                db.execute(text("""
+-                    UPDATE staging_meta.load_history 
+-                    SET load_end_time = :end_time, duration_seconds = :duration,
+-                        status = 'FAILED', error_details = :error_msg
+-                    WHERE load_id = :load_id
+-                """), {
+-                    "load_id": load_id,
+-                    "end_time": end_time,
+-                    "duration": duration,
+-                    "error_msg": error_msg
+-                })
+-                
+-                db.execute(text("""
+-                    UPDATE staging_meta.batch_control 
+-                    SET status = 'FAILED', completed_at = CURRENT_TIMESTAMP,
+-                        error_message = :error_msg
+-                    WHERE batch_id = :batch_id
+-                """), {
+-                    "batch_id": batch_id,
+-                    "error_msg": error_msg
+-                })
+-            
+-            db.commit()
+-            
+-    except Exception as e:
+-        logger.error(f"Critical error in async processing for batch {batch_id}: {e}")
+diff --git a/data-staging-system/src/data_staging/config.py.backup b/data-staging-system/src/data_staging/config.py.backup
+deleted file mode 100644
+index fbaa539..0000000
+--- a/data-staging-system/src/data_staging/config.py.backup
++++ /dev/null
+@@ -1,296 +0,0 @@
+-# src/data_staging/config.py
+-"""
+-Configuración centralizada del sistema con soporte para PostgreSQL y Supabase
+-"""
+-
+-import os
+-from typing import List, Dict, Any, Optional
+-from pydantic_settings import BaseSettings
+-from pydantic import Field, validator, AnyHttpUrl
+-from enum import Enum
+-
+-class Environment(str, Enum):
+-    """Entornos de ejecución"""
+-    DEVELOPMENT = "development"
+-    TESTING = "testing"
+-    STAGING = "staging"
+-    PRODUCTION = "production"
+-
+-class DatabaseType(str, Enum):
+-    """Tipos de base de datos soportados"""
+-    POSTGRESQL = "postgresql"
+-    SUPABASE = "supabase"
+-
+-class Settings(BaseSettings):
+-    """Configuración principal del sistema"""
+-    
+-    # === CONFIGURACIÓN DE ENTORNO ===
+-    ENVIRONMENT: Environment = Field(Environment.DEVELOPMENT, description="Entorno de ejecución")
+-    DEBUG: bool = Field(False, description="Modo debug")
+-    LOG_LEVEL: str = Field("INFO", description="Nivel de logging")
+-    
+-    # === CONFIGURACIÓN DE BASE DE DATOS ===
+-    DATABASE_URL: str = Field(..., description="URL de conexión a la base de datos")
+-    DATABASE_TYPE: Optional[DatabaseType] = Field(None, description="Tipo de base de datos")
+-    DATABASE_URL_TEST: Optional[str] = Field(None, description="URL de base de datos para testing")
+-    
+-    # Configuración de pool de conexiones
+-    DB_POOL_SIZE: int = Field(10, description="Tamaño del pool de conexiones")
+-    DB_MAX_OVERFLOW: int = Field(20, description="Máximo overflow del pool")
+-    DB_POOL_TIMEOUT: int = Field(30, description="Timeout del pool")
+-    DB_POOL_RECYCLE: int = Field(3600, description="Tiempo de reciclaje de conexiones")
+-    
+-    # === CONFIGURACIÓN ESPECÍFICA DE SUPABASE ===
+-    SUPABASE_URL: Optional[AnyHttpUrl] = Field(None, description="URL base de Supabase")
+-    SUPABASE_ANON_KEY: Optional[str] = Field(None, description="Clave anónima de Supabase")
+-    SUPABASE_SERVICE_ROLE_KEY: Optional[str] = Field(None, description="Clave de service role")
+-    SUPABASE_SERVICE_KEY: Optional[str] = Field(None, description="Clave de servicio de Supabase")
+-    SUPABASE_JWT_SECRET: Optional[str] = Field(None, description="JWT secret de Supabase")
+-    
+-    # === CONFIGURACIÓN DE API ===
+-    API_HOST: str = Field("0.0.0.0", description="Host de la API")
+-    API_PORT: int = Field(8000, description="Puerto de la API")
+-    API_PREFIX: str = Field("/api/v1", description="Prefijo de la API")
+-    API_TITLE: str = Field("Data Staging System", description="Título de la API")
+-    API_VERSION: str = Field("1.0.0", description="Versión de la API")
+-    
+-    # === CONFIGURACIÓN DE ARCHIVOS ===
+-    UPLOAD_PATH: str = Field("./data/uploads", description="Directorio de archivos subidos")
+-    TEMP_PATH: str = Field("./data/temp", description="Directorio temporal")
+-    BACKUP_PATH: str = Field("./backups", description="Directorio de backups")
+-    MAX_FILE_SIZE: int = Field(100 * 1024 * 1024, description="Tamaño máximo de archivo (bytes)")
+-    ALLOWED_FILE_EXTENSIONS: List[str] = Field(
+-        [".csv", ".xlsx", ".xls", ".json", ".parquet"], 
+-        description="Extensiones de archivo permitidas"
+-    )
+-    
+-    # === CONFIGURACIÓN DE VALIDACIÓN ===
+-    MAX_ERROR_RATE: float = Field(0.05, description="Tasa máxima de errores permitida")
+-    MIN_QUALITY_SCORE: int = Field(95, description="Score mínimo de calidad de datos")
+-    VALIDATION_TIMEOUT: int = Field(300, description="Timeout de validación en segundos")
+-    
+-    # === CONFIGURACIÓN DE ETL ===
+-    ETL_BATCH_SIZE: int = Field(10000, description="Tamaño de lote para procesamiento ETL")
+-    ETL_MAX_RETRIES: int = Field(3, description="Máximo número de reintentos")
+-    ETL_RETRY_DELAY: int = Field(60, description="Delay entre reintentos en segundos")
+-    
+-    # === CONFIGURACIÓN DE MONITOREO ===
+-    ENABLE_MONITORING: bool = Field(True, description="Habilitar monitoreo")
+-    MONITORING_INTERVAL: int = Field(300, description="Intervalo de monitoreo en segundos")
+-    ALERT_EMAIL_ENABLED: bool = Field(False, description="Habilitar alertas por email")
+-    ALERT_SLACK_ENABLED: bool = Field(False, description="Habilitar alertas por Slack")
+-    
+-    # === CONFIGURACIÓN DE EMAIL ===
+-    SMTP_SERVER: Optional[str] = Field(None, description="Servidor SMTP")
+-    SMTP_PORT: int = Field(587, description="Puerto SMTP")
+-    SMTP_USERNAME: Optional[str] = Field(None, description="Usuario SMTP")
+-    SMTP_PASSWORD: Optional[str] = Field(None, description="Contraseña SMTP")
+-    SMTP_USE_TLS: bool = Field(True, description="Usar TLS para SMTP")
+-    EMAIL_FROM: Optional[str] = Field(None, description="Email remitente")
+-    EMAIL_USERNAME: Optional[str] = Field(None, description="Usuario de email")
+-    EMAIL_PASSWORD: Optional[str] = Field(None, description="Contraseña de email")
+-    
+-    # === CONFIGURACIÓN DE SLACK ===
+-    SLACK_WEBHOOK_URL: Optional[AnyHttpUrl] = Field(None, description="Webhook URL de Slack")
+-    SLACK_CHANNEL: str = Field("#data-alerts", description="Canal de Slack para alertas")
+-    
+-    # === CONFIGURACIÓN DE AWS ===
+-    AWS_ACCESS_KEY_ID: Optional[str] = Field(None, description="AWS Access Key ID")
+-    AWS_SECRET_ACCESS_KEY: Optional[str] = Field(None, description="AWS Secret Access Key")
+-    AWS_REGION: str = Field("us-east-1", description="Región de AWS")
+-    AWS_S3_BUCKET: Optional[str] = Field(None, description="Bucket S3 para backups")
+-    BACKUP_S3_BUCKET: Optional[str] = Field(None, description="Bucket S3 para backups")
+-    
+-    # === CONFIGURACIÓN DE PREFECT ===
+-    PREFECT_API_URL: Optional[AnyHttpUrl] = Field(None, description="URL de la API de Prefect")
+-    PREFECT_WORKSPACE: Optional[str] = Field(None, description="Workspace de Prefect")
+-    
+-    # === CONFIGURACIÓN DE SEGURIDAD ===
+-    SECRET_KEY: str = Field("development-secret-key-must-be-at-least-32-characters-long", description="Clave secreta para tokens")
+-    ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(60, description="Minutos de expiración del token")
+-    ALGORITHM: str = Field("HS256", description="Algoritmo de encriptación")
+-    
+-    # === CONFIGURACIÓN DE LOGGING ===
+-    LOG_FORMAT: str = Field("detailed", description="Formato de logging")
+-    
+-    # === CONFIGURACIÓN DE CACHE ===
+-    REDIS_URL: Optional[str] = Field(None, description="URL de Redis para cache")
+-    CACHE_TTL: int = Field(300, description="TTL del cache en segundos")
+-    
+-    class Config:
+-        env_file = ".env"
+-        case_sensitive = True
+-        
+-    @validator('DATABASE_TYPE', pre=True, always=True)
+-    def auto_detect_database_type(cls, v, values):
+-        """Auto-detecta el tipo de base de datos basado en la URL"""
+-        if v is not None:
+-            return v
+-        
+-        database_url = values.get('DATABASE_URL', '')
+-        if not database_url:
+-            return DatabaseType.POSTGRESQL
+-        
+-        # Detectar Supabase por la URL
+-        if 'supabase.co' in database_url or 'supabase.com' in database_url:
+-            return DatabaseType.SUPABASE
+-        else:
+-            return DatabaseType.POSTGRESQL
+-    
+-    @validator('SUPABASE_URL', pre=True, always=True)
+-    def extract_supabase_url(cls, v, values):
+-        """Extrae la URL de Supabase desde DATABASE_URL si no está especificada"""
+-        if v is not None:
+-            return v
+-        
+-        database_url = values.get('DATABASE_URL', '')
+-        database_type = values.get('DATABASE_TYPE')
+-        
+-        if database_type == DatabaseType.SUPABASE and 'supabase.co' in database_url:
+-            from urllib.parse import urlparse
+-            parsed = urlparse(database_url)
+-            # Extraer el proyecto ID del hostname
+-            project_id = parsed.hostname.split('.')[0]
+-            return f"https://{project_id}.supabase.co"
+-        
+-        return v
+-    
+-    @validator('UPLOAD_PATH', 'TEMP_PATH', 'BACKUP_PATH')
+-    def create_directories(cls, v):
+-        """Crea directorios si no existen"""
+-        import os
+-        os.makedirs(v, exist_ok=True)
+-        return v
+-    
+-    @validator('SECRET_KEY')
+-    def validate_secret_key(cls, v):
+-        """Valida que la clave secreta tenga longitud mínima"""
+-        if len(v) < 32:
+-            raise ValueError('SECRET_KEY debe tener al menos 32 caracteres')
+-        return v
+-    
+-    @property
+-    def is_development(self) -> bool:
+-        """Verifica si estamos en entorno de desarrollo"""
+-        return self.ENVIRONMENT == Environment.DEVELOPMENT
+-    
+-    @property
+-    def is_production(self) -> bool:
+-        """Verifica si estamos en entorno de producción"""
+-        return self.ENVIRONMENT == Environment.PRODUCTION
+-    
+-    @property
+-    def is_testing(self) -> bool:
+-        """Verifica si estamos en entorno de testing"""
+-        return self.ENVIRONMENT == Environment.TESTING
+-    
+-    @property
+-    def is_supabase(self) -> bool:
+-        """Verifica si estamos usando Supabase"""
+-        return self.DATABASE_TYPE == DatabaseType.SUPABASE
+-    
+-    @property
+-    def is_postgresql(self) -> bool:
+-        """Verifica si estamos usando PostgreSQL tradicional"""
+-        return self.DATABASE_TYPE == DatabaseType.POSTGRESQL
+-    
+-    @property
+-    def database_config(self) -> Dict[str, Any]:
+-        """Retorna configuración específica de la base de datos"""
+-        config = {
+-            "database_url": self.DATABASE_URL,
+-            "database_type": self.DATABASE_TYPE,
+-            "pool_size": self.DB_POOL_SIZE,
+-            "max_overflow": self.DB_MAX_OVERFLOW,
+-            "pool_timeout": self.DB_POOL_TIMEOUT,
+-            "pool_recycle": self.DB_POOL_RECYCLE,
+-        }
+-        
+-        if self.is_supabase:
+-            config.update({
+-                "supabase_url": self.SUPABASE_URL,
+-                "supabase_anon_key": self.SUPABASE_ANON_KEY,
+-                "supabase_service_role_key": self.SUPABASE_SERVICE_ROLE_KEY,
+-                "supabase_jwt_secret": self.SUPABASE_JWT_SECRET,
+-            })
+-        
+-        return config
+-    
+-    def get_database_url_for_env(self, environment: str = None) -> str:
+-        """Obtiene la URL de base de datos para un entorno específico"""
+-        if environment == "test" and self.DATABASE_URL_TEST:
+-            return self.DATABASE_URL_TEST
+-        return self.DATABASE_URL
+-
+-# Configuraciones específicas por entorno
+-class DevelopmentSettings(Settings):
+-    """Configuración para entorno de desarrollo"""
+-    ENVIRONMENT: Environment = Environment.DEVELOPMENT
+-    DEBUG: bool = True
+-    LOG_LEVEL: str = "DEBUG"
+-    DB_POOL_SIZE: int = 5
+-    DB_MAX_OVERFLOW: int = 10
+-
+-class TestingSettings(Settings):
+-    """Configuración para entorno de testing"""
+-    ENVIRONMENT: Environment = Environment.TESTING
+-    DEBUG: bool = True
+-    LOG_LEVEL: str = "DEBUG"
+-    DB_POOL_SIZE: int = 2
+-    DB_MAX_OVERFLOW: int = 5
+-    
+-    @validator('DATABASE_URL', pre=True, always=True)
+-    def use_test_database(cls, v, values):
+-        """Usa la base de datos de testing si está configurada"""
+-        test_url = values.get('DATABASE_URL_TEST')
+-        if test_url:
+-            return test_url
+-        return v
+-
+-class ProductionSettings(Settings):
+-    """Configuración para entorno de producción"""
+-    ENVIRONMENT: Environment = Environment.PRODUCTION
+-    DEBUG: bool = False
+-    LOG_LEVEL: str = "INFO"
+-    ENABLE_MONITORING: bool = True
+-    ALERT_EMAIL_ENABLED: bool = True
+-
+-def get_settings() -> Settings:
+-    """Factory para obtener la configuración según el entorno"""
+-    env = os.getenv("ENVIRONMENT", "development").lower()
+-    
+-    if env == "production":
+-        return ProductionSettings()
+-    elif env == "testing":
+-        return TestingSettings()
+-    elif env == "development":
+-        return DevelopmentSettings()
+-    else:
+-        return Settings()
+-
+-# Instancia global de configuración
+-settings = get_settings()
+-
+-# Información de la aplicación
+-APP_INFO = {
+-    "title": settings.API_TITLE,
+-    "version": settings.API_VERSION,
+-    "description": """
+-    Sistema de Data Staging con soporte para múltiples fuentes de datos.
+-    
+-    Características:
+-    - Soporte para PostgreSQL y Supabase
+-    - Validaciones automáticas de calidad de datos
+-    - API REST completa para gestión de cargas
+-    - Dashboard de monitoreo en tiempo real
+-    - Integración con flujos ETL automatizados
+-    """,
+-    "contact": {
+-        "name": "Data Team",
+-        "email": "data-team@company.com",
+-    },
+-    "license_info": {
+-        "name": "MIT License",
+-        "url": "https://opensource.org/licenses/MIT",
+-    },
+-}
+\ No newline at end of file
+diff --git a/data-staging-system/src/data_staging/models/__init__.py.backup b/data-staging-system/src/data_staging/models/__init__.py.backup
+deleted file mode 100644
+index a86722d..0000000
+--- a/data-staging-system/src/data_staging/models/__init__.py.backup
++++ /dev/null
+@@ -1,103 +0,0 @@
+-# src/data_staging/models/__init__.py
+-"""
+-SQLAlchemy models for the Data Staging System
+-
+-This package contains all database models organized by functionality:
+-- base: Base classes and mixins
+-- data_source: Data source configuration models
+-- batch: Batch processing control models
+-- load_history: Load operation tracking models
+-- validation: Data validation and quality models
+-"""
+-
+-# Import base classes first
+-from .base import Base, BaseModel, TimestampMixin, AuditMixin
+-from .base import StagingMetaBase, StagingDataBase, ProductionBase
+-
+-# Import core models
+-from .data_source import DataSource, SourceLoadSummary, SourceType
+-from .batch import BatchControl, BatchStatus
+-from .load_history import LoadHistory, LoadType, LoadStatus
+-from .validation import ValidationLog, StagingRecord, ValidationStatus, ValidationType
+-
+-# Import all models for Alembic autogenerate
+-__all__ = [
+-    # Base classes
+-    'Base',
+-    'BaseModel', 
+-    'TimestampMixin',
+-    'AuditMixin',
+-    'StagingMetaBase',
+-    'StagingDataBase', 
+-    'ProductionBase',
+-    
+-    # Models
+-    'DataSource',
+-    'SourceLoadSummary',
+-    'BatchControl',
+-    'LoadHistory',
+-    'ValidationLog',
+-    'StagingRecord',
+-    
+-    # Enums
+-    'SourceType',
+-    'BatchStatus',
+-    'LoadType',
+-    'LoadStatus',
+-    'ValidationStatus',
+-    'ValidationType'
+-]
+-
+-# Model registry for dynamic access
+-MODEL_REGISTRY = {
+-    'data_source': DataSource,
+-    'source_load_summary': SourceLoadSummary,
+-    'batch_control': BatchControl,
+-    'load_history': LoadHistory,
+-    'validation_log': ValidationLog,
+-    'staging_record': StagingRecord,
+-}
+-
+-def get_model(model_name: str):
+-    """Get model class by name"""
+-    return MODEL_REGISTRY.get(model_name)
+-
+-def get_all_models():
+-    """Get all model classes"""
+-    return list(MODEL_REGISTRY.values())
+-
+-# Schema information
+-SCHEMA_MODELS = {
+-    'staging_meta': [
+-        DataSource,
+-        SourceLoadSummary, 
+-        BatchControl,
+-        LoadHistory,
+-        ValidationLog
+-    ],
+-    'staging_data': [
+-        StagingRecord
+-    ],
+-    'production': [
+-        # Production models would go here
+-        # These will be created as needed for specific business domains
+-    ]
+-}
+-
+-def get_models_for_schema(schema_name: str):
+-    """Get all models for a specific schema"""
+-    return SCHEMA_MODELS.get(schema_name, [])
+-
+-# Table creation order (respects foreign key dependencies)
+-CREATE_ORDER = [
+-    DataSource,
+-    SourceLoadSummary,
+-    BatchControl, 
+-    LoadHistory,
+-    ValidationLog,
+-    StagingRecord
+-]
+-
+-def get_creation_order():
+-    """Get models in dependency order for creation"""
+-    return CREATE_ORDER
+\ No newline at end of file
+diff --git a/data-staging-system/src/data_staging/models/base.py.backup b/data-staging-system/src/data_staging/models/base.py.backup
+deleted file mode 100644
+index 123dc2a..0000000
+--- a/data-staging-system/src/data_staging/models/base.py.backup
++++ /dev/null
+@@ -1,117 +0,0 @@
+-# src/data_staging/models/base.py
+-"""
+-Base SQLAlchemy model with common functionality for all models
+-"""
+-
+-from sqlalchemy import Column, DateTime, func, MetaData
+-from sqlalchemy.ext.declarative import declarative_base, declared_attr
+-from sqlalchemy.orm import declarative_base
+-from datetime import datetime
+-from typing import Any, Dict
+-
+-# Define naming convention for constraints
+-convention = {
+-    "ix": "ix_%(column_0_label)s",
+-    "uq": "uq_%(table_name)s_%(column_0_name)s",
+-    "ck": "ck_%(table_name)s_%(constraint_name)s",
+-    "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
+-    "pk": "pk_%(table_name)s"
+-}
+-
+-metadata = MetaData(naming_convention=convention)
+-Base = declarative_base(metadata=metadata)
+-
+-class TimestampMixin:
+-    """Mixin to add timestamp fields to models"""
+-    
+-    created_at = Column(
+-        DateTime(timezone=True), 
+-        server_default=func.now(),
+-        nullable=False,
+-        comment="Timestamp when record was created"
+-    )
+-    
+-    updated_at = Column(
+-        DateTime(timezone=True),
+-        server_default=func.now(),
+-        onupdate=func.now(),
+-        nullable=False,
+-        comment="Timestamp when record was last updated"
+-    )
+-
+-class BaseModel(Base, TimestampMixin):
+-    """Base model class with common functionality"""
+-    
+-    __abstract__ = True
+-    
+-    @declared_attr
+-    def __tablename__(cls):
+-        """Auto-generate table name from class name"""
+-        # Convert CamelCase to snake_case
+-        import re
+-        name = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', cls.__name__)
+-        return re.sub('([a-z0-9])([A-Z])', r'\1_\2', name).lower()
+-    
+-    def to_dict(self, exclude_fields: list = None) -> Dict[str, Any]:
+-        """Convert model instance to dictionary"""
+-        exclude_fields = exclude_fields or []
+-        result = {}
+-        
+-        for column in self.__table__.columns:
+-            if column.name not in exclude_fields:
+-                value = getattr(self, column.name)
+-                if isinstance(value, datetime):
+-                    value = value.isoformat()
+-                result[column.name] = value
+-                
+-        return result
+-    
+-    def update_from_dict(self, data: Dict[str, Any], exclude_fields: list = None):
+-        """Update model instance from dictionary"""
+-        exclude_fields = exclude_fields or ['id', 'created_at', 'updated_at']
+-        
+-        for key, value in data.items():
+-            if hasattr(self, key) and key not in exclude_fields:
+-                setattr(self, key, value)
+-    
+-    def __repr__(self):
+-        """String representation of model instance"""
+-        return f"<{self.__class__.__name__}(id={getattr(self, 'id', 'N/A')})>"
+-
+-class AuditMixin:
+-    """Mixin to add audit fields to models"""
+-    
+-    created_by = Column(
+-        'created_by',
+-        nullable=True,
+-        comment="User who created this record"
+-    )
+-    
+-    updated_by = Column(
+-        'updated_by', 
+-        nullable=True,
+-        comment="User who last updated this record"
+-    )
+-    
+-    version = Column(
+-        'version',
+-        default=1,
+-        nullable=False,
+-        comment="Version number for optimistic locking"
+-    )
+-
+-# Schema-specific base classes
+-class StagingMetaBase(BaseModel):
+-    """Base class for staging_meta schema tables"""
+-    __abstract__ = True
+-    __table_args__ = {'schema': 'staging_meta'}
+-
+-class StagingDataBase(BaseModel):
+-    """Base class for staging_data schema tables"""
+-    __abstract__ = True
+-    __table_args__ = {'schema': 'staging_data'}
+-
+-class ProductionBase(BaseModel):
+-    """Base class for production schema tables"""
+-    __abstract__ = True
+-    __table_args__ = {'schema': 'production'}
+diff --git a/data-staging-system/src/data_staging/workers/file_processor.py b/data-staging-system/src/data_staging/workers/file_processor.py
+index 640ca80..0f29a93 100644
+--- a/data-staging-system/src/data_staging/workers/file_processor.py
++++ b/data-staging-system/src/data_staging/workers/file_processor.py
+@@ -5,6 +5,7 @@ import re
+ import numpy as np
+ import io
+ import csv
++import uuid
+ from typing import Dict, Any, List, Optional
+ from datetime import datetime
+ from pathlib import Path
+@@ -15,8 +16,8 @@ from data_staging.config import settings
+ logger = logging.getLogger(__name__)
+ 
+ # Configuración de tamaños para procesamiento
+-CHUNK_SIZE_RECORDS = 100000
+-BATCH_SIZE_INSERT = 10000
++CHUNK_SIZE_RECORDS = 1000000
++BATCH_SIZE_INSERT = 50000
+ 
+ # Regex para caracteres de control inválidos que rompen CSV/JSON
+ INVALID_CHARS_REGEX = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
+@@ -220,15 +221,35 @@ def process_file_job(payload: Dict[str, Any]):
+         delimiter = file_analysis.get("delimiter", ",")
+         encoding = file_analysis.get("encoding", "utf-8")
+ 
+-        # 3. Crear tabla staging si no existe (siempre se crea para logs de error)
++        # 3. Preparar archivos en disco (válidos y rechazados) — sin tablas staging en BD
++        temp_dir = Path(settings.TEMP_PATH) if hasattr(settings, 'TEMP_PATH') else Path("temp_uploads")
++        temp_dir.mkdir(parents=True, exist_ok=True)
++
++        valid_temp_file   = temp_dir / f"{batch_id}_valid_records.csv"
++        rejected_temp_file = temp_dir / f"{batch_id}_rejected_records.csv"
++
++        # staging_table sigue existiendo como nombre lógico pero ya NO se crea ni se usa en BD.
++        # Se mantiene la variable por compatibilidad con firmas internas que aún la reciben.
+         safe_source_name = source_name.lower().replace(' ', '_').replace('-', '_')
+-        staging_table = f"stage_{safe_source_name}"
+-        create_staging_table(conn, staging_table)
+-        
+-        # LIMPIEZA: Eliminar registros previos de este batch para evitar duplicados en reintentos
+-        cursor.execute(f"DELETE FROM staging_data.{staging_table} WHERE batch_id = %s", (batch_id,))
++        staging_table = f"stage_{safe_source_name}"  # solo nombre lógico, no se crea
++
++        # Persistir rutas en metadata para que promotion_worker y el endpoint de descarga las encuentren
++        cursor.execute("""
++            UPDATE staging_meta.batch_control
++            SET metadata = COALESCE(metadata, '{}'::jsonb)
++                        || jsonb_build_object(
++                               'valid_temp_file',    %s::text,
++                               'rejected_temp_file', %s::text
++                           )
++            WHERE batch_id = %s
++        """, (str(valid_temp_file), str(rejected_temp_file), batch_id))
+         conn.commit()
+-        logger.info(f"Cleared previous staging data for batch {batch_id} in {staging_table}")
++
++        # LIMPIEZA: si es un reintento borrar archivos previos del mismo batch
++        for f in (valid_temp_file, rejected_temp_file):
++            if f.exists():
++                f.unlink()
++        logger.info(f"Disk files prepared for batch {batch_id}")
+         
+         not_null_columns = {}
+         if not target_column_types and target_schema and target_table:
+@@ -283,7 +304,7 @@ def process_file_job(payload: Dict[str, Any]):
+             except Exception as e:
+                 logger.error(f"Failed to query foreign keys: {e}")
+ 
+-        # 3. Procesar archivo por chunks
++        # 4. Procesar archivo por chunks
+         if not file_path.exists():
+             raise FileNotFoundError(f"File not found: {file_path}")
+ 
+@@ -295,15 +316,17 @@ def process_file_job(payload: Dict[str, Any]):
+             source_name=source_name,
+             column_mapping=column_mapping,
+             selected_columns=selected_columns,
+-            job_id=job_id,  # Para reportar progreso
+-            target_column_types=target_column_types,  # Pass schema for validation
++            job_id=job_id,
++            target_column_types=target_column_types,
+             not_null_columns=not_null_columns,
+             delimiter=delimiter,
+             encoding=encoding,
+             direct_load=direct_load,
+             target_schema=target_schema,
+             target_table=target_table,
+-            foreign_keys_data=foreign_keys_data
++            foreign_keys_data=foreign_keys_data,
++            valid_temp_file=valid_temp_file,
++            rejected_temp_file=rejected_temp_file
+         )
+         
+         # 4. Actualizar batch a COMPLETED
+@@ -450,7 +473,9 @@ def process_file_in_chunks(
+     direct_load: bool = False,
+     target_schema: Optional[str] = None,
+     target_table: Optional[str] = None,
+-    foreign_keys_data: Optional[Dict[str, set]] = None
++    foreign_keys_data: Optional[Dict[str, set]] = None,
++    valid_temp_file: Optional[Path] = None,
++    rejected_temp_file: Optional[Path] = None
+ ) -> Dict[str, Any]:
+     """
+     Procesa archivo en chunks usando Polars.
+@@ -506,7 +531,9 @@ def process_file_in_chunks(
+                     direct_load=direct_load,
+                     target_schema=target_schema,
+                     target_table=target_table,
+-                    foreign_keys_data=foreign_keys_data
++                    foreign_keys_data=foreign_keys_data,
++                    valid_temp_file=valid_temp_file,
++                    rejected_temp_file=rejected_temp_file
+                 )
+                 
+                 total_inserted += stats['inserted']
+@@ -561,7 +588,9 @@ def process_file_in_chunks(
+                     not_null_columns=not_null_columns,
+                     direct_load=direct_load,
+                     target_schema=target_schema,
+-                    target_table=target_table
++                    target_table=target_table,
++                    valid_temp_file=valid_temp_file,
++                    rejected_temp_file=rejected_temp_file
+                 )
+                 
+                 total_inserted += stats['inserted']
+@@ -623,7 +652,9 @@ def process_single_chunk(
+     direct_load: bool = False,
+     target_schema: Optional[str] = None,
+     target_table: Optional[str] = None,
+-    foreign_keys_data: Optional[Dict[str, set]] = None
++    foreign_keys_data: Optional[Dict[str, set]] = None,
++    valid_temp_file: Optional[Path] = None,
++    rejected_temp_file: Optional[Path] = None
+ ):
+     """Helper to process a single chunk dataframe."""
+     logger.info("--- WORKER CODE VERSION CHECK: NO TRUNCATE_ARG ---")
+@@ -641,54 +672,76 @@ def process_single_chunk(
+         foreign_keys_data=foreign_keys_data
+     )
+     
+-    # Carga Directa (COPY a Prod) vs Staging
++    # Carga Directa (COPY a Prod) vs Temp File (Post-Staging Validation)
++    
++    passed_records = [r for r in processed_records if r["validation_status"] == "PASSED"]
++    failed_records = [r for r in processed_records if r["validation_status"] == "FAILED"]
++    
++    db_inserted = 0
++    db_rejected = 0
++
+     if direct_load and target_schema and target_table:
+-        db_inserted = 0
+-        db_rejected = 0
+-        
+-        # 1. Identificar registros PASSED
+-        passed_records = [r for r in processed_records if r["validation_status"] == "PASSED"]
+-        failed_records = [r for r in processed_records if r["validation_status"] == "FAILED"]
+-        
+-        # 2. Inyectar PASSED directamente vía COPY
++        # Modo ultra-rápido: pasa a prod directo
+         if passed_records:
+-            # IMPORTANTE: Solo incluir columnas que están en el mapping.
+-            # Esto permite que los DEFAULTS de la base de datos funcionen para columnas no mapeadas.
+             target_cols = [c for c in column_mapping.keys() if c in target_column_types]
+-            
+-            # Si no hay mapeo, NO caemos en fallback de todas las columnas si es direct_load
+-            # porque eso suele romper los defaults de la BD.
+-            if not target_cols:
+-                logger.warning(f"No mapped columns found for direct ingestion of batch {batch_id}. Skipping COPY.")
+-                db_inserted = 0
+-            else:
+-                # DEBUG: Imprimir columnas a ingerir
+-                logger.info(f"DIRECT INGESTION: Targeting columns: {target_cols}")
+-                
++            if target_cols:
+                 ingestor = DirectIngestor(conn, target_schema, target_table, target_cols)
+                 ingestor.add_records(passed_records)
+                 ingestor.flush()
+                 db_inserted = len(passed_records)
+-        
+-        if failed_records:
+-            _, db_rejected = insert_records_in_batches(
+-                conn=conn,
+-                staging_table=staging_table,
+-                records=failed_records,
+-                batch_size=BATCH_SIZE_INSERT
+-            )
+-    else:
+-        # Comportamiento tradicional: todo a Staging
+-        db_inserted, db_rejected = insert_records_in_batches(
+-            conn=conn,
+-            staging_table=staging_table,
+-            records=processed_records,
+-            batch_size=BATCH_SIZE_INSERT
+-        )
+-    
++    elif valid_temp_file:
++        # Modo estándar: escribir PASSED a CSV temporal local
++        if passed_records:
++            target_cols = [c for c in column_mapping.keys() if c in target_column_types] if target_column_types else list(column_mapping.keys())
++            
++            # Write to temporary file line by line
++            file_exists = valid_temp_file.exists()
++            with open(valid_temp_file, "a", encoding="utf-8", newline="") as f:
++                writer = csv.writer(f, delimiter="\t", lineterminator="\n", quoting=csv.QUOTE_MINIMAL)
++                if not file_exists:
++                    # Opcionalmente escribir headers (no para postgres COPY si se especifica los cols exactos)
++                    # Pero ayuda para debuggear
++                    writer.writerow(target_cols + ['_batch_id_', '_source_row_number_'])
++                
++                for pr in passed_records:
++                    p_data = json.loads(pr["processed_data"])
++                    
++                    row_values = []
++                    for col in target_cols:
++                        val = p_data.get(col)
++                        if val is None or val == "" or (isinstance(val, float) and np.isnan(val)):
++                            row_values.append("\\N") # Postgres NULL
++                        else:
++                            s_val = str(val).replace("\t", " ").replace("\n", " ").replace("\r", " ")
++                            row_values.append(s_val)
++                    
++                    # Añadir metadata
++                    row_values.append(pr["batch_id"])
++                    row_values.append(str(pr["source_row_number"]))
++                    writer.writerow(row_values)
++            
++            db_inserted = len(passed_records)
++
++    # FALLIDOS → archivo en disco (no staging en BD, cero WAL)
++    if failed_records and rejected_temp_file is not None:
++        file_exists = rejected_temp_file.exists()
++        with open(rejected_temp_file, "a", encoding="utf-8", newline="") as rf:
++            writer = csv.writer(rf, delimiter="\t", lineterminator="\n", quoting=csv.QUOTE_MINIMAL)
++            if not file_exists:
++                writer.writerow(["source_row_number", "validation_status",
++                                  "error_details", "raw_data"])
++            for fr in failed_records:
++                writer.writerow([
++                    fr["source_row_number"],
++                    fr["validation_status"],
++                    fr.get("error_details") or "",
++                    fr.get("raw_data") or ""
++                ])
++        db_rejected = len(failed_records)
++
+     # Calcular stats reales basados en validación
+-    invalid_count = sum(1 for r in processed_records if r["validation_status"] == "FAILED")
+-    valid_count = len(processed_records) - invalid_count
++    invalid_count = len(failed_records)
++    valid_count = len(passed_records)
+     
+     # Calcular score promedio
+     chunk_quality = np.mean([r["data_quality_score"] for r in processed_records]) if processed_records else 0
+diff --git a/data-staging-system/src/data_staging/workers/promotion_worker.py b/data-staging-system/src/data_staging/workers/promotion_worker.py
+index ddd37e2..7abfaad 100644
+--- a/data-staging-system/src/data_staging/workers/promotion_worker.py
++++ b/data-staging-system/src/data_staging/workers/promotion_worker.py
+@@ -2,6 +2,8 @@
+ import logging
+ import json
+ import psycopg2
++import os
++import io
+ from typing import Dict, Any, List, Optional
+ from data_staging.config import settings
+ 
+@@ -39,6 +41,9 @@ def promote_batch_job(payload: Dict[str, Any]):
+     try:
+         cursor = conn.cursor()
+         
++        # Disable statement timeout for this massive transaction
++        cursor.execute("SET statement_timeout = 0;")
++        
+         # 1. Obtener metadata del batch para configuración de dedup
+         cursor.execute("""
+             SELECT metadata, source_name 
+@@ -51,15 +56,25 @@ def promote_batch_job(payload: Dict[str, Any]):
+             raise ValueError(f"Batch {batch_id} not found")
+             
+         metadata = batch_row[0] or {}
++        if isinstance(metadata, str):
++            metadata = json.loads(metadata)
+         source_name = batch_row[1]
+         
+         safe_source_name = source_name.lower().replace(' ', '_').replace('-', '_')
+         staging_table = f"stage_{safe_source_name}"
+         
+         dedup_columns = metadata.get("dedup_columns", [])
++        valid_temp_file_path = metadata.get("valid_temp_file")
+         
+         logger.info(f"Starting promotion for batch {batch_id} to {target_schema}.{target_table}")
+         
++        if not valid_temp_file_path:
++             logger.warning(f"No valid_temp_file found in metadata for batch {batch_id}. Will fallback to checking staging_data.")
++        else:
++             import os
++             if not os.path.exists(valid_temp_file_path):
++                  logger.warning(f"Temp file {valid_temp_file_path} not found on disk. It may be empty or already deleted.")
++        
+         # ---------------------------------------------------------
+         # FASE 2: PRE-VALIDACIÓN (Check de Duplicados CONDICIONAL)
+         # ---------------------------------------------------------
+@@ -71,7 +86,7 @@ def promote_batch_job(payload: Dict[str, Any]):
+             logger.info("No dedup columns configured. Skipping duplicate check (Append Mode).")
+ 
+         # ---------------------------------------------------------
+-        # FASE 3: INSERCIÓN EN LOTES
++        # FASE 3: INSERCIÓN EN LOTES / COPY
+         # ---------------------------------------------------------
+         
+         # Obtener columnas del mapping
+@@ -91,10 +106,7 @@ def promote_batch_job(payload: Dict[str, Any]):
+                  
+         target_columns = list(set(target_columns))
+ 
+-        # Construir listas de columnas
+-        target_cols = []
+-        select_exprs = []
+-        
++        # Construir listas de columnas confirmando su existencia en BD
+         cursor.execute("""
+             SELECT column_name, data_type 
+             FROM information_schema.columns 
+@@ -104,6 +116,7 @@ def promote_batch_job(payload: Dict[str, Any]):
+         db_columns = {row[0]: row[1] for row in cursor.fetchall()}
+         db_columns_lower = {k.lower(): k for k in db_columns.keys()}
+         
++        valid_db_target_cols = []
+         for requested_col in target_columns:
+             real_col_name = None
+             if requested_col in db_columns:
+@@ -112,44 +125,241 @@ def promote_batch_job(payload: Dict[str, Any]):
+                 real_col_name = db_columns_lower[requested_col.lower()]
+                 
+             if real_col_name:
+-                pg_type = db_columns[real_col_name]
+-                target_cols.append(real_col_name)
+-                
+-                cast_expr = ""
+-                if 'int' in pg_type: cast_expr = "::integer"
+-                elif 'num' in pg_type or 'dec' in pg_type or 'double' in pg_type or 'float' in pg_type or 'real' in pg_type: cast_expr = "::numeric"
+-                elif 'bool' in pg_type: cast_expr = "::boolean"
+-                elif 'date' in pg_type: cast_expr = "::date"
+-                elif 'timestamp' in pg_type: cast_expr = "::timestamp"
+-                
+-                select_exprs.append(f"(processed_data->>'{real_col_name}'){cast_expr}")
+-        
+-        if not target_cols:
+-            found_cols = list(db_columns.keys())
+-            raise ValueError(f"No columns matched between mapping and target table {target_schema}.{target_table}. Available columns in DB: {found_cols}. Requested columns: {target_columns}")
++                valid_db_target_cols.append(real_col_name)
+ 
+-        # Agregar campos de auditoría si existen
+-        if 'imported_at' in db_columns:
+-            target_cols.append('imported_at')
+-            select_exprs.append('NOW()')
+-            
+-        # Construir Query base
+-        cols_str = ", ".join([f'"{c}"' for c in target_cols]) 
+-        select_str = ", ".join(select_exprs)
+-        
+-        logger.info(f"Promotion columns: {target_cols}")
+-        
+-        # Contar total de registros a promover
+-        cursor.execute(f"""
+-            SELECT COUNT(*) FROM staging_data.{staging_table}
+-            WHERE batch_id = %s AND validation_status = 'PASSED' AND is_duplicate = false
+-        """, (batch_id,))
+-        total_to_promote = cursor.fetchone()[0]
+-        
+-        logger.info(f"Total records to promote: {total_to_promote}")
++        if not valid_db_target_cols:
++             found_cols = list(db_columns.keys())
++             raise ValueError(f"No columns matched between mapping and target table {target_schema}.{target_table}. Available columns in DB: {found_cols}. Requested columns: {target_columns}")
++
++        total_inserted = 0
++        batch_num = 1
+         
+-        if total_to_promote == 0:
+-            logger.warning("No records to promote (all filtered or no PASSED records).")
++        if valid_temp_file_path and os.path.exists(valid_temp_file_path):
++             # ---------------------------------------------------------
++             # METODO A: COPY desde Archivo Temporal (Ultra rápido)
++             # ---------------------------------------------------------
++             logger.info(f"Using standard Temp File COPY approach from {valid_temp_file_path}")
++             
++             # The CSV temp file has specific columns written to it in file_processor.py:
++             # target_cols + ['_batch_id_', '_source_row_number_']
++             # We should read the first line to ensure column order matches
++             with open(valid_temp_file_path, 'r', encoding='utf-8') as f:
++                 header_line = f.readline().strip()
++                 file_columns = header_line.split('\t')
++             
++             # Check if it has headers. In file_processor we added headers: target_cols + ['_batch_id_', '_source_row_number_']
++             # Remove internal columns from target table mapping if they don't exist in target table
++             copy_columns = []
++             for col in file_columns:
++                 if col in db_columns:
++                     copy_columns.append(f'"{col}"')
++                 else:
++                     logger.warning(f"Temp file column '{col}' not found in target table {target_schema}.{target_table}. Ensure mapping is correct. Trying to ignore it by mapping to a dummy column if postgres supported it, but postgres COPY requires exact match or subset.")
++             
++             # To be safe, let's use the columns found in in the file that actually map to the DB.
++             # Note: if the file has EXTRA columns not in the target table, postgres COPY with columns list will fail if the file row has more columns than listed.
++             # But the file processor only generated `target_cols + metadata`. 
++             # To handle the mismatch safely, let's construct a temporary table, COPY all, then INSERT SELECT.
++             
++             # 1. Create temporary table mapping exact file structure
++             temp_table_name = f"temp_promo_{batch_id.replace('-', '_')}"
++             
++             # Determine simple text types for temp table to avoid type errors on COPY
++             col_defs = [f'"{col}" text' for col in file_columns]
++             
++             # Create temp table once
++             cursor.execute(f"CREATE TEMP TABLE {temp_table_name} ({', '.join(col_defs)})")
++             
++             # 2. Prepare COPY and INSERT statements
++             copy_cols_str = ", ".join([f'"{col}"' for col in file_columns])
++             copy_query = f"COPY {temp_table_name} ({copy_cols_str}) FROM STDIN WITH CSV DELIMITER E'\\t' NULL '\\N'"
++             
++             select_exprs = []
++             insert_cols = []
++             for col in valid_db_target_cols:
++                 if col in file_columns:
++                     insert_cols.append(f'"{col}"')
++                     pg_type = db_columns[col]
++                     cast_expr = ""
++                     if 'int' in pg_type: cast_expr = "::integer"
++                     elif 'num' in pg_type or 'dec' in pg_type or 'double' in pg_type or 'float' in pg_type or 'real' in pg_type: cast_expr = "::numeric"
++                     elif 'bool' in pg_type: cast_expr = "::boolean"
++                     elif 'date' in pg_type: cast_expr = "::date"
++                     elif 'timestamp' in pg_type: cast_expr = "::timestamp"
++                     
++                     select_exprs.append(f'NULLIF("{col}", \'\\N\'){cast_expr}')
++             
++             # Add audit fields
++             if 'imported_at' in db_columns:
++                 insert_cols.append('"imported_at"')
++                 select_exprs.append("NOW()")
++                 
++             if not insert_cols:
++                 raise ValueError("No matching columns could be found between the temp file and target table.")
++                 
++             insert_cols_str = ", ".join(insert_cols)
++             select_str = ", ".join(select_exprs)
++             
++             insert_query = f"""
++                 INSERT INTO {target_schema}.{target_table} ({insert_cols_str})
++                 SELECT {select_str} FROM {temp_table_name}
++             """
++             
++             logger.info(f"Targeting columns for INSERT: {insert_cols_str}")
++             
++             # Disable WAL generation for the target table during bulk load
++             try:
++                 cursor.execute(f'ALTER TABLE "{target_schema}"."{target_table}" SET UNLOGGED')
++                 conn.commit()
++                 logger.info(f"Set {target_schema}.{target_table} to UNLOGGED to prevent WAL exhaustion.")
++             except Exception as e:
++                 logger.warning(f"Could not set table to UNLOGGED (requires superuser or table owner): {e}")
++                 conn.rollback()
++             
++             # 3. Stream data from CSV file in chunks
++             buffer = io.StringIO()
++             current_chunk_rows = 0
++             chunk_size = PROMOTION_BATCH_SIZE
++             
++             with open(valid_temp_file_path, 'r', encoding='utf-8') as f:
++                 next(f) # Skip header line we already read
++                 
++                 for line in f:
++                     buffer.write(line)
++                     current_chunk_rows += 1
++                     
++                     if current_chunk_rows >= chunk_size:
++                         # Process chunk
++                         buffer.seek(0)
++                         cursor.copy_expert(copy_query, buffer)
++                         
++                         cursor.execute(insert_query)
++                         total_inserted += cursor.rowcount
++                         
++                         cursor.execute(f"TRUNCATE TABLE {temp_table_name}")
++                         conn.commit()  # <-- Crucial! Commit the chunk independently
++                         
++                         buffer = io.StringIO()  # Reset buffer
++                         current_chunk_rows = 0
++                         logger.info(f"Promoted chunk logic: Batch {batch_id}. Total inserted so far: {total_inserted}")
++                 
++                 # Process any remaining lines in the final chunk
++                 if current_chunk_rows > 0:
++                     buffer.seek(0)
++                     cursor.copy_expert(copy_query, buffer)
++                     
++                     cursor.execute(insert_query)
++                     total_inserted += cursor.rowcount
++                     
++                     cursor.execute(f"TRUNCATE TABLE {temp_table_name}")
++                     conn.commit()
++                     logger.info(f"Promoted final chunk: Batch {batch_id}. Total inserted: {total_inserted}")
++             
++             # Drop temp table at the very end
++             cursor.execute(f"DROP TABLE IF EXISTS {temp_table_name}")
++             conn.commit()
++             
++             # Re-enable WAL generation for target table
++             try:
++                 cursor.execute(f'ALTER TABLE "{target_schema}"."{target_table}" SET LOGGED')
++                 conn.commit()
++                 logger.info(f"Restored {target_schema}.{target_table} to LOGGED.")
++             except Exception as e:
++                 logger.warning(f"Could not restore table to LOGGED: {e}")
++                 conn.rollback()
++             
++             # Cleanup specific batch valid file
++             try:
++                 os.remove(valid_temp_file_path)
++                 logger.info(f"Deleted temp file: {valid_temp_file_path}")
++             except OSError as e:
++                 logger.warning(f"Failed to delete temp file {valid_temp_file_path}: {e}")
++                 
++             # Cleanup stage_table NO MATTER WHAT because it should only hold FAILED records now,
++             # but we still want to be safe and delete PASSED ones if they somehow ended up there.
++             cursor.execute(f"DELETE FROM staging_data.{staging_table} WHERE batch_id = %s AND validation_status = 'PASSED'", (batch_id,))
++             conn.commit()
++             
++        else:
++             # ---------------------------------------------------------
++             # METODO B: Fallback Clásico desde Tabla Staging
++             # ---------------------------------------------------------
++             logger.warning(f"File {valid_temp_file_path} not available. Falling back to staging table.")
++             
++             target_cols = []
++             select_exprs = []
++             for real_col_name in valid_db_target_cols:
++                 pg_type = db_columns[real_col_name]
++                 target_cols.append(real_col_name)
++                 
++                 cast_expr = ""
++                 if 'int' in pg_type: cast_expr = "::integer"
++                 elif 'num' in pg_type or 'dec' in pg_type or 'double' in pg_type or 'float' in pg_type or 'real' in pg_type: cast_expr = "::numeric"
++                 elif 'bool' in pg_type: cast_expr = "::boolean"
++                 elif 'date' in pg_type: cast_expr = "::date"
++                 elif 'timestamp' in pg_type: cast_expr = "::timestamp"
++                 
++                 select_exprs.append(f"(processed_data->>'{real_col_name}'){cast_expr}")
++             
++             if 'imported_at' in db_columns:
++                 target_cols.append('imported_at')
++                 select_exprs.append('NOW()')
++                 
++             cols_str = ", ".join([f'"{c}"' for c in target_cols]) 
++             select_str = ", ".join(select_exprs)
++             
++             # Contar total a promover
++             cursor.execute(f"""
++                 SELECT COUNT(*) FROM staging_data.{staging_table}
++                 WHERE batch_id = %s AND validation_status = 'PASSED' AND is_duplicate = false
++             """, (batch_id,))
++             total_to_promote = cursor.fetchone()[0]
++             
++             if total_to_promote == 0:
++                 logger.warning("No records to promote (all filtered or no PASSED records).")
++                 
++             else:
++                 cursor.execute("SET statement_timeout = 600000;")  # 10 min por batch
++                 
++                 while True:
++                     batch_num += 1
++                     batch_insert_query = f"""
++                         INSERT INTO {target_schema}.{target_table} ({cols_str})
++                         SELECT {select_str}
++                         FROM (
++                            SELECT processed_data, ctid as staging_ctid 
++                            FROM staging_data.{staging_table}
++                            WHERE batch_id = %s 
++                              AND validation_status = 'PASSED'
++                              AND is_duplicate = false
++                            LIMIT {PROMOTION_BATCH_SIZE}
++                         ) AS subquery
++                     """
++                     cursor.execute(batch_insert_query, (batch_id,))
++                     batch_inserted = cursor.rowcount
++                     
++                     if batch_inserted == 0:
++                         break
++                     
++                     total_inserted += batch_inserted
++                     
++                     cursor.execute(f"""
++                         DELETE FROM staging_data.{staging_table}
++                         WHERE ctid IN (
++                             SELECT ctid FROM staging_data.{staging_table}
++                             WHERE batch_id = %s 
++                               AND validation_status = 'PASSED'
++                               AND is_duplicate = false
++                             LIMIT {PROMOTION_BATCH_SIZE}
++                         )
++                     """, (batch_id,))
++                     
++                     conn.commit()
++                     progress_pct = min(100, round(total_inserted * 100 / total_to_promote, 1))
++                     logger.info(f"Promotion batch {batch_num} (Fallback): inserted {batch_inserted}. Progress: {progress_pct}%")
++
++        # FINALIZAR SI NO HUBO REGISTROS
++        if total_inserted == 0:
+             cursor.execute("""
+                 UPDATE staging_meta.batch_control
+                 SET status = 'PROMOTED',
+@@ -159,72 +369,8 @@ def promote_batch_job(payload: Dict[str, Any]):
+             """, (json.dumps({"promoted_at": "NOW()", "promoted_count": 0}), batch_id))
+             conn.commit()
+             return
+-        
+-        # Timeout extendido por batch
+-        cursor.execute("SET statement_timeout = 600000;")  # 10 min por batch
+-        
+-        # ---- LOOP DE INSERCIÓN POR LOTES ----
+-        total_inserted = 0
+-        batch_num = 0
+-        
+-        while True:
+-            batch_num += 1
+-            
+-            # Usar una subconsulta con LIMIT para insertar en lotes
+-            # Nota: usamos ctid para paginación eficiente sin ORDER BY
+-            batch_insert_query = f"""
+-                INSERT INTO {target_schema}.{target_table} ({cols_str})
+-                SELECT {select_str}
+-                FROM staging_data.{staging_table}
+-                WHERE batch_id = %s 
+-                  AND validation_status = 'PASSED'
+-                  AND is_duplicate = false
+-                LIMIT {PROMOTION_BATCH_SIZE}
+-            """
+-            
+-            cursor.execute(batch_insert_query, (batch_id,))
+-            batch_inserted = cursor.rowcount
+-            
+-            if batch_inserted == 0:
+-                logger.info(f"Batch {batch_num}: No more records to insert. Done.")
+-                break
+             
+-            total_inserted += batch_inserted
+-            
+-            # ELIMINAR de staging los registros ya insertados en producción
+-            # Esto libera espacio inmediatamente y reduce WAL (vs UPDATE + DELETE posterior)
+-            cursor.execute(f"""
+-                DELETE FROM staging_data.{staging_table}
+-                WHERE ctid IN (
+-                    SELECT ctid FROM staging_data.{staging_table}
+-                    WHERE batch_id = %s 
+-                      AND validation_status = 'PASSED'
+-                      AND is_duplicate = false
+-                    LIMIT {PROMOTION_BATCH_SIZE}
+-                )
+-            """, (batch_id,))
+-            
+-            # COMMIT cada batch para liberar locks, WAL y evitar timeout
+-            conn.commit()
+-            
+-            progress_pct = min(100, round(total_inserted * 100 / total_to_promote, 1))
+-            logger.info(f"Promotion batch {batch_num}: inserted {batch_inserted}, "
+-                       f"deleted from staging. "
+-                       f"({total_inserted}/{total_to_promote} = {progress_pct}%)")
+-            
+-            # Actualizar progreso en metadata
+-            cursor.execute("""
+-                UPDATE staging_meta.batch_control
+-                SET metadata = metadata || %s::jsonb
+-                WHERE batch_id = %s
+-            """, (json.dumps({
+-                "promotion_progress": progress_pct,
+-                "promotion_inserted": total_inserted,
+-                "promotion_total": total_to_promote
+-            }), batch_id))
+-            conn.commit()
+-        
+-        logger.info(f"Successfully promoted {total_inserted} records in {batch_num} batches.")
++        logger.info(f"Successfully promoted {total_inserted} records.")
+         
+         # ---------------------------------------------------------
+         # FASE 4: FINALIZACIÓN

@@ -329,26 +329,31 @@ def process_file_job(payload: Dict[str, Any]):
             rejected_temp_file=rejected_temp_file
         )
         
-        # 4. Actualizar batch a COMPLETED
+        # 4. Actualizar batch a COMPLETED o FAILED si originó 0 records
+        final_status = 'COMPLETED' if stats["total_inserted"] > 0 else 'FAILED'
+        error_msg = None if stats["total_inserted"] > 0 else "All records failed validation or file was empty. 0 records inserted."
+        
         cursor.execute("""
             UPDATE staging_meta.batch_control
-            SET status = 'COMPLETED',
+            SET status = %s,
                 completed_at = CURRENT_TIMESTAMP,
                 records_count = %s,
                 metadata = COALESCE(metadata, '{}'::jsonb) || %s::jsonb,
-                error_message = NULL
+                error_message = %s
             WHERE batch_id = %s
         """, (
+            final_status,
             stats["total_inserted"],
             json.dumps({
                 "processing_stats": stats,
                 "completed_at": datetime.now().isoformat()
             }),
+            error_msg,
             batch_id
         ))
         conn.commit()
         
-        logger.info(f"Batch {batch_id} completed: {stats['total_inserted']} records processed")
+        logger.info(f"Batch {batch_id} finished with status {final_status}: {stats['total_inserted']} records processed")
         
         # 5. Auto-production si está habilitado
         if auto_production:
@@ -562,6 +567,7 @@ def process_file_in_chunks(
                             batch_id
                         ))
                         conn.commit()
+                        cursor.close()
                     except Exception as e:
                         logger.warning(f"Failed to update progress: {e}")
                 
@@ -619,6 +625,7 @@ def process_file_in_chunks(
                             batch_id
                         ))
                         conn.commit()
+                        cursor.close()
                     except Exception as e:
                         logger.warning(f"Failed to update progress: {e}")
                 
@@ -789,18 +796,19 @@ def validate_and_prepare_chunk(
             source_col = map_info.get("source")
             default_val = map_info.get("default")
             
-            if source_col and source_col in chunk_df.columns:
-                # Renombrar y aplicar default si es null
-                chunk_df = chunk_df.with_columns([
-                    pl.when(pl.col(source_col).is_null())
-                      .then(pl.lit(default_val))
-                      .otherwise(pl.col(source_col))
-                      .alias(target_col)
-                ])
-            elif default_val is not None:
-                # Columna no existe, crear con default
+            # REGLA DE NEGOCIO: Si el usuario asignó un default_val explícito, 
+            # tiene prioridad absoluta y omite la información de `source_col`
+            if default_val is not None and str(default_val).strip() != "":
                 chunk_df = chunk_df.with_columns([
                     pl.lit(default_val).alias(target_col)
+                ])
+            # Si NO hay default_val, entonces tomamos la información de la columna original si existe
+            elif source_col and source_col in chunk_df.columns:
+                chunk_df = chunk_df.rename({source_col: target_col})
+            # Si es una columna nueva (no mapeada) y no tiene default, la llenamos con NULL
+            else:
+                chunk_df = chunk_df.with_columns([
+                    pl.lit(None).alias(target_col)
                 ])
         
         # Seleccionar solo columnas target

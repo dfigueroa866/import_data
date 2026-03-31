@@ -31,7 +31,6 @@ const Sidebar = () => {
         { path: '/', icon: LayoutDashboard, label: 'Dashboard' },
         { path: '/upload', icon: Upload, label: 'Upload' },
         { path: '/batches', icon: Layers, label: 'Batches' },
-        { path: '/staging', icon: Database, label: 'Staging' },
         { path: '/monitoring', icon: Activity, label: 'Monitoring' },
     ];
 

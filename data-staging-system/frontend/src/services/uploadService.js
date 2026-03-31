@@ -41,4 +41,10 @@ export const uploadService = {
         const response = await api.post(`/api/v1/upload/process/${batchId}`, config);
         return response.data;
     },
+
+    // Resume Partially Promoted batch
+    resumePromotion: async (batchId) => {
+        const response = await api.post(`/api/v1/upload/staging/promote/${batchId}/resume`);
+        return response.data;
+    },
 };

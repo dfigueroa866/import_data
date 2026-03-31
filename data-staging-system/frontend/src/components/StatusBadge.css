@@ -62,3 +62,12 @@
 .status-badge-default .status-badge-dot {
     background: var(--color-text-muted);
 }
+
+.status-badge-warning {
+    background: #fffbeb;
+    color: #d97706;
+}
+
+.status-badge-warning .status-badge-dot {
+    background: #f59e0b;
+}

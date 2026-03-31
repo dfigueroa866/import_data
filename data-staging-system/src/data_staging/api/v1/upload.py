@@ -1322,6 +1322,78 @@ async def promote_batch(
         logger.error(f"Error triggering promotion: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.post("/staging/promote/{batch_id}/resume")
+async def resume_promotion(
+    batch_id: str,
+    db: Session = Depends(get_database_session)
+):
+    """
+    Resume a batch promotion that failed mid-flight and is in PARTIALLY_PROMOTED state.
+    """
+    try:
+        # 1. Validate batch exists and is ready
+        batch = db.execute(text("SELECT status, metadata FROM staging_meta.batch_control WHERE batch_id = :batch_id"), {"batch_id": batch_id}).fetchone()
+        
+        if not batch:
+            raise HTTPException(status_code=404, detail="Batch not found")
+            
+        # specifically allow PARTIALLY_PROMOTED or FAILED
+        if batch.status not in ['PARTIALLY_PROMOTED', 'FAILED']:
+             raise HTTPException(status_code=400, detail=f"Cannot resume a batch in '{batch.status}' status. Must be PARTIALLY_PROMOTED or FAILED.")
+        
+        metadata = batch.metadata
+        if isinstance(metadata, str):
+            metadata = json.loads(metadata)
+            
+        target_schema = metadata.get("target_schema")
+        target_table = metadata.get("target_table")
+        
+        if not target_schema or not target_table:
+             raise HTTPException(status_code=400, detail="Target schema/table not defined for this batch")
+
+        # 2. Check if a promotion job is already running
+        existing_job = db.execute(text("""
+            SELECT job_id FROM staging_meta.job_queue 
+            WHERE job_type = 'PROMOTE_BATCH' 
+            AND status IN ('PENDING', 'PROCESSING')
+            AND payload::jsonb ->> 'batch_id' = :batch_id
+        """), {"batch_id": batch_id}).fetchone()
+        
+        if existing_job:
+            return JSONResponse(
+                status_code=202,
+                content={"message": "Promotion already in progress", "job_id": existing_job.job_id}
+            )
+
+        # 3. Create Promotion Job
+        # Clear previous error message if retrying
+        db.execute(text("UPDATE staging_meta.batch_control SET error_message = NULL, status = 'PROCESSING' WHERE batch_id = :batch_id"), {"batch_id": batch_id})
+        db.commit()
+
+        job_id = create_job(
+            db=db,
+            job_type="PROMOTE_BATCH",
+            payload={
+                "batch_id": batch_id,
+                "target_schema": target_schema,
+                "target_table": target_table,
+                "dedup_columns": metadata.get("dedup_columns", [])
+            },
+            priority=10 # Higher priority for resumes
+        )
+        
+        return {
+            "message": "Resume promotion job queued",
+            "job_id": job_id,
+            "target": f"{target_schema}.{target_table}"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error resuming promotion: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get("/staging/batch/{batch_id}/rejected/download")
 async def download_rejected_records(

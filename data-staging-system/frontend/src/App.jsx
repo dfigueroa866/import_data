@@ -4,7 +4,6 @@ import Sidebar from './components/Sidebar';
 import Dashboard from './pages/Dashboard';
 import UploadWizard from './components/wizard/UploadWizard';
 import Batches from './pages/Batches';
-import Staging from './pages/Staging';
 import Monitoring from './pages/Monitoring';
 import './App.css';
 
@@ -18,7 +17,6 @@ function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/upload" element={<UploadWizard />} />
             <Route path="/batches" element={<Batches />} />
-            <Route path="/staging" element={<Staging />} />
             <Route path="/monitoring" element={<Monitoring />} />
           </Routes>
         </main>

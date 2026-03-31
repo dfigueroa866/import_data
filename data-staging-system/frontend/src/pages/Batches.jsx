@@ -38,6 +38,20 @@ const Batches = () => {
         );
     });
 
+    const handleResume = async (batchId) => {
+        try {
+            setLoading(true);
+            await uploadService.resumePromotion(batchId);
+            // Refresh list
+            loadBatches();
+        } catch (err) {
+            console.error('API Error resuming batch:', err);
+            alert('Failed to resume promotion. Please try again.');
+        } finally {
+            setLoading(false);
+        }
+    };
+
     return (
         <div className="page-container">
             <div className="page-header">
@@ -73,6 +87,7 @@ const Batches = () => {
                         <option value="PENDING">Pending</option>
                         <option value="PROCESSING">Processing</option>
                         <option value="COMPLETED">Completed</option>
+                        <option value="PARTIALLY_PROMOTED">Partially Promoted</option>
                         <option value="FAILED">Failed</option>
                     </select>
                 </div>
@@ -91,7 +106,7 @@ const Batches = () => {
                                     <th>Records</th>
                                     <th>File Size</th>
                                     <th>Created</th>
-                                    <th>Completed</th>
+                                    <th>Actions</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -102,15 +117,26 @@ const Batches = () => {
                                         </td>
                                         <td className="source-name">{batch.source_name || 'N/A'}</td>
                                         <td>
-                                            <StatusBadge status={batch.status} />
+                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                                <StatusBadge status={batch.status} />
+                                                {batch.status === 'PARTIALLY_PROMOTED' && batch.error_message && (
+                                                    <span style={{ fontSize: '11px', color: '#d97706', maxWidth: '200px' }}>
+                                                        {batch.error_message}
+                                                    </span>
+                                                )}
+                                            </div>
                                         </td>
                                         <td>{batch.records_count?.toLocaleString() || 0}</td>
                                         <td>{batch.file_size ? `${(batch.file_size / 1024).toFixed(2)} KB` : 'N/A'}</td>
                                         <td>{new Date(batch.created_at).toLocaleString()}</td>
                                         <td>
-                                            {batch.completed_at
-                                                ? new Date(batch.completed_at).toLocaleString()
-                                                : '-'}
+                                            {batch.status === 'PARTIALLY_PROMOTED' ? (
+                                                <Button size="small" onClick={() => handleResume(batch.batch_id)}>
+                                                    Resume
+                                                </Button>
+                                            ) : (
+                                                <span style={{ color: '#9ca3af', fontSize: '12px' }}>No actions</span>
+                                            )}
                                         </td>
                                     </tr>
                                 ))}

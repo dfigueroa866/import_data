@@ -22,6 +22,8 @@ const StatusBadge = ({ status, className = '' }) => {
             case 'in_progress':
             case 'running':
                 return { variant: 'processing', label: status };
+            case 'partially_promoted':
+                return { variant: 'warning', label: status };
             default:
                 return { variant: 'default', label: status };
         }

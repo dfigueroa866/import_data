@@ -95,6 +95,13 @@ try:
 except ImportError as e:
     logger.warning(f"Could not import system router: {e}")
 
+try:
+    from data_staging.api.v1.environments import router as environments_router
+    app.include_router(environments_router, prefix="/api/v1", tags=["Environments"])
+    logger.info("Environments router included")
+except ImportError as e:
+    logger.warning(f"Could not import environments router: {e}")
+
 
 @app.get("/")
 async def root():
