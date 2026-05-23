@@ -50,6 +50,7 @@ class DatabaseType(str, Enum):
     """Tipos de base de datos soportados"""
     POSTGRESQL = "postgresql"
     SUPABASE = "supabase"
+    CLICKHOUSE = "clickhouse"
 
 class DatabaseConfig(BaseSettings):
     """Configuración de base de datos con soporte para PostgreSQL y Supabase"""
@@ -95,8 +96,8 @@ class DatabaseConfig(BaseSettings):
         # Detectar Supabase por la URL
         if 'supabase.co' in database_url or 'supabase.com' in database_url:
             return DatabaseType.SUPABASE
-        elif database_url.startswith('postgresql://') or database_url.startswith('postgres://'):
-            return DatabaseType.POSTGRESQL
+        elif database_url.startswith('clickhouse'):
+            return DatabaseType.CLICKHOUSE
         else:
             return DatabaseType.POSTGRESQL
     
@@ -155,6 +156,30 @@ class DatabaseManager:
         
         # Configurar eventos del engine
         self._setup_engine_events(engine)
+        
+        return engine
+    
+    def _create_clickhouse_engine(self) -> Engine:
+        """Crea engine para ClickHouse"""
+        logger.info("Configurando engine para ClickHouse")
+        
+        # El connect_args para clickhouse-connect (via clickhouse-sqlalchemy)
+        connect_args = {
+            "connect_timeout": self.config.CONNECT_TIMEOUT,
+            "send_receive_timeout": self.config.COMMAND_TIMEOUT,
+        }
+        
+        engine = create_engine(
+            self.config.DATABASE_URL,
+            poolclass=QueuePool,
+            pool_size=15,
+            max_overflow=30,
+            pool_timeout=self.config.POOL_TIMEOUT,
+            pool_recycle=self.config.POOL_RECYCLE,
+            pool_pre_ping=True,
+            connect_args=connect_args,
+            echo=False
+        )
         
         return engine
     
@@ -246,6 +271,8 @@ class DatabaseManager:
         if self._engine is None:
             if self.database_type == DatabaseType.SUPABASE:
                 self._engine = self._create_supabase_engine()
+            elif self.database_type == DatabaseType.CLICKHOUSE:
+                self._engine = self._create_clickhouse_engine()
             else:
                 self._engine = self._create_postgresql_engine()
         
@@ -272,33 +299,50 @@ class DatabaseManager:
         """Prueba la conexión y retorna información del servidor"""
         try:
             with self.engine.begin() as conn:
-                # Información básica del servidor
-                result = conn.execute(text("SELECT version()"))
-                version = result.scalar()
-                
-                # Información de la base de datos actual
-                result = conn.execute(text("SELECT current_database(), current_user, inet_server_addr(), inet_server_port()"))
-                db_info = result.fetchone()
-                
-                # Verificar extensiones disponibles
-                result = conn.execute(text("""
-                    SELECT extname FROM pg_extension 
-                    WHERE extname IN ('uuid-ossp', 'pg_stat_statements', 'pg_trgm')
-                """))
-                extensions = [row[0] for row in result]
-                
-                info = {
-                    "status": "connected",
-                    "database_type": self.database_type,
-                    "version": version,
-                    "database": db_info[0],
-                    "user": db_info[1],
-                    "server_addr": db_info[2],
-                    "server_port": db_info[3],
-                    "extensions": extensions,
-                    "pool_size": self.engine.pool.size(),
-                    "checked_out": self.engine.pool.checkedout(),
-                }
+                if self.database_type == DatabaseType.CLICKHOUSE:
+                    result = conn.execute(text("SELECT version()"))
+                    version = result.scalar()
+                    
+                    result = conn.execute(text("SELECT currentDatabase(), currentUser()"))
+                    db_info = result.fetchone()
+                    
+                    info = {
+                        "status": "connected",
+                        "database_type": self.database_type,
+                        "version": version,
+                        "database": db_info[0] if db_info else None,
+                        "user": db_info[1] if db_info else None,
+                        "pool_size": self.engine.pool.size(),
+                        "checked_out": self.engine.pool.checkedout(),
+                    }
+                else:
+                    # Información básica del servidor (PostgreSQL)
+                    result = conn.execute(text("SELECT version()"))
+                    version = result.scalar()
+                    
+                    # Información de la base de datos actual
+                    result = conn.execute(text("SELECT current_database(), current_user, inet_server_addr(), inet_server_port()"))
+                    db_info = result.fetchone()
+                    
+                    # Verificar extensiones disponibles
+                    result = conn.execute(text("""
+                        SELECT extname FROM pg_extension 
+                        WHERE extname IN ('uuid-ossp', 'pg_stat_statements', 'pg_trgm')
+                    """))
+                    extensions = [row[0] for row in result]
+                    
+                    info = {
+                        "status": "connected",
+                        "database_type": self.database_type,
+                        "version": version,
+                        "database": db_info[0],
+                        "user": db_info[1],
+                        "server_addr": db_info[2],
+                        "server_port": db_info[3],
+                        "extensions": extensions,
+                        "pool_size": self.engine.pool.size(),
+                        "checked_out": self.engine.pool.checkedout(),
+                    }
                 
                 logger.info(f"Conexión exitosa a {self.database_type}")
                 return info

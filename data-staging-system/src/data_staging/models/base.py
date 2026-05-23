@@ -100,18 +100,42 @@ class AuditMixin:
         comment="Version number for optimistic locking"
     )
 
+# Helper for table args supporting ClickHouse
+def get_table_args(schema_name):
+    from data_staging.config import settings
+    if settings.is_clickhouse:
+        try:
+            from clickhouse_sqlalchemy import engines
+            # Return standard SQLAlchemy tuple with positional engine and schema kwarg
+            return (
+                engines.MergeTree(order_by=('id',)),
+                {'schema': schema_name}
+            )
+        except ImportError:
+            pass
+    return {'schema': schema_name}
+
 # Schema-specific base classes
 class StagingMetaBase(BaseModel):
     """Base class for staging_meta schema tables"""
     __abstract__ = True
-    __table_args__ = {'schema': 'staging_meta'}
+    
+    @declared_attr
+    def __table_args__(cls):
+        return get_table_args('staging_meta')
 
 class StagingDataBase(BaseModel):
     """Base class for staging_data schema tables"""
     __abstract__ = True
-    __table_args__ = {'schema': 'staging_data'}
+    
+    @declared_attr
+    def __table_args__(cls):
+        return get_table_args('staging_data')
 
 class ProductionBase(BaseModel):
     """Base class for production schema tables"""
     __abstract__ = True
-    __table_args__ = {'schema': 'm8_schema'}
+    
+    @declared_attr
+    def __table_args__(cls):
+        return get_table_args('m8_schema')

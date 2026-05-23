@@ -176,13 +176,24 @@ def verify_critical_tables_exist():
         
         with db_manager.get_session() as session:
             # Check if staging_meta.data_sources table exists
-            result = session.execute(text("""
-                SELECT EXISTS (
-                    SELECT 1 FROM information_schema.tables 
-                    WHERE table_schema = 'staging_meta' 
-                    AND table_name = 'data_sources'
-                )
-            """))
+            from data_staging.config import settings
+            
+            if settings.is_clickhouse:
+                result = session.execute(text("""
+                    SELECT EXISTS (
+                        SELECT 1 FROM system.tables 
+                        WHERE database = 'staging_meta' 
+                        AND name = 'data_sources'
+                    )
+                """))
+            else:
+                result = session.execute(text("""
+                    SELECT EXISTS (
+                        SELECT 1 FROM information_schema.tables 
+                        WHERE table_schema = 'staging_meta' 
+                        AND table_name = 'data_sources'
+                    )
+                """))
             
             table_exists = result.scalar()
             
@@ -192,13 +203,22 @@ def verify_critical_tables_exist():
                 return False
             
             # Check if required columns exist
-            result = session.execute(text("""
-                SELECT column_name 
-                FROM information_schema.columns 
-                WHERE table_schema = 'staging_meta' 
-                AND table_name = 'data_sources'
-                AND column_name IN ('created_at', 'updated_at')
-            """))
+            if settings.is_clickhouse:
+                result = session.execute(text("""
+                    SELECT name as column_name 
+                    FROM system.columns 
+                    WHERE database = 'staging_meta' 
+                    AND table = 'data_sources'
+                    AND name IN ('created_at', 'updated_at')
+                """))
+            else:
+                result = session.execute(text("""
+                    SELECT column_name 
+                    FROM information_schema.columns 
+                    WHERE table_schema = 'staging_meta' 
+                    AND table_name = 'data_sources'
+                    AND column_name IN ('created_at', 'updated_at')
+                """))
             
             existing_columns = [row[0] for row in result]
             required_columns = ['created_at', 'updated_at']

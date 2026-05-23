@@ -20,6 +20,7 @@ class DatabaseType(str, Enum):
     """Tipos de base de datos soportados"""
     POSTGRESQL = "postgresql"
     SUPABASE = "supabase"
+    CLICKHOUSE = "clickhouse"
 
 class Settings(BaseSettings):
     """Configuración principal del sistema"""
@@ -134,6 +135,8 @@ class Settings(BaseSettings):
         # Detectar Supabase por la URL
         if 'supabase.co' in database_url or 'supabase.com' in database_url:
             return DatabaseType.SUPABASE
+        elif database_url.startswith('clickhouse'):
+            return DatabaseType.CLICKHOUSE
         else:
             return DatabaseType.POSTGRESQL
     
@@ -193,6 +196,11 @@ class Settings(BaseSettings):
     def is_postgresql(self) -> bool:
         """Verifica si estamos usando PostgreSQL tradicional"""
         return self.DATABASE_TYPE == DatabaseType.POSTGRESQL
+    
+    @property
+    def is_clickhouse(self) -> bool:
+        """Verifica si estamos usando ClickHouse"""
+        return self.DATABASE_TYPE == DatabaseType.CLICKHOUSE
     
     @property
     def database_config(self) -> Dict[str, Any]:

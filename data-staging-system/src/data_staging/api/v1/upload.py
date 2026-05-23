@@ -537,11 +537,18 @@ async def process_batch(
         
         if target_schema and target_table:
             try:
-                type_query = text("""
-                    SELECT column_name, data_type, character_maximum_length
-                    FROM information_schema.columns 
-                    WHERE table_schema = :schema AND table_name = :table
-                """)
+                if settings.is_clickhouse:
+                    type_query = text("""
+                        SELECT name as column_name, type as data_type, NULL as character_maximum_length
+                        FROM system.columns 
+                        WHERE database = :schema AND table = :table
+                    """)
+                else:
+                    type_query = text("""
+                        SELECT column_name, data_type, character_maximum_length
+                        FROM information_schema.columns 
+                        WHERE table_schema = :schema AND table_name = :table
+                    """)
                 type_result = db.execute(type_query, {"schema": target_schema, "table": target_table})
                 
                 for row in type_result:

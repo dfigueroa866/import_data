@@ -8,9 +8,21 @@ from sqlalchemy import pool
 
 from alembic import context
 
+# Register clickhousedb and clickhouse dialects in Alembic implementation registry
+from alembic.ddl.impl import DefaultImpl, _impls
+_impls['clickhousedb'] = DefaultImpl
+_impls['clickhouse'] = DefaultImpl
+
 # Add the project root to the Python path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
+
+# Load environment variables from .env
+try:
+    from dotenv import load_dotenv
+    load_dotenv(project_root / ".env")
+except ImportError:
+    pass
 
 # Import only the Base class to avoid import issues
 try:
@@ -90,6 +102,17 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
+        # Pre-create alembic_version table with a valid ClickHouse engine
+        # to avoid the CompileError: "No engine for table 'alembic_version'"
+        if connectable.dialect.name in ('clickhouse', 'clickhousedb'):
+            from sqlalchemy import text
+            connection.execute(text("""
+                CREATE TABLE IF NOT EXISTS alembic_version (
+                    version_num String
+                ) ENGINE = MergeTree()
+                ORDER BY version_num
+            """))
+
         context.configure(
             connection=connection, 
             target_metadata=target_metadata

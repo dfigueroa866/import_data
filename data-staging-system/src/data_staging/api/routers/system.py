@@ -125,14 +125,22 @@ async def get_schemas(db: Session = Depends(get_database_session)):
     try:
         from sqlalchemy import text
         
-        query = text("""
-            SELECT schema_name 
-            FROM information_schema.schemata 
-            WHERE schema_name NOT IN ('pg_catalog', 'information_schema', 'pg_toast', 'pg_temp_1', 'pg_toast_temp_1')
-            AND schema_name NOT LIKE 'pg_temp_%'
-            AND schema_name NOT LIKE 'pg_toast_temp_%'
-            ORDER BY schema_name
-        """)
+        if settings.is_clickhouse:
+            query = text("""
+                SELECT name 
+                FROM system.databases 
+                WHERE name NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema')
+                ORDER BY name
+            """)
+        else:
+            query = text("""
+                SELECT schema_name 
+                FROM information_schema.schemata 
+                WHERE schema_name NOT IN ('pg_catalog', 'information_schema', 'pg_toast', 'pg_temp_1', 'pg_toast_temp_1')
+                AND schema_name NOT LIKE 'pg_temp_%'
+                AND schema_name NOT LIKE 'pg_toast_temp_%'
+                ORDER BY schema_name
+            """)
         
         result = db.execute(query).fetchall()
         schemas = [row[0] for row in result]
@@ -156,18 +164,31 @@ async def get_tables(
     try:
         from sqlalchemy import text
         
-        query = text("""
-            SELECT 
-                table_name,
-                (SELECT COUNT(*) 
-                 FROM information_schema.columns 
-                 WHERE table_schema = :schema 
-                 AND table_name = t.table_name) as column_count
-            FROM information_schema.tables t
-            WHERE table_schema = :schema
-            AND table_type = 'BASE TABLE'
-            ORDER BY table_name
-        """)
+        if settings.is_clickhouse:
+            query = text("""
+                SELECT 
+                    name as table_name,
+                    (SELECT COUNT(*) 
+                     FROM system.columns 
+                     WHERE database = :schema 
+                     AND table = t.name) as column_count
+                FROM system.tables t
+                WHERE database = :schema
+                ORDER BY name
+            """)
+        else:
+            query = text("""
+                SELECT 
+                    table_name,
+                    (SELECT COUNT(*) 
+                     FROM information_schema.columns 
+                     WHERE table_schema = :schema 
+                     AND table_name = t.table_name) as column_count
+                FROM information_schema.tables t
+                WHERE table_schema = :schema
+                AND table_type = 'BASE TABLE'
+                ORDER BY table_name
+            """)
         
         result = db.execute(query, {"schema": schema}).fetchall()
         
