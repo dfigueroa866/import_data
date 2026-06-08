@@ -1,13 +1,13 @@
 # M8 Connect — repositorio
 
-Sistema de ingesta en [`data-staging-system/`](data-staging-system/).
+Sistema de ingesta en [`m8_connect/`](m8_connect/).
 
 ## Inicio rápido
 
-Ver [`data-staging-system/README.md`](data-staging-system/README.md) y [`data-staging-system/docs/FUNCIONAMIENTO_APLICACION.md`](data-staging-system/docs/FUNCIONAMIENTO_APLICACION.md).
+Ver [`m8_connect/README.md`](m8_connect/README.md) y [`m8_connect/docs/FUNCIONAMIENTO_APLICACION.md`](m8_connect/docs/FUNCIONAMIENTO_APLICACION.md).
 
 ```bash
-cd data-staging-system
+cd m8_connect
 pip install -r requirements.txt
 cp .env.example .env
 alembic upgrade head
@@ -18,4 +18,5 @@ cd frontend && npm run dev # terminal 3
 
 ## Túnel PostgreSQL (Docker)
 
-[`data-staging-system/docs/CONFIGURACION_POSTGRESQL_TUNEL.md`](data-staging-system/docs/CONFIGURACION_POSTGRESQL_TUNEL.md)
+[`m8_connect/docs/CONFIGURACION_POSTGRESQL_TUNEL.md`](m8_connect/docs/CONFIGURACION_POSTGRESQL_TUNEL.md)
+
