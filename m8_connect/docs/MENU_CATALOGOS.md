@@ -2,6 +2,8 @@
 
 Documentación del panel **Catálogos** (`/catalogs`) y su relación con el wizard de carga de catálogos (`/upload/catalog`).
 
+Índice general del proyecto: [README raíz](../../README.md).
+
 ---
 
 ## Visión general

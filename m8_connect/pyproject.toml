@@ -9,7 +9,7 @@ description = "M8 Connect — plataforma de ingesta, validación y promoción de
 authors = [
     {name = "Data Team", email = "data@company.com"}
 ]
-readme = "README.md"
+readme = "../README.md"
 requires-python = ">=3.9"
 classifiers = [
     "Development Status :: 4 - Beta",

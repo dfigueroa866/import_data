@@ -1,7 +1,7 @@
 # Funcionamiento actual de la aplicación — Paso a paso
 
 **Sistema:** M8 Connect v2.0  
-**Fecha:** 27 de mayo de 2026  
+**Fecha:** junio de 2026  
 **Propósito:** Describir con detalle cómo opera la aplicación hoy (código + UI), desde el arranque hasta la carga en producción.
 
 ---
@@ -33,7 +33,7 @@ La aplicación permite **importar archivos de datos** (CSV, Excel, JSON, Parquet
 4. **Procesamiento masivo** en background (worker).
 5. **Promoción** manual o automática a la tabla de producción.
 
-El camino **recomendado y usado por la UI** es el **Wizard de 4 pasos** desde `/upload` (landing) → `/upload/history` o `/upload/catalog`. Existe **POST `/api/v1/upload/file`** para integraciones API directas. El flujo legacy con tablas `staging_data.stage_*` y router `/api/v1/staging/*` fue retirado; la validación escribe archivos temp en disco.
+El camino **recomendado y usado por la UI** es el **Wizard de 4 pasos** desde `/upload` (landing) → `/upload/history` o `/upload/catalog`. Para integraciones sin UI existe **POST `/api/v1/upload/file`**. La validación escribe archivos temporales en disco (`{batch_id}_valid_records.parquet`) antes de promover a producción.
 
 ---
 
@@ -428,7 +428,6 @@ Incluye: `column_mappings`, `column_toggles`, `selected_columns`, `target_schema
 Constantes:
 
 - `CHUNK_SIZE_RECORDS = 1_000_000`
-- `BATCH_SIZE_INSERT = 50_000` (legacy inserts a staging)
 
 Para **CSV**:
 
@@ -452,7 +451,6 @@ Para **Excel**: lee workbook completo, mismo troceo.
    |------|--------|--------|
    | `direct_load=true` | `COPY` a `{target_schema}.{target_table}` vía `DirectIngestor` | Archivo rejected |
    | Modo estándar (wizard) | Append TSV a `valid_temp_file` | Append TSV a `rejected_temp_file` |
-   | Legacy staging BD | `insert_records_in_batches` (poco usado en flujo actual) | idem |
 
 3. Actualiza progreso en `metadata.processing_progress` del batch.
 
@@ -489,12 +487,12 @@ Handler: **`promote_batch_job`** en `promotion_worker.py`.
 
 ### 7.2 Pre-validación dedup
 
-Si hay `dedup_columns` en metadata, el worker **solo registra en log** que la verificación se omite por rendimiento. No ejecuta pre-check de duplicados en staging.
+Si hay `dedup_columns` en metadata, el worker **solo registra en log** que la verificación se omite por rendimiento. No ejecuta pre-check de duplicados antes de insertar.
 
 ### 7.3 Inserción
 
 1. Lee `metadata.valid_temp_file`.
-2. Si no existe → **error crítico** (el flujo actual depende del archivo, no de `staging_data.stage_*`).
+2. Si no existe → **error crítico** (la promoción depende del archivo `{batch_id}_valid_records.parquet` en `TEMP_PATH`).
 3. Abre archivo; lee header TSV.
 4. Cruza columnas del archivo con columnas reales en BD (case-insensitive).
 5. Si existe columna `imported_at` en destino, añade `NOW()` en insert.
@@ -560,17 +558,16 @@ Checklist post-cambios (Fase 0): claves UPSERT sin `sku_id`, `quantity`/`pieces`
 | `PROCESS_CHUNK_SIZE` | 250_000 | Chunks en `PROCESS_FILE` |
 | `AGGREGATION_CHUNK_SIZE` | 500_000 | Map-reduce en paso 3 |
 | `PARQUET_COMPRESSION` | snappy | Upload / valid / agregado |
-| `USE_VECTORIZED_VALIDATION` | false | Paridad vs legacy antes de activar |
+| `USE_VECTORIZED_VALIDATION` | false | Activar validación vectorizada (experimental) |
 | `PROGRESS_COMMIT_EVERY_CHUNKS` | 1 | Throttling progreso en BD |
 
 RAM recomendada: 16 GB (20M crudo); espacio en `TEMP_PATH` ≈ 2× tamaño del archivo.
 
 ### 7.8 Finalización
 
-1. Borra `valid_temp_file` del disco.
-2. Intenta `DELETE` en `staging_data.stage_{source}` para el batch (limpieza legacy).
-3. `status = 'PROMOTED'`, metadata con `promoted_count`.
-4. Si `total_inserted == 0` → `PROMOTED` con mensaje de que no había registros.
+1. Actualiza `status = 'PROMOTED'` y metadata con `promoted_count`.
+2. Borra `valid_temp_file` del disco.
+3. Si `total_inserted == 0` → `PROMOTED` con mensaje de que no había registros.
 
 ---
 
@@ -653,10 +650,6 @@ Ver migración Alembic `002_job_queue_and_indexes`. Trigger `pg_notify` en INSER
 | `{TEMP_PATH}/{batch_id}_rejected_records.tsv` | Filas FAILED (export) |
 | `metadata.aggregated_file_path` | CSV/Parquet agregado Weekly/Monthly |
 
-### 10.4 Tablas staging en BD (legacy — retirado)
-
-El worker ya **no** inserta en `staging_data.stage_*`. La promoción lee `{batch_id}_valid_records.parquet` desde `TEMP_PATH`.
-
 ---
 
 ## 11. Diagramas de flujo
@@ -730,7 +723,7 @@ flowchart TD
 | **Batch** | Una carga de datos identificada por `batch_id` |
 | **Job** | Tarea en cola (`PROCESS_FILE` o `PROMOTE_BATCH`) |
 | **Wizard** | UI de 4 pasos en `/upload/history` o `/upload/catalog` |
-| **Staging (concepto)** | Área intermedia de validación; hoy implementada como **archivos temp**, no solo tablas `staging_data` |
+| **Staging (concepto)** | Validación intermedia vía archivos temporales en disco (`TEMP_PATH`) antes de promover a producción |
 | **Promoción** | Paso final que inserta registros válidos en la tabla productiva |
 | **PASSED / FAILED** | Resultado de validación por fila |
 | **direct_load** | Omite archivo intermedio; COPY directo a producción durante process |
@@ -744,11 +737,12 @@ flowchart TD
 
 | Documento | Relación |
 |-----------|----------|
-| `README.md` | Instalación y comandos |
-| `MANUAL_DE_USO.md` | Guía usuario (parcialmente desactualizada vs código) |
-| `system_import_flow_guide.md` | Flujo antiguo basado en staging BD |
-| `docs/ANALISIS_CODIGO.md` | Hallazgos técnicos y bugs |
+| [`README.md`](../../README.md) | Overview, inicio rápido e índice de documentación |
+| [`INSTALL.md`](../INSTALL.md) | Instalación detallada y troubleshooting |
+| [`MANUAL_DE_USO.md`](../MANUAL_DE_USO.md) | Guía de usuario |
+| [`MENU_CATALOGOS.md`](./MENU_CATALOGOS.md) | Admin y wizard de catálogos |
+| [`CONFIGURACION_POSTGRESQL_TUNEL.md`](./CONFIGURACION_POSTGRESQL_TUNEL.md) | Túnel Docker → PostgreSQL remoto |
 
 ---
 
-*Este documento describe el comportamiento observado en el código en la rama MVP2. Ante divergencias con manuales antiguos, prevalece la implementación descrita aquí.*
+*Este documento describe el comportamiento de la implementación actual (branch `m8_connect`). Ante divergencias con otros manuales, prevalece lo descrito aquí.*

@@ -40,7 +40,7 @@ Para **historia**: agregación semanal/mensual y comprobación de totales. Para 
 
 ## Integración API (sin UI)
 
-`POST /api/v1/upload/file` — upload directo + job `PROCESS_FILE` (ver Swagger `/docs`).
+`POST /api/v1/upload/file` — upload directo + job `PROCESS_FILE` (ver Swagger http://localhost:8000/docs).
 
 ## Documentación técnica
 

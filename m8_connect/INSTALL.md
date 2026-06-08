@@ -14,13 +14,7 @@ python scripts/setup/seed_data.py   # opcional: data_sources demo
 
 ## Run the system
 
-Three terminals:
-
-```bash
-python run_app.py
-python run_workers.py
-cd frontend && npm run dev
-```
+Ver [Inicio rápido](../README.md#inicio-rápido) en el README raíz.
 
 ## Database migrations (canonical)
 
@@ -35,7 +29,7 @@ Creates `staging_meta.*` (including `batch_control`, `job_queue`) and `staging_d
 - `public.users`, `public.organizations` — authentication
 - `public.skus`, `public.locations`, `public.sales_history` — production targets
 
-Legacy manual SQL in `migrations/*.sql` is superseded by Alembic revision `002_job_queue_and_indexes`.
+SQL en `migrations/*.sql` superseded by Alembic revision `002_job_queue_and_indexes`.
 
 ## Platform notes
 
@@ -64,8 +58,10 @@ pip3 install -r requirements.txt && pip3 install -e .
 | Workers idle, jobs stuck | Check `staging_meta.job_queue`; ensure `run_workers.py` running |
 | Login fails | Verify `public.users` exists and password hash is bcrypt |
 | Import errors | Set `PYTHONPATH=src` or run from project root via `run_app.py` |
+| CORS errors in production | Configure explicit origins in `src/data_staging/api/main.py` (avoid `allow_origins=["*"]` with credentials) |
 
 ## Docs
 
+- [README raíz](../README.md) — overview e inicio rápido
 - [`docs/FUNCIONAMIENTO_APLICACION.md`](docs/FUNCIONAMIENTO_APLICACION.md) — architecture and flows
 - [`docs/CONFIGURACION_POSTGRESQL_TUNEL.md`](docs/CONFIGURACION_POSTGRESQL_TUNEL.md) — remote DB tunnel

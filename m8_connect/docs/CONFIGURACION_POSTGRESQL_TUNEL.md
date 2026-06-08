@@ -246,4 +246,4 @@ No hace falta Docker tunnel en ese caso.
 
 ---
 
-*Relacionado: [FUNCIONAMIENTO_APLICACION.md](./FUNCIONAMIENTO_APLICACION.md), [ANALISIS_CODIGO.md](./ANALISIS_CODIGO.md)*
+*Relacionado: [FUNCIONAMIENTO_APLICACION.md](./FUNCIONAMIENTO_APLICACION.md), [README raíz](../../README.md)*
