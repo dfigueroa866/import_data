@@ -1,3 +1,4 @@
+-- DEPRECATED: use `alembic upgrade head` (revision 002_job_queue_and_indexes).
 -- Create job_queue table in staging_meta schema
 CREATE TABLE IF NOT EXISTS staging_meta.job_queue (
   job_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

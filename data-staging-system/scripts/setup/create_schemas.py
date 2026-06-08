@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-create_schemas.py - Script para crear esquemas y tablas del sistema de Data Staging
+create_schemas.py - Script para crear esquemas y tablas de M8 Connect
 
 Este script:
 1. Crea los esquemas necesarios (staging_meta, staging_data, production)
@@ -89,7 +89,8 @@ class SchemaCreator:
             started_at TIMESTAMP,
             completed_at TIMESTAMP,
             error_message TEXT,
-            metadata JSONB
+            metadata JSONB,
+            organization_id TEXT
         );
 
         -- Tabla de configuración de fuentes
@@ -469,7 +470,7 @@ class SchemaCreator:
 def main():
     """Función principal"""
     logger.info("=" * 60)
-    logger.info("CREADOR DE ESQUEMAS - DATA STAGING SYSTEM")
+    logger.info("CREADOR DE ESQUEMAS - M8 CONNECT")
     logger.info("=" * 60)
     
     try:

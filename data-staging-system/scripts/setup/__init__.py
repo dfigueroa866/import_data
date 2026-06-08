@@ -1,6 +1,6 @@
 # scripts/setup/__init__.py
 """
-Scripts de inicialización y configuración del sistema de Data Staging.
+Scripts de inicialización y configuración de M8 Connect.
 
 Este módulo contiene scripts para:
 - Inicializar la base de datos

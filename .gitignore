@@ -75,4 +75,6 @@ data-staging-system/backups/*
 # Other temp files
 *.tmp
 *.temp
+temp_uploads/
+data-staging-system/temp_uploads/
 validation_output.txt

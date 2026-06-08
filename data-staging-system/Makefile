@@ -1,4 +1,4 @@
-# Makefile for Data Staging System
+# Makefile for M8 Connect
 .PHONY: help install run dev dashboard test clean setup
 
 # Default Python command (try different options)
@@ -18,7 +18,7 @@ NC := \033[0m
 ]
 
 help:
-	@echo "$(GREEN)Data Staging System Commands$(NC)"
+	@echo "$(GREEN)M8 Connect Commands$(NC)"
 	@echo "================================"
 	@echo ""
 	@echo "$(YELLOW)Main Commands:$(NC)"
@@ -36,7 +36,7 @@ help:
 	@echo ""
 
 install:
-	@echo "$(GREEN)📦 Installing Data Staging System...$(NC)"
+	@echo "$(GREEN)📦 Installing M8 Connect...$(NC)"
 	@if [ -z "$(PIP)" ]; then \
 		echo "$(RED)❌ pip not found. Please install Python and pip first.$(NC)"; \
 		echo "$(YELLOW)Try: brew install python (on macOS)$(NC)"; \
@@ -63,7 +63,7 @@ check-deps:
 	@$(PYTHON) -c "import sqlalchemy; print('✅ SQLAlchemy available')\" 2>/dev/null || echo "❌ SQLAlchemy missing"
 
 run:
-	@echo "$(GREEN)🚀 Starting Data Staging System API...$(NC)"
+	@echo "$(GREEN)🚀 Starting M8 Connect API...$(NC)"
 	@echo "$(BLUE)📍 API will be available at: http://localhost:8000$(NC)"
 	@echo "$(BLUE)📚 API docs at: http://localhost:8000/docs$(NC)"
 	@echo ""

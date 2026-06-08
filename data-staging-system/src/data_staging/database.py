@@ -59,9 +59,9 @@ class DatabaseConfig(BaseSettings):
     DATABASE_URL: str = Field(..., description="URL de conexión a la base de datos")
     DATABASE_TYPE: Optional[DatabaseType] = Field(None, description="Tipo de base de datos (auto-detectado si no se especifica)")
     
-    # Configuración de pool de conexiones
-    POOL_SIZE: int = Field(10, description="Tamaño del pool de conexiones")
-    MAX_OVERFLOW: int = Field(20, description="Máximo overflow del pool")
+    # Configuración de pool de conexiones (API / SQLAlchemy)
+    POOL_SIZE: int = Field(25, description="Tamaño del pool de conexiones")
+    MAX_OVERFLOW: int = Field(45, description="Máximo overflow del pool")
     POOL_TIMEOUT: int = Field(30, description="Timeout del pool en segundos")
     POOL_RECYCLE: int = Field(3600, description="Tiempo de reciclaje de conexiones en segundos")
     
@@ -145,13 +145,19 @@ class DatabaseManager:
         engine = create_engine(
             self.config.DATABASE_URL,
             poolclass=QueuePool,
-            pool_size=15,  # Aumentado de 10 a 15
-            max_overflow=30,  # Aumentado de 20 a 30
+            pool_size=self.config.POOL_SIZE,
+            max_overflow=self.config.MAX_OVERFLOW,
             pool_timeout=self.config.POOL_TIMEOUT,
             pool_recycle=self.config.POOL_RECYCLE,
             pool_pre_ping=True,  # Detecta conexiones muertas ANTES de usarlas
             connect_args=connect_args,
             echo=False  # Cambiar a True para debug SQL
+        )
+        logger.info(
+            "PostgreSQL pool: size=%s overflow=%s timeout=%ss",
+            self.config.POOL_SIZE,
+            self.config.MAX_OVERFLOW,
+            self.config.POOL_TIMEOUT,
         )
         
         # Configurar eventos del engine
@@ -420,7 +426,12 @@ def get_database_manager() -> DatabaseManager:
     global _database_manager
     
     if _database_manager is None:
-        config = DatabaseConfig()
+        from data_staging.config import settings
+
+        config = DatabaseConfig(
+            POOL_SIZE=settings.API_DB_POOL_SIZE,
+            MAX_OVERFLOW=settings.API_DB_MAX_OVERFLOW,
+        )
         _database_manager = DatabaseManager(config)
     
     return _database_manager

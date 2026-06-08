@@ -18,6 +18,44 @@
     padding: 4rem 2rem;
 }
 
+.org-fixed-banner {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.85rem 1.1rem;
+    margin-bottom: 1.25rem;
+    border-radius: 8px;
+    border: 1px solid rgba(99, 102, 241, 0.35);
+    background: rgba(99, 102, 241, 0.08);
+}
+
+.org-fixed-label {
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.org-fixed-value {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.org-fixed-hint {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+}
+
+.no-matches-hint {
+    padding: 1rem 1.25rem;
+    margin-bottom: 1rem;
+    border-radius: 8px;
+    background: rgba(255, 193, 7, 0.08);
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    line-height: 1.5;
+}
+
 /* Mapping Stats */
 .mapping-stats {
     display: flex;
@@ -307,6 +345,18 @@ input:checked+.toggle-slider:after {
 
 .btn-icon.danger:hover {
     transform: scale(1.1);
+}
+
+.mapping-target select {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+}
+
+.mapping-target-hint {
+    margin: 0 0 1rem;
+    font-size: 0.875rem;
+    color: var(--text-secondary, #64748b);
 }
 
 .mapping-target select:focus,

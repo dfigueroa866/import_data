@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     API_HOST: str = Field("0.0.0.0", description="Host de la API")
     API_PORT: int = Field(8000, description="Puerto de la API")
     API_PREFIX: str = Field("/api/v1", description="Prefijo de la API")
-    API_TITLE: str = Field("Data Staging System", description="Título de la API")
+    API_TITLE: str = Field("M8 Connect", description="Título de la API")
     API_VERSION: str = Field("1.0.0", description="Versión de la API")
     
     # === CONFIGURACIÓN DE ARCHIVOS ===
@@ -69,6 +69,20 @@ class Settings(BaseSettings):
     MAX_ERROR_RATE: float = Field(0.05, description="Tasa máxima de errores permitida")
     MIN_QUALITY_SCORE: int = Field(95, description="Score mínimo de calidad de datos")
     VALIDATION_TIMEOUT: int = Field(300, description="Timeout de validación en segundos")
+    PROCESS_CHUNK_SIZE: int = Field(250_000, description="Filas por chunk en PROCESS_FILE")
+    AGGREGATION_CHUNK_SIZE: int = Field(500_000, description="Filas por chunk en agregación")
+    PARQUET_COMPRESSION: str = Field("snappy", description="Compresión Parquet (snappy/gzip)")
+    PROGRESS_COMMIT_EVERY_CHUNKS: int = Field(2, description="Actualizar progreso cada N chunks")
+    PROGRESS_ROW_INTERVAL: int = Field(50000, description="Filas entre updates de progreso intra-chunk")
+    PROGRESS_UPDATE_INTERVAL_SEC: float = Field(
+        15.0, description="Mínimo segundos entre escrituras de progreso a BD (worker)"
+    )
+    PROMOTION_PROGRESS_EVERY_CHUNKS: int = Field(
+        3, description="Reportar progreso de promoción cada N chunks UPSERT"
+    )
+    API_DB_POOL_SIZE: int = Field(25, description="Pool SQLAlchemy del API (run_app)")
+    API_DB_MAX_OVERFLOW: int = Field(45, description="Overflow del pool SQLAlchemy del API")
+    USE_VECTORIZED_VALIDATION: bool = Field(False, description="Validación vectorizada (feature flag)")
     
     # === CONFIGURACIÓN DE ETL ===
     ETL_BATCH_SIZE: int = Field(10000, description="Tamaño de lote para procesamiento ETL")
@@ -108,7 +122,11 @@ class Settings(BaseSettings):
     
     # === CONFIGURACIÓN DE SEGURIDAD ===
     SECRET_KEY: str = Field("development-secret-key-must-be-at-least-32-characters-long", description="Clave secreta para tokens")
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(60, description="Minutos de expiración del token")
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(15, description="Minutos de expiración del access token")
+    REFRESH_TOKEN_EXPIRE_DAYS: int = Field(7, description="Días de validez del refresh token")
+    SESSION_INACTIVITY_MINUTES: int = Field(
+        15, description="Minutos de inactividad antes de cerrar sesión (referencia frontend)"
+    )
     ALGORITHM: str = Field("HS256", description="Algoritmo de encriptación")
     
     # === CONFIGURACIÓN DE LOGGING ===
@@ -284,7 +302,7 @@ APP_INFO = {
     "title": settings.API_TITLE,
     "version": settings.API_VERSION,
     "description": """
-    Sistema de Data Staging con soporte para múltiples fuentes de datos.
+    M8 Connect — plataforma de ingesta con soporte para múltiples fuentes de datos.
     
     Características:
     - Soporte para PostgreSQL y Supabase

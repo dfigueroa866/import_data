@@ -9,8 +9,10 @@ logs/
 
 # Cargas y Data Local
 data/uploads/
+data/temp/
 temp_uploads/
-*.csv
+data/uploads/**/*.csv
+data/temp/**/*.csv
 
 # Python Cache
 __pycache__/

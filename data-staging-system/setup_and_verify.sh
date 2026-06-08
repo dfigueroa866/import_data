@@ -1,7 +1,7 @@
 #!/bin/bash
 # setup_and_verify.sh - Complete setup and verification script
 
-echo "🚀 Data Staging System - Setup and Verification"
+echo "🚀 M8 Connect - Setup and Verification"
 echo "================================================"
 
 # Colors for output
@@ -105,38 +105,6 @@ class DataValidator:
     validator_file.write_text(validator_content)
     print("✅ Created DataValidator")
 
-# Create ETLEngine
-engine_file = Path("src/data_staging/core/etl/engine.py")
-if not engine_file.exists():
-    engine_content = '''# Auto-generated ETLEngine
-import pandas as pd
-from typing import Dict, Any
-
-class ETLResult:
-    def __init__(self):
-        self.success = True
-        self.message = ""
-        self.records_processed = 0
-        
-    def to_dict(self):
-        return {
-            "success": self.success,
-            "message": self.message,
-            "records_processed": self.records_processed
-        }
-
-class ETLEngine:
-    def process_batch(self, batch_id: str, data: pd.DataFrame, config: Dict[str, Any] = None):
-        result = ETLResult()
-        if data is not None:
-            result.records_processed = len(data)
-            result.message = f"Processed {len(data)} records"
-        return result
-'''
-    engine_file.parent.mkdir(parents=True, exist_ok=True)
-    engine_file.write_text(engine_content)
-    print("✅ Created ETLEngine")
-
 # Create FileHandler
 handler_file = Path("src/data_staging/utils/file_handler.py")
 if not handler_file.exists():
@@ -201,15 +169,11 @@ try:
     from data_staging.core.validators.data_validator import DataValidator
     print("✅ DataValidator import successful")
     
-    from data_staging.core.etl.engine import ETLEngine
-    print("✅ ETLEngine import successful")
-    
     from data_staging.utils.file_handler import FileHandler
     print("✅ FileHandler import successful")
     
     # Test instantiation
     validator = DataValidator()
-    engine = ETLEngine()
     handler = FileHandler()
     
     print("✅ All components can be instantiated")

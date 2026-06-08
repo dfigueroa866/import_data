@@ -1,5 +1,5 @@
 """
-Main FastAPI application for Data Staging System.
+Main FastAPI application for M8 Connect.
 """
 
 import logging
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """Application lifespan management."""
     # Startup
-    logger.info("Starting Data Staging System API")
+    logger.info("Starting M8 Connect API")
     
     # Test database connection
     try:
@@ -44,13 +44,13 @@ async def lifespan(app: FastAPI):
     yield
     
     # Shutdown
-    logger.info("Shutting down Data Staging System API")
+    logger.info("Shutting down M8 Connect API")
 
 
 # Create FastAPI application
 app = FastAPI(
-    title="Data Staging System",
-    description="Production-ready data staging system with validation and ETL capabilities",
+    title="M8 Connect",
+    description="M8 Connect — plataforma de ingesta, validación y promoción de datos",
     version="2.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
@@ -75,13 +75,6 @@ except Exception as e:
     logger.error(f"Failed to import upload router: {e}", exc_info=True)
 
 try:
-    from data_staging.api.routers.staging import router as staging_router
-    app.include_router(staging_router, prefix="/api/v1")
-    logger.info("Staging router included")
-except ImportError as e:
-    logger.warning(f"Could not import staging router: {e}")
-
-try:
     from data_staging.api.routers.monitoring import router as monitoring_router
     app.include_router(monitoring_router, prefix="/api/v1")
     logger.info("Monitoring router included")
@@ -96,6 +89,20 @@ except ImportError as e:
     logger.warning(f"Could not import system router: {e}")
 
 try:
+    from data_staging.api.routers.auth import router as auth_router
+    app.include_router(auth_router, prefix="/api/v1")
+    logger.info("Auth router included")
+except Exception as e:
+    logger.error(f"Could not import auth router: {e}", exc_info=True)
+
+try:
+    from data_staging.api.routers.catalogs import router as catalogs_router
+    app.include_router(catalogs_router, prefix="/api/v1")
+    logger.info("Catalogs admin router included")
+except Exception as e:
+    logger.error(f"Could not import catalogs router: {e}", exc_info=True)
+
+try:
     from data_staging.api.v1.environments import router as environments_router
     app.include_router(environments_router, prefix="/api/v1", tags=["Environments"])
     logger.info("Environments router included")
@@ -107,7 +114,7 @@ except ImportError as e:
 async def root():
     """Root endpoint with API information."""
     return {
-        "name": "Data Staging System",
+        "name": "M8 Connect",
         "version": "2.0.0",
         "status": "operational",
         "timestamp": datetime.now().isoformat(),

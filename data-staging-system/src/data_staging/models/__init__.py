@@ -1,6 +1,6 @@
 # src/data_staging/models/__init__.py
 """
-SQLAlchemy models for the Data Staging System
+SQLAlchemy models for M8 Connect
 
 This package contains all database models organized by functionality:
 - base: Base classes and mixins

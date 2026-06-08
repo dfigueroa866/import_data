@@ -576,7 +576,7 @@ class DataSeeder:
 def main():
     """Función principal"""
     logger.info("=" * 60)
-    logger.info("CARGA DE DATOS INICIALES - DATA STAGING SYSTEM")
+    logger.info("CARGA DE DATOS INICIALES - M8 CONNECT")
     logger.info("=" * 60)
     
     try:

@@ -21,6 +21,18 @@
     font-size: 1rem;
 }
 
+.wizard-back-link {
+    display: inline-block;
+    margin-bottom: 0.75rem;
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+    text-decoration: none;
+}
+
+.wizard-back-link:hover {
+    color: var(--accent-primary, #6366f1);
+}
+
 /* Stepper */
 .wizard-stepper {
     display: flex;

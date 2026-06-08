@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-init_database.py - Script para inicializar la base de datos del sistema de Data Staging
+init_database.py - Script para inicializar la base de datos de M8 Connect
 
 Este script:
 1. Verifica la conexión a PostgreSQL
@@ -234,7 +234,7 @@ class DatabaseInitializer:
 def main():
     """Función principal"""
     logger.info("=" * 60)
-    logger.info("INICIALIZADOR DE BASE DE DATOS - DATA STAGING SYSTEM")
+    logger.info("INICIALIZADOR DE BASE DE DATOS - M8 CONNECT")
     logger.info("=" * 60)
     
     try:

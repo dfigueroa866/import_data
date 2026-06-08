@@ -1,122 +1,71 @@
-# Installation Guide - Data Staging System
+# Installation Guide - M8 Connect
 
-## 🚀 Quick Install
+## Quick install
 
-### Option 1: Using Make (Recommended)
 ```bash
-make setup
-```
-
-### Option 2: Using Python Script
-```bash
-python install.py
-```
-
-### Option 3: Manual Installation
-```bash
-# Install dependencies
-pip3 install -r requirements.txt
-
-# Install package
-pip3 install -e .
-
-# Create environment file
+cd data-staging-system
+make setup          # o: pip install -r requirements.txt && pip install -e .
 cp .env.example .env
+# Editar DATABASE_URL, SECRET_KEY
+
+alembic upgrade head
+python scripts/setup/seed_data.py   # opcional: data_sources demo
 ```
 
-## 🔧 Platform-Specific Instructions
+## Run the system
 
-### macOS
+Three terminals:
+
 ```bash
-# Install Homebrew if not installed
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-
-# Install Python
-brew install python
-
-# Install the system
-make install-mac
+python run_app.py
+python run_workers.py
+cd frontend && npm run dev
 ```
 
-### Ubuntu/Debian
+## Database migrations (canonical)
+
 ```bash
-# Update system
-sudo apt update
-
-# Install Python and pip
-sudo apt install -y python3 python3-pip
-
-# Install the system
-make install-ubuntu
+alembic upgrade head
 ```
+
+Creates `staging_meta.*` (including `batch_control`, `job_queue`) and `staging_data.template_staging`.
+
+**Not managed by Alembic** (must exist in your business DB):
+
+- `public.users`, `public.organizations` — authentication
+- `public.skus`, `public.locations`, `public.sales_history` — production targets
+
+Legacy manual SQL in `migrations/*.sql` is superseded by Alembic revision `002_job_queue_and_indexes`.
+
+## Platform notes
 
 ### Windows
-```bash
-# Install Python from python.org
-# Then run:
+
+```powershell
+python -m venv venv
+.\venv\Scripts\activate
 pip install -r requirements.txt
 pip install -e .
 ```
 
-## 🐛 Troubleshooting
-
-### Issue: "pip: No such file or directory"
-**Solution:**
-```bash
-# Try these alternatives:
-python3 -m pip install -r requirements.txt
-python -m pip install -r requirements.txt
-
-# Or install pip:
-# macOS: brew install python
-# Ubuntu: sudo apt install python3-pip
-```
-
-### Issue: "Permission denied"
-**Solution:**
-```bash
-# Use user installation:
-pip3 install --user -r requirements.txt
-pip3 install --user -e .
-```
-
-### Issue: "Module not found"
-**Solution:**
-```bash
-# Check Python path:
-python3 -c "import sys; print(sys.path)"
-
-# Reinstall in development mode:
-pip3 install -e .
-```
-
-## ✅ Verify Installation
+### macOS / Linux
 
 ```bash
-# Check dependencies
-make check-deps
-
-# Test import
-python3 -c "import data_staging; print('✅ Success')"
-
-# Run tests
-make test-run
+make setup
+# or
+pip3 install -r requirements.txt && pip3 install -e .
 ```
 
-## 🚀 Start the System
+## Troubleshooting
 
-```bash
-# Start API server
-make run
+| Issue | Fix |
+|-------|-----|
+| `relation staging_meta.batch_control does not exist` | `alembic upgrade head` |
+| Workers idle, jobs stuck | Check `staging_meta.job_queue`; ensure `run_workers.py` running |
+| Login fails | Verify `public.users` exists and password hash is bcrypt |
+| Import errors | Set `PYTHONPATH=src` or run from project root via `run_app.py` |
 
-# Start dashboard (in another terminal)
-cd frontend
-npm run dev
-```
+## Docs
 
-## 📍 Access Points
-
-- **API**: http://localhost:8000
-- **Docs**: http://localhost:8000/docs  
-- **Dashboard**: http://localhost:5173
-- **Health**: http://localhost:8000/health
+- [`docs/FUNCIONAMIENTO_APLICACION.md`](docs/FUNCIONAMIENTO_APLICACION.md) — architecture and flows
+- [`docs/CONFIGURACION_POSTGRESQL_TUNEL.md`](docs/CONFIGURACION_POSTGRESQL_TUNEL.md) — remote DB tunnel

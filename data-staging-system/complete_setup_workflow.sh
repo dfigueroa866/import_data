@@ -1,7 +1,7 @@
 #!/bin/bash
 # complete_setup_workflow.sh - Complete the setup and test file upload
 
-echo "🎯 Completing Data Staging System Setup"
+echo "🎯 Completing M8 Connect Setup"
 echo "========================================"
 
 # Colors for output
@@ -123,134 +123,14 @@ EOF
     fi
 }
 
-# Step 4: Create database schemas
+# Step 4: Run Alembic migrations
 setup_database_schemas() {
-    print_status $BLUE "🏗️ Setting up database schemas..."
-    
-    python3 << 'EOF'
-import sys
-from pathlib import Path
+    print_status $BLUE "🏗️ Running database migrations (alembic upgrade head)..."
 
-# Add src to path
-src_dir = Path.cwd() / "src"
-sys.path.insert(0, str(src_dir))
-
-try:
-    from data_staging.database import get_database_manager
-    from sqlalchemy import text
-    
-    db_manager = get_database_manager()
-    
-    with db_manager.get_session() as session:
-        # Create schemas if they don't exist
-        schemas_to_create = [
-            'staging_meta',
-            'staging_data', 
-            'production'
-        ]
-        
-        for schema in schemas_to_create:
-            try:
-                session.execute(text(f"CREATE SCHEMA IF NOT EXISTS {schema}"))
-                print(f"✅ Schema '{schema}' ready")
-            except Exception as e:
-                print(f"⚠️ Schema '{schema}': {e}")
-        
-        # Create basic tables
-        tables_sql = """
-        -- Batch control table
-        CREATE TABLE IF NOT EXISTS staging_meta.batch_control (
-            batch_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            source_name VARCHAR(100) NOT NULL,
-            source_type VARCHAR(50) NOT NULL,
-            file_name VARCHAR(255),
-            file_size BIGINT,
-            records_count INTEGER,
-            status VARCHAR(20) DEFAULT 'PENDING',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            started_at TIMESTAMP,
-            completed_at TIMESTAMP,
-            error_message TEXT,
-            metadata JSONB
-        );
-        
-        -- Stage products table (your staging table)
-        CREATE TABLE IF NOT EXISTS staging_data.stage_products (
-            staging_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            batch_id UUID REFERENCES staging_meta.batch_control(batch_id),
-            product_id VARCHAR(50),
-            name VARCHAR(255),
-            category VARCHAR(100),
-            price DECIMAL(10,2),
-            cost DECIMAL(10,2),
-            stock INTEGER,
-            supplier VARCHAR(255),
-            description TEXT,
-            is_active BOOLEAN DEFAULT TRUE,
-            validation_status VARCHAR(20) DEFAULT 'PENDING',
-            validation_errors JSONB,
-            is_duplicate BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            processed_at TIMESTAMP
-        );
-        
-        -- Products table (your production table)
-        CREATE TABLE IF NOT EXISTS m8_schema.products (
-            product_id VARCHAR(50) PRIMARY KEY,
-            name VARCHAR(255) NOT NULL,
-            category VARCHAR(100),
-            price DECIMAL(10,2) NOT NULL,
-            cost DECIMAL(10,2),
-            stock INTEGER DEFAULT 0,
-            supplier VARCHAR(255),
-            description TEXT,
-            is_active BOOLEAN DEFAULT TRUE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        
-        -- Data sources configuration table
-        CREATE TABLE IF NOT EXISTS staging_meta.data_sources (
-            source_id SERIAL PRIMARY KEY,
-            source_name VARCHAR(100) UNIQUE NOT NULL,
-            source_type VARCHAR(50) NOT NULL,
-            connection_config JSONB,
-            validation_rules JSONB,
-            target_table VARCHAR(100),
-            target_schema VARCHAR(50) DEFAULT 'staging_data',
-            production_table VARCHAR(100),
-            production_schema VARCHAR(50) DEFAULT 'production',
-            is_active BOOLEAN DEFAULT TRUE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        """
-        
-        session.execute(text(tables_sql))
-        session.commit()
-        
-        print("✅ Database tables created successfully")
-        
-        # Verify tables exist
-        result = session.execute(text("""
-            SELECT schemaname, tablename 
-            FROM pg_tables 
-            WHERE schemaname IN ('staging_meta', 'staging_data', 'production')
-            ORDER BY schemaname, tablename
-        """))
-        
-        print("\n📋 Created tables:")
-        for row in result:
-            print(f"   {row[0]}.{row[1]}")
-            
-except Exception as e:
-    print(f"❌ Error setting up database: {e}")
-    sys.exit(1)
-EOF
-
-    if [ $? -eq 0 ]; then
-        print_status $GREEN "✅ Database schemas and tables ready"
+    if alembic upgrade head; then
+        print_status $GREEN "✅ Database schemas and tables ready (staging_meta, job_queue)"
     else
-        print_status $RED "❌ Database setup failed"
+        print_status $RED "❌ Alembic migration failed"
         return 1
     fi
 }

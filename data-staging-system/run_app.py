@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Main application runner for Data Staging System
+Main application runner for M8 Connect
 """
 
 import sys
@@ -114,6 +114,53 @@ def setup_logging():
     except Exception:
         pass
 
+def check_dependencies():
+    """Verify optional packages required by auth and upload routers."""
+    import sys
+
+    missing = []
+    checks = [
+        ("bcrypt", "bcrypt"),
+        ("jose", "python-jose[cryptography]"),
+        ("dateutil", "python-dateutil"),
+    ]
+    for module, package in checks:
+        try:
+            __import__(module)
+        except ImportError:
+            missing.append(package)
+
+    if missing:
+        print("❌ Faltan dependencias del backend:")
+        for pkg in missing:
+            print(f"   - {pkg}")
+        print(f"\n   Python en uso: {sys.executable}")
+        print("\n💡 Instala con el MISMO Python (no uses solo 'pip' si apunta a otro venv):")
+        print(f'   python -m pip install {" ".join(missing)}')
+        print("   # o: python -m pip install -r requirements.txt")
+        return False
+
+    print("✅ Dependencias de auth y upload verificadas")
+    return True
+
+
+def check_port_available(port: int = 8000) -> bool:
+    """Return True if the API port can be bound."""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("0.0.0.0", port))
+            return True
+        except OSError:
+            print(f"❌ El puerto {port} ya está en uso")
+            print("💡 Cierra el proceso anterior o usa otro puerto:")
+            print(f"   netstat -ano | findstr :{port}")
+            print("   taskkill /PID <pid> /F")
+            return False
+
+
 def check_environment():
     """Check if environment is properly configured."""
     env_file = Path(".env")
@@ -157,9 +204,23 @@ def test_database():
             if 'schemas' in connection_info:
                 print(f"   Schemas: {connection_info['schemas']}")
             return True
-        else:
-            print(f"❌ Database connection failed: {connection_info.get('message', 'Unknown error')}")
-            return False
+
+        err = connection_info.get("error") or connection_info.get("message") or "Unknown error"
+        print(f"❌ Database connection failed: {err}")
+
+        err_lower = str(err).lower()
+        if "connection refused" in err_lower or "10061" in err_lower:
+            from data_staging.config import settings
+            db_url = str(settings.DATABASE_URL or "")
+            host_port = db_url.split("@")[-1] if "@" in db_url else db_url
+            print("\n💡 PostgreSQL no está accesible en", host_port)
+            print("   1. Abre Docker Desktop (si usas Postgres en Docker)")
+            print("   2. Levanta la base de datos:")
+            print("      docker compose -f docker/docker-compose.local.yml up -d")
+            print("      # o el contenedor/túnel que usabas antes")
+            print("   3. Prueba: python scripts/test_postgres_connection.py")
+            print("   4. Vuelve a ejecutar: python run_app.py")
+        return False
             
     except Exception as e:
         print(f"❌ Database test failed: {e}")
@@ -249,11 +310,14 @@ def main():
     """Main application entry point."""
     setup_logging()
     
-    print("🚀 Starting Data Staging System")
+    print("🚀 Starting M8 Connect")
     print("=" * 50)
     
     # Check environment
     if not check_environment():
+        return 1
+
+    if not check_dependencies():
         return 1
     
     # Test database
@@ -276,6 +340,9 @@ def main():
     
     # Start the API server
     try:
+        if not check_port_available(8000):
+            return 1
+
         print("\n🌐 Starting API server...")
         print("📍 API will be available at: http://localhost:8000")
         print("📚 API docs at: http://localhost:8000/docs")

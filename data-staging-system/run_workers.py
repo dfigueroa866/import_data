@@ -108,7 +108,7 @@ def main():
     num_workers = 1  # getattr(settings, 'num_workers', 3)
     
     logger.info("=" * 50)
-    logger.info("Data Staging Workers")
+    logger.info("M8 Connect Workers")
     logger.info("=" * 50)
     
     workers = []

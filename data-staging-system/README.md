@@ -1,74 +1,64 @@
-# Data Staging System (v2.0) - Importación de Datos Empresarial
+# M8 Connect (v2.0) - Importación de Datos Empresarial
 
-Sistema avanzado de ingesta, validación y promoción de datos. Diseñado para manejar grandes volúmenes de información mediante un **Asistente de Importación de 4 Pasos** que garantiza la calidad de los datos antes de llegar a producción.
+Sistema de ingesta, validación y promoción de datos con **wizard de 4 pasos**, autenticación JWT, catálogos y cola de jobs PostgreSQL.
 
-## 🚀 Características Principales
+## Características principales
 
-*   **Asistente de Importación (Wizard)**: Interfaz paso a paso para carga, mapeo y validación.
-*   **Validación Inteligente**: Detección automática de tipos, formatos de fecha y restricciones (NOT NULL, FK).
-*   **Mapeo Flexible**: Mapeo visual de columnas origen -> destino, con soporte para valores por defecto.
-*   **Procesamiento Asíncrono**: Cola de trabajos robusta para procesar cargas masivas sin bloquear la UI.
-*   **Promoción Segura**: Inserción en lotes (Batch Insert) con deduplicación y manejo de transacciones.
+- **Landing `/upload`**: Historia (`/upload/history`) o Catálogos (`/upload/catalog`)
+- **Validación estricta** con rechazados exportables (TSV)
+- **Archivos temp** (`_valid_records.parquet`) + promoción a producción
+- **Workers** asíncronos (`PROCESS_FILE`, `PROMOTE_BATCH`)
 
-## 📋 Requisitos Previos
+## Requisitos
 
-*   **Python**: 3.10+
-*   **PostgreSQL**: 13+
-*   **Node.js**: 18+ (Para el Frontend)
+- Python 3.10+
+- PostgreSQL 13+ (workers y job queue)
+- Node.js 18+
 
-## 🛠️ Instalación y Configuración
+## Instalación rápida
 
-1.  **Configuración Backend:**
-    ```bash
-    cd data-staging-system
-    python -m venv venv
-    .\venv\Scripts\activate  # Windows
-    # source venv/bin/activate # Linux/Mac
-    pip install -r requirements.txt
-    ```
+```bash
+cd data-staging-system
+python -m venv venv
+.\venv\Scripts\activate   # Windows
+pip install -r requirements.txt
+cp .env.example .env      # editar DATABASE_URL
 
-2.  **Configuración Frontend:**
-    ```bash
-    cd frontend
-    npm install
-    ```
+alembic upgrade head      # tablas staging_meta + job_queue
 
-3.  **Base de Datos:**
-    Cree un archivo `.env` en la raíz con su conexión a base de datos:
-    ```ini
-    DATABASE_URL=postgresql://user:pass@localhost:5432/dbname
-    ```
+cd frontend && npm install
+```
 
-## ▶️ Ejecución del Sistema
+## Ejecución (3 procesos)
 
-El sistema requiere 3 procesos terminales:
+```bash
+python run_app.py       # API :8000
+python run_workers.py   # cola de jobs
+cd frontend && npm run dev   # UI :5173
+```
 
-1.  **API Backend (FastAPI):**
-    ```bash
-    python run_app.py
-    ```
-    *API en: http://localhost:8000*
+## Documentación
 
-2.  **Workers (Procesamiento de Fondo):**
-    ```bash
-    python run_workers.py
-    ```
+| Documento | Contenido |
+|-----------|-----------|
+| [`docs/FUNCIONAMIENTO_APLICACION.md`](docs/FUNCIONAMIENTO_APLICACION.md) | **Doc canónica** — flujo completo |
+| [`docs/MENU_CATALOGOS.md`](docs/MENU_CATALOGOS.md) | Catálogos y admin |
+| [`docs/CONFIGURACION_POSTGRESQL_TUNEL.md`](docs/CONFIGURACION_POSTGRESQL_TUNEL.md) | Túnel Docker → PostgreSQL |
+| [`MANUAL_DE_USO.md`](MANUAL_DE_USO.md) | Guía de usuario |
+| [`INSTALL.md`](INSTALL.md) | Instalación detallada |
+| Swagger | http://localhost:8000/docs |
 
-3.  **Frontend (Interfaz React):**
-    ```bash
-    cd frontend
-    npm run dev
-    ```
-    *UI en: http://localhost:5173* (por defecto)
+## Flujo wizard (4 pasos)
 
-## 📂 Flujo de Trabajo (Wizard)
+1. **Upload** — subida y análisis del archivo
+2. **Mapping** — mapeo columnas → destino
+3. **Preview** — agregación Weekly/Monthly (historia) y muestra
+4. **Process** — validación en worker + promoción a producción
 
-1.  **Carga (Upload)**: Carga de archivo y análisis de estructura.
-2.  **Mapeo (Map)**: Selección de tabla destino y mapeo de columnas.
-3.  **Previsualización (Preview)**: Verificación de datos y corrección de errores de validación.
-4.  **Procesamiento (Process)**: Carga a Staging y Promoción a Producción.
+## Setup BD
 
-## 📖 Documentación
+```bash
+alembic upgrade head
+```
 
-*   **`MANUAL_DE_USO.md`**: Guía detallada del usuario para el Asistente de Importación.
-*   Doc API (Swagger): `http://localhost:8000/docs`
+Requiere `public.users` y tablas de negocio preexistentes para auth y FK (ver `INSTALL.md`).

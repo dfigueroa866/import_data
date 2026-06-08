@@ -35,7 +35,7 @@ export const getTables = async (schema) => {
  */
 export const getTableColumns = async (schema, table) => {
     try {
-        const response = await api.get(`/api/v1/staging/table-columns?schema=${schema}&table=${table}`);
+        const response = await api.get(`/api/v1/system/table-columns?schema=${schema}&table=${table}`);
         return response.data;
     } catch (error) {
         console.error('Error getting table columns:', error);

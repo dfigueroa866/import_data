@@ -2,6 +2,7 @@ import logging
 import json
 import os
 import re
+import time
 import numpy as np
 import io
 import csv
@@ -12,12 +13,105 @@ from pathlib import Path
 import polars as pl
 import psycopg2
 from data_staging.config import settings
+from data_staging.utils.mapping_helpers import is_virtual_mapping_key
+from data_staging.utils.batch_staging_files import (
+    ValidRecordsParquetWriter,
+    append_rejected_records_csv,
+    append_valid_records_parquet,
+    get_temp_dir,
+    metadata_merge_expr,
+    rejected_records_path,
+    valid_records_path,
+)
 
 logger = logging.getLogger(__name__)
 
-# Configuración de tamaños para procesamiento
-CHUNK_SIZE_RECORDS = 1000000
+# Configuración de tamaños para procesamiento (override vía settings)
+CHUNK_SIZE_RECORDS = getattr(settings, "PROCESS_CHUNK_SIZE", 250_000)
 BATCH_SIZE_INSERT = 50000
+PROGRESS_ROW_INTERVAL = getattr(settings, "PROGRESS_ROW_INTERVAL", 50000)
+PROGRESS_TIME_INTERVAL_SEC = float(
+    getattr(settings, "PROGRESS_UPDATE_INTERVAL_SEC", 15.0)
+)
+PROGRESS_COMMIT_EVERY_CHUNKS = getattr(settings, "PROGRESS_COMMIT_EVERY_CHUNKS", 2)
+_last_progress_write: Dict[str, tuple[float, str]] = {}
+
+
+def open_progress_connection() -> psycopg2.extensions.connection:
+    """Dedicated autocommit connection so progress updates never block the worker txn."""
+    from data_staging.config import settings
+
+    progress_conn = psycopg2.connect(str(settings.DATABASE_URL))
+    progress_conn.autocommit = True
+    return progress_conn
+
+
+def report_processing_progress(
+    conn: psycopg2.extensions.connection,
+    batch_id: str,
+    *,
+    progress_percentage: float,
+    current_operation: str,
+    phase: str = "validating",
+    total_rows: int = 0,
+    rows_processed: int = 0,
+    loaded_rows: int = 0,
+    rejected_rows: int = 0,
+    chunks_processed: int = 0,
+    chunks_total: int = 1,
+    force: bool = False,
+) -> None:
+    """Persist real-time progress in batch metadata for Step 4 polling."""
+    snapshot_key = (
+        f"{phase}|{chunks_processed}|{chunks_total}|"
+        f"{int(rows_processed // max(PROGRESS_ROW_INTERVAL, 1))}|"
+        f"{int(progress_percentage)}"
+    )
+    if not force:
+        now = time.monotonic()
+        last = _last_progress_write.get(batch_id)
+        if last:
+            last_time, last_key = last
+            if (
+                (now - last_time) < PROGRESS_TIME_INTERVAL_SEC
+                and last_key == snapshot_key
+            ):
+                return
+        _last_progress_write[batch_id] = (now, snapshot_key)
+
+    payload = {
+        "progress_percentage": round(min(99.0, max(0.0, float(progress_percentage))), 1),
+        "current_operation": current_operation,
+        "phase": phase,
+        "total_rows": int(total_rows),
+        "rows_processed": int(rows_processed),
+        "loaded_rows": int(loaded_rows),
+        "rejected_rows": int(rejected_rows),
+        "chunks_processed": int(chunks_processed),
+        "chunks_total": max(1, int(chunks_total)),
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+    }
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            UPDATE staging_meta.batch_control
+            SET metadata = {metadata_merge_expr("jsonb_build_object('processing_progress', %s::jsonb)")}
+            WHERE batch_id = %s
+            """,
+            (json.dumps(payload), batch_id),
+        )
+        if not getattr(conn, "autocommit", False):
+            conn.commit()
+        cursor.close()
+    except Exception as exc:
+        logger.warning(f"Failed to update processing progress for {batch_id}: {exc}")
+        if not getattr(conn, "autocommit", False):
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+
 
 # Regex para caracteres de control inválidos que rompen CSV/JSON
 INVALID_CHARS_REGEX = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
@@ -38,6 +132,8 @@ class DirectIngestor:
 
     def add_records(self, records: List[Dict[str, Any]]):
         """Convierte registros (dicts) a formato de texto para COPY."""
+        from data_staging.catalog.catalog_transforms import is_empty_value
+
         if not records:
             return
         
@@ -52,7 +148,7 @@ class DirectIngestor:
             row_values = []
             for col in self.columns:
                 val = processed_data.get(col)
-                if val is None or val == "" or (isinstance(val, float) and np.isnan(val)):
+                if is_empty_value(val):
                     row_values.append("\\N") # Símbolo de NULL para COPY
                 else:
                     # Escapar tabulaciones y saltos de línea para que no rompan el formato TEXT
@@ -106,6 +202,7 @@ def process_file_job(payload: Dict[str, Any]):
     
     conn = psycopg2.connect(database_url)
     conn.autocommit = False
+    progress_conn = open_progress_connection()
     
     # PASO 1: Leer metadata del batch
     cursor = conn.cursor()
@@ -122,9 +219,15 @@ def process_file_job(payload: Dict[str, Any]):
     source_name = row[0]
     file_name = row[1]
     metadata = row[2] or {}
+    if isinstance(metadata, str):
+        metadata = json.loads(metadata)
     
     # Extraer configuración del wizard metadata
-    file_path_str = payload.get("file_path") or metadata.get("file_path")
+    file_path_str = (
+        payload.get("file_path")
+        or metadata.get("aggregated_file_path")
+        or metadata.get("file_path")
+    )
     if not file_path_str:
         raise ValueError(f"file_path not found in payload or metadata")
     
@@ -146,6 +249,16 @@ def process_file_job(payload: Dict[str, Any]):
     
     target_schema = payload.get("target_schema") or metadata.get("target_schema")
     target_table = payload.get("target_table") or metadata.get("target_table")
+    catalog_slug = None
+    if metadata.get("load_type") == "catalog":
+        catalog_slug = metadata.get("catalog_name") or metadata.get("target_table") or target_table
+        production_table = metadata.get("production_table")
+        if production_table:
+            target_table = production_table
+        elif catalog_slug:
+            from data_staging.catalog.catalog_registry import resolve_catalog_db_target
+
+            target_schema, target_table = resolve_catalog_db_target(catalog_slug, target_schema)
     dedup_columns = payload.get("dedup_columns") or metadata.get("dedup_columns", "")
     auto_production = payload.get("auto_production", False) or metadata.get("auto_production", False)
     
@@ -164,11 +277,18 @@ def process_file_job(payload: Dict[str, Any]):
             if is_enabled:
                 target = mapping_config.get("target")
                 if target and target != "__new__":
-                    selected_columns.append(file_col)
-                    column_mapping[target] = {
-                        "source": file_col,
-                        "default": mapping_config.get("default_value", "")
-                    }
+                    default_val = mapping_config.get("default_value", "")
+                    if is_virtual_mapping_key(file_col):
+                        column_mapping[target] = {
+                            "source": None,
+                            "default": default_val,
+                        }
+                    else:
+                        selected_columns.append(file_col)
+                        column_mapping[target] = {
+                            "source": file_col,
+                            "default": default_val,
+                        }
     # Si viene del API directo (mapeo por columna de destino)
     elif wizard_column_mappings:
         column_mapping = wizard_column_mappings
@@ -191,12 +311,17 @@ def process_file_job(payload: Dict[str, Any]):
     
     try:
         # 1. Actualizar batch a PROCESSING  + buscar job_id para reportar progreso
+        file_path_col = metadata.get("aggregated_file_path") or metadata.get("file_path")
+        if file_path_col:
+            file_path_col = str(file_path_col)
         cursor.execute("""
             UPDATE staging_meta.batch_control
             SET status = 'PROCESSING',
-                started_at = CURRENT_TIMESTAMP
+                started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+                file_path = COALESCE(%s, file_path),
+                updated_at = CURRENT_TIMESTAMP
             WHERE batch_id = %s
-        """, (batch_id,))
+        """, (file_path_col, batch_id))
         conn.commit()
         
         # Buscar job_id para reportar progreso
@@ -209,6 +334,15 @@ def process_file_job(payload: Dict[str, Any]):
         job_row = cursor.fetchone()
         job_id = job_row[0] if job_row else None
 
+        report_processing_progress(
+            progress_conn,
+            batch_id,
+            progress_percentage=3,
+            current_operation="Iniciando validación del archivo…",
+            phase="preparing",
+            force=True,
+        )
+
         # 2. Determinar si es carga directa (bypass staging)
         direct_load = payload.get("direct_load", False) or metadata.get("direct_load", False)
         target_column_types = payload.get("target_column_types") or {}
@@ -219,30 +353,63 @@ def process_file_job(payload: Dict[str, Any]):
         # 2.5 Extraer delimitador y encoding detectados
         file_analysis = metadata.get("file_analysis", {})
         delimiter = file_analysis.get("delimiter", ",")
-        encoding = file_analysis.get("encoding", "utf-8")
+        from data_staging.utils.encoding_utils import (
+            detect_file_encoding,
+            encoding_for_polars,
+            normalize_encoding_name,
+        )
 
-        # 3. Preparar archivos en disco (válidos y rechazados) — sin tablas staging en BD
-        temp_dir = Path(settings.TEMP_PATH) if hasattr(settings, 'TEMP_PATH') else Path("temp_uploads")
-        temp_dir.mkdir(parents=True, exist_ok=True)
+        encoding = normalize_encoding_name(
+            detect_file_encoding(file_path)
+            if file_path and Path(file_path).is_file()
+            else file_analysis.get("encoding", "utf-8")
+        )
+        if encoding != file_analysis.get("encoding"):
+            file_analysis = {**file_analysis, "encoding": encoding}
+            cursor.execute(
+                f"""
+                UPDATE staging_meta.batch_control
+                SET metadata = {metadata_merge_expr("jsonb_build_object('file_analysis', %s::jsonb)")}
+                WHERE batch_id = %s
+                """,
+                (json.dumps(file_analysis), batch_id),
+            )
+            conn.commit()
 
-        valid_temp_file   = temp_dir / f"{batch_id}_valid_records.csv"
-        rejected_temp_file = temp_dir / f"{batch_id}_rejected_records.csv"
+        # 3. Preparar archivos en disco (válidos Parquet, rechazados TSV)
+        temp_dir = get_temp_dir()
+
+        valid_temp_file = valid_records_path(batch_id)
+        rejected_temp_file = rejected_records_path(batch_id)
 
         # staging_table sigue existiendo como nombre lógico pero ya NO se crea ni se usa en BD.
         # Se mantiene la variable por compatibilidad con firmas internas que aún la reciben.
         safe_source_name = source_name.lower().replace(' ', '_').replace('-', '_')
         staging_table = f"stage_{safe_source_name}"  # solo nombre lógico, no se crea
 
-        # Persistir rutas en metadata para que promotion_worker y el endpoint de descarga las encuentren
-        cursor.execute("""
+        # Persistir rutas absolutas en metadata para promotion_worker y descargas
+        valid_path_str = str(valid_temp_file.resolve())
+        rejected_path_str = str(rejected_temp_file.resolve())
+        cursor.execute(
+            f"""
             UPDATE staging_meta.batch_control
-            SET metadata = COALESCE(metadata, '{}'::jsonb)
-                        || jsonb_build_object(
-                               'valid_temp_file',    %s::text,
-                               'rejected_temp_file', %s::text
-                           )
+            SET metadata = {metadata_merge_expr(
+                "jsonb_build_object("
+                "'valid_temp_file', %s::text, "
+                "'rejected_temp_file', %s::text, "
+                "'valid_file_format', 'parquet', "
+                "'source_file_columns', %s::jsonb"
+                ")"
+            )}
             WHERE batch_id = %s
-        """, (str(valid_temp_file), str(rejected_temp_file), batch_id))
+            """,
+            (
+                valid_path_str,
+                rejected_path_str,
+                json.dumps(selected_columns or []),
+                batch_id,
+            ),
+        )
         conn.commit()
 
         # LIMPIEZA: si es un reintento borrar archivos previos del mismo batch
@@ -251,25 +418,83 @@ def process_file_job(payload: Dict[str, Any]):
                 f.unlink()
         logger.info(f"Disk files prepared for batch {batch_id}")
         
+        system_managed: frozenset = frozenset()
         not_null_columns = {}
-        if not target_column_types and target_schema and target_table:
-            logger.info("target_column_types not in payload, querying database...")
+        if target_schema and target_table:
+            if not target_column_types:
+                logger.info("target_column_types not in payload, querying database...")
             try:
                 cursor.execute("""
                     SELECT column_name, data_type, character_maximum_length, is_nullable
                     FROM information_schema.columns 
                     WHERE table_schema = %s AND table_name = %s
                 """, (target_schema, target_table))
-                
+
                 for row_data in cursor.fetchall():
                     c_name, c_type, c_len, is_nullable = row_data
                     full_type = c_type
                     if c_len:
                         full_type = f"{c_type}({c_len})"
-                    target_column_types[c_name] = full_type
+                    if c_name not in target_column_types:
+                        target_column_types[c_name] = full_type
                     not_null_columns[c_name] = (is_nullable == 'NO')
             except Exception as e:
                 logger.error(f"Failed to query schema info: {e}")
+
+        catalog_table = None
+        history_mode = metadata.get("load_type") == "history"
+        process_type = metadata.get("process_type")
+        organization_id = metadata.get("organization_id")
+        source_extension = metadata.get("source_extension")
+        if history_mode and not source_extension:
+            from data_staging.history.history_config import source_from_filename
+
+            source_extension = source_from_filename(file_name or "")
+            if not source_extension or source_extension == "unknown":
+                source_extension = file_path.suffix.lower().lstrip(".") or "unknown"
+        sku_resolver = None
+        resolve_sku_id = False
+        if history_mode and organization_id:
+            from data_staging.history.history_schema import (
+                create_sku_resolver,
+                sales_history_needs_sku_id_resolution,
+            )
+
+            resolve_sku_id = sales_history_needs_sku_id_resolution(
+                target_column_types, column_mapping
+            )
+            sku_resolver = create_sku_resolver(
+                cursor,
+                organization_id,
+                target_column_types,
+                column_mapping,
+            )
+            if resolve_sku_id and sku_resolver is None:
+                logger.warning(
+                    "sales_history has sku_id but SKU resolver could not be created "
+                    "(check public.skus PK/code columns)"
+                )
+        if metadata.get("load_type") == "catalog":
+            catalog_table = catalog_slug or metadata.get("target_table") or target_table
+            if target_schema and target_table:
+                from data_staging.catalog.catalog_transforms import (
+                    load_db_system_managed_columns_psycopg2,
+                    load_db_validation_excluded_columns_psycopg2,
+                )
+                validation_excluded = load_db_validation_excluded_columns_psycopg2(
+                    cursor, target_schema, target_table
+                )
+                for col in validation_excluded:
+                    if col in not_null_columns:
+                        not_null_columns[col] = False
+                system_managed = load_db_system_managed_columns_psycopg2(
+                    cursor, target_schema, target_table
+                )
+                if system_managed:
+                    logger.info(
+                        "Catalog load: excluded system-managed columns from mapping: %s",
+                        ", ".join(sorted(system_managed)),
+                    )
 
         logger.info(f"Target schema loaded: {len(target_column_types)} columns for validation")
 
@@ -304,12 +529,84 @@ def process_file_job(payload: Dict[str, Any]):
             except Exception as e:
                 logger.error(f"Failed to query foreign keys: {e}")
 
+        # FETCH CUSTOM HISTORY VALIDATIONS FOR SKU AND LOCATION
+        if history_mode and organization_id:
+            try:
+                cursor.execute(
+                    "SELECT DISTINCT code FROM public.skus WHERE organization_id = %s AND code IS NOT NULL",
+                    (organization_id,)
+                )
+                valid_skus = {str(r[0]).strip().lower() for r in cursor.fetchall()}
+                foreign_keys_data["__valid_skus__"] = valid_skus
+                logger.info(f"Loaded {len(valid_skus)} valid SKU codes for organization {organization_id}")
+            except Exception as e:
+                logger.error(f"Failed to load valid SKUs: {e}")
+
+            try:
+                cursor.execute(
+                    "SELECT DISTINCT code FROM public.locations WHERE organization_id = %s AND code IS NOT NULL",
+                    (organization_id,)
+                )
+                valid_locations = {str(r[0]).strip().lower() for r in cursor.fetchall()}
+                foreign_keys_data["__valid_locations__"] = valid_locations
+                logger.info(f"Loaded {len(valid_locations)} valid Location codes for organization {organization_id}")
+            except Exception as e:
+                logger.error(f"Failed to load valid Locations: {e}")
+
+        if system_managed and column_mapping:
+            column_mapping = {
+                t: m for t, m in column_mapping.items() if t not in system_managed
+            }
+            selected_columns = [
+                m["source"] for m in column_mapping.values() if m.get("source")
+            ]
+
         # 4. Procesar archivo por chunks
         if not file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
 
+        composite_unique_keys: List[str] = []
+        seen_composite_keys: set = set()
+        if catalog_table:
+            from data_staging.catalog.catalog_registry import get_catalog_table
+
+            catalog_entry = get_catalog_table(catalog_table)
+            if catalog_entry:
+                composite_unique_keys = list(catalog_entry.get("unique_keys") or [])
+
+        source_file_columns = list(selected_columns) if selected_columns else []
+        if not source_file_columns and file_path.suffix.lower() == ".parquet":
+            try:
+                source_file_columns = list(pl.scan_parquet(file_path).collect_schema().names())
+            except Exception as header_err:
+                logger.warning(f"Could not read Parquet columns for rejected export: {header_err}")
+        elif not source_file_columns and file_path.suffix.lower() == ".csv":
+            pl_encoding = encoding.lower().replace("-", "")
+            try:
+                header_df = pl.read_csv(
+                    file_path,
+                    separator=delimiter,
+                    encoding=pl_encoding,
+                    n_rows=0,
+                    infer_schema_length=0,
+                )
+                source_file_columns = list(header_df.columns)
+            except Exception as header_err:
+                logger.warning(f"Could not read CSV headers for rejected export: {header_err}")
+
+        cursor.execute(
+            f"""
+            UPDATE staging_meta.batch_control
+            SET metadata = {metadata_merge_expr("jsonb_build_object('source_file_columns', %s::jsonb)")}
+            WHERE batch_id = %s
+            """,
+            (json.dumps(source_file_columns), batch_id),
+        )
+        conn.commit()
+
         stats = process_file_in_chunks(
             conn=conn,
+            progress_conn=progress_conn,
             file_path=file_path,
             batch_id=batch_id,
             staging_table=staging_table,
@@ -326,20 +623,41 @@ def process_file_job(payload: Dict[str, Any]):
             target_table=target_table,
             foreign_keys_data=foreign_keys_data,
             valid_temp_file=valid_temp_file,
-            rejected_temp_file=rejected_temp_file
+            rejected_temp_file=rejected_temp_file,
+            catalog_table=catalog_table,
+            composite_unique_keys=composite_unique_keys,
+            seen_composite_keys=seen_composite_keys,
+            source_file_columns=source_file_columns,
+            history_mode=history_mode,
+            process_type=process_type,
+            organization_id=organization_id,
+            sku_resolver=sku_resolver,
+            resolve_sku_id=resolve_sku_id,
+            source_extension=source_extension if history_mode else None,
         )
+
+        # 4. COMPLETED si el archivo se procesó (aunque todo sea rechazado); FAILED solo si vacío/error
+        total_valid = stats["total_inserted"]
+        total_rejected = stats.get("total_rejected", 0)
+        rows_touched = total_valid + total_rejected
+        if rows_touched > 0:
+            final_status = "COMPLETED"
+            error_msg = None
+        else:
+            final_status = "FAILED"
+            error_msg = (
+                "Ningún registro pasó la validación o el archivo está vacío. "
+                "0 registros válidos."
+            )
         
-        # 4. Actualizar batch a COMPLETED o FAILED si originó 0 records
-        final_status = 'COMPLETED' if stats["total_inserted"] > 0 else 'FAILED'
-        error_msg = None if stats["total_inserted"] > 0 else "All records failed validation or file was empty. 0 records inserted."
-        
-        cursor.execute("""
+        cursor.execute(f"""
             UPDATE staging_meta.batch_control
             SET status = %s,
                 completed_at = CURRENT_TIMESTAMP,
                 records_count = %s,
-                metadata = COALESCE(metadata, '{}'::jsonb) || %s::jsonb,
-                error_message = %s
+                metadata = {metadata_merge_expr("%s::jsonb")},
+                error_message = %s,
+                updated_at = CURRENT_TIMESTAMP
             WHERE batch_id = %s
         """, (
             final_status,
@@ -384,7 +702,8 @@ def process_file_job(payload: Dict[str, Any]):
                 UPDATE staging_meta.batch_control
                 SET status = 'FAILED',
                     completed_at = CURRENT_TIMESTAMP,
-                    error_message = %s
+                    error_message = %s,
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE batch_id = %s
             """, (str(e), batch_id))
             conn.commit()
@@ -394,72 +713,10 @@ def process_file_job(payload: Dict[str, Any]):
         raise
     
     finally:
+        if progress_conn:
+            progress_conn.close()
         if conn:
             conn.close()
-
-
-def create_staging_table(conn: psycopg2.extensions.connection, table_name: str):
-    """Crea tabla staging UNLOGGED si no existe."""
-    cursor = conn.cursor()
-    
-    # Check for SQL injection in table_name (simple check)
-    if not table_name.replace('_', '').isalnum():
-        raise ValueError(f"Invalid table name: {table_name}")
-
-    cursor.execute(f"""
-        CREATE UNLOGGED TABLE IF NOT EXISTS staging_data.{table_name} (
-            staging_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            batch_id UUID NOT NULL REFERENCES staging_meta.batch_control(batch_id),
-            source_row_number INTEGER,
-            raw_data JSONB,
-            processed_data JSONB,
-            validation_status VARCHAR(20) DEFAULT 'PENDING',
-            data_quality_score NUMERIC(5,2) DEFAULT 95.0,
-            error_details JSONB,
-            is_duplicate BOOLEAN DEFAULT false,
-            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-            processed_at TIMESTAMPTZ
-        )
-    """)
-    
-    # Crear índices si no existen
-    cursor.execute(f"""
-        CREATE INDEX IF NOT EXISTS idx_{table_name}_batch 
-        ON staging_data.{table_name}(batch_id)
-    """)
-    
-    cursor.execute(f"""
-        CREATE INDEX IF NOT EXISTS idx_{table_name}_status 
-        ON staging_data.{table_name}(validation_status)
-    """)
-
-    cursor.execute(f"""
-        CREATE INDEX IF NOT EXISTS idx_{table_name}_row_number 
-        ON staging_data.{table_name}(batch_id, validation_status, source_row_number);
-    """)
-
-    cursor.execute(f"""
-        CREATE INDEX IF NOT EXISTS idx_{table_name}_production_query
-        ON staging_data.{table_name}(batch_id, validation_status, source_row_number) 
-        WHERE validation_status = 'PASSED';
-    """)
-    
-    conn.commit()
-
-    # Parche: Asegurar que nuevas columnas existan en tablas staging legado
-    try:
-        cursor.execute(f"""
-            ALTER TABLE staging_data.{table_name}
-            ADD COLUMN IF NOT EXISTS data_quality_score NUMERIC(5,2) DEFAULT 95.0,
-            ADD COLUMN IF NOT EXISTS error_details JSONB,
-            ADD COLUMN IF NOT EXISTS is_duplicate BOOLEAN DEFAULT false;
-        """)
-        conn.commit()
-    except Exception as e:
-        logger.warning(f"Failed to alter staging table {table_name}. Might be fine: {e}")
-        conn.rollback()
-        
-    logger.info(f"Staging table staging_data.{table_name} ready")
 
 
 def process_file_in_chunks(
@@ -480,54 +737,92 @@ def process_file_in_chunks(
     target_table: Optional[str] = None,
     foreign_keys_data: Optional[Dict[str, set]] = None,
     valid_temp_file: Optional[Path] = None,
-    rejected_temp_file: Optional[Path] = None
+    rejected_temp_file: Optional[Path] = None,
+    catalog_table: Optional[str] = None,
+    composite_unique_keys: Optional[List[str]] = None,
+    seen_composite_keys: Optional[set] = None,
+    source_file_columns: Optional[List[str]] = None,
+    history_mode: bool = False,
+    process_type: Optional[str] = None,
+    organization_id: Optional[str] = None,
+    sku_resolver=None,
+    resolve_sku_id: bool = False,
+    source_extension: Optional[str] = None,
+    progress_conn: Optional[psycopg2.extensions.connection] = None,
+    parquet_writer: Optional[ValidRecordsParquetWriter] = None,
 ) -> Dict[str, Any]:
     """
     Procesa archivo en chunks usando Polars.
     """
+    progress_conn = progress_conn or conn
     total_inserted = 0
     total_rejected = 0
     chunks_processed = 0
     quality_scores = []
-    
-    # Determinar tipo de archivo
+
+    own_writer: Optional[ValidRecordsParquetWriter] = None
+    if valid_temp_file and parquet_writer is None and not direct_load:
+        own_writer = ValidRecordsParquetWriter(valid_temp_file, [])
+        parquet_writer = own_writer
+
     file_ext = file_path.suffix.lower()
-    
-    try:
-        if file_ext == '.csv':
-            # Normalizar encoding para Polars (ej: utf-8 -> utf8)
-            pl_encoding = encoding.lower().replace("-", "")
-            
-            # En Polars 0.20.3, read_csv_batched NO soporta truncate_ragged_lines.
-            # Usamos read_csv() que sí lo soporta y permite más encodings que scan_csv.
-            # Leer TODAS las columnas como string (Utf8).
-            # Evita que Polars convierta silenciosamente valores invalidos
-            # (ej: 'dasd' en columna numerica) a null antes de que el validador los vea.
-            # La conversion real al tipo correcto la hace PostgreSQL via COPY.
-            full_df = pl.read_csv(
-                file_path,
-                separator=delimiter,
-                encoding=pl_encoding,
-                ignore_errors=True,
-                truncate_ragged_lines=True,
-                infer_schema_length=0,
-                try_parse_dates=False,
-                rechunk=True
+
+    def _finalize_chunk(stats: Dict[str, Any], end_idx: int) -> None:
+        nonlocal total_inserted, total_rejected, chunks_processed
+        total_inserted += stats["inserted"]
+        total_rejected += stats["rejected"]
+        if stats["avg_quality"]:
+            quality_scores.append(stats["avg_quality"])
+        chunks_processed += 1
+        rows_processed = total_inserted + total_rejected
+        progress_percent = min(99.0, (end_idx / total_rows) * 100) if total_rows else 0.0
+        if chunks_processed % PROGRESS_COMMIT_EVERY_CHUNKS == 0:
+            report_processing_progress(
+                conn,
+                batch_id,
+                progress_percentage=progress_percent,
+                current_operation=(
+                    f"Validando filas {rows_processed:,} de {total_rows:,} "
+                    f"(bloque {chunks_processed}/{chunks_total})…"
+                ),
+                phase="validating",
+                total_rows=total_rows,
+                rows_processed=rows_processed,
+                loaded_rows=total_inserted,
+                rejected_rows=total_rejected,
+                chunks_processed=chunks_processed,
+                chunks_total=chunks_total,
+                force=True,
             )
-            
-            # Dividir en chunks manualmente para procesar
-            total_rows = len(full_df)
-            for start_idx in range(0, total_rows, CHUNK_SIZE_RECORDS):
-                end_idx = min(start_idx + CHUNK_SIZE_RECORDS, total_rows)
-                chunk_df = full_df.slice(start_idx, end_idx - start_idx)
-                
-                # Procesar chunk
+        logger.info(f"Chunk {chunks_processed} completed: {stats['inserted']} inserted")
+
+    try:
+        if file_ext in (".csv", ".parquet"):
+            from data_staging.utils.chunk_iterators import iter_file_chunks
+
+            total_rows, chunk_source = iter_file_chunks(
+                file_path, CHUNK_SIZE_RECORDS, delimiter=delimiter, encoding=encoding
+            )
+            chunks_total = max(1, (total_rows + CHUNK_SIZE_RECORDS - 1) // CHUNK_SIZE_RECORDS)
+            report_processing_progress(
+                progress_conn,
+                batch_id,
+                progress_percentage=8,
+                current_operation=f"Validando {total_rows:,} filas del archivo…",
+                phase="validating",
+                total_rows=total_rows,
+                chunks_total=chunks_total,
+                force=True,
+            )
+            row_offset = 0
+            for chunk_df in chunk_source:
+                end_idx = min(row_offset + len(chunk_df), total_rows)
                 stats = process_single_chunk(
-                    chunk_df, 
-                    chunk_idx=chunks_processed, 
-                    batch_id=batch_id, 
-                    staging_table=staging_table, 
-                    source_name=source_name, 
+                    chunk_df,
+                    chunk_idx=chunks_processed,
+                    batch_id=batch_id,
+                    staging_table=staging_table,
+                    source_name=source_name,
                     conn=conn,
                     column_mapping=column_mapping,
                     selected_columns=selected_columns,
@@ -538,46 +833,45 @@ def process_file_in_chunks(
                     target_table=target_table,
                     foreign_keys_data=foreign_keys_data,
                     valid_temp_file=valid_temp_file,
-                    rejected_temp_file=rejected_temp_file
+                    rejected_temp_file=rejected_temp_file,
+                    catalog_table=catalog_table,
+                    composite_unique_keys=composite_unique_keys,
+                    seen_composite_keys=seen_composite_keys,
+                    source_file_columns=source_file_columns,
+                    history_mode=history_mode,
+                    process_type=process_type,
+                    organization_id=organization_id,
+                    sku_resolver=sku_resolver,
+                    resolve_sku_id=resolve_sku_id,
+                    source_extension=source_extension,
+                    progress_total_rows=total_rows,
+                    progress_row_offset=row_offset,
+                    progress_loaded_before=total_inserted,
+                    progress_rejected_before=total_rejected,
+                    progress_chunks_processed=chunks_processed,
+                    progress_chunks_total=chunks_total,
+                    progress_conn=progress_conn,
+                    parquet_writer=parquet_writer,
                 )
-                
-                total_inserted += stats['inserted']
-                total_rejected += stats['rejected']
-                if stats['avg_quality']:
-                    quality_scores.append(stats['avg_quality'])
-                
-                chunks_processed += 1
-                
-                # Reportar progreso (requires progress column in job_queue)
-                if job_id:
-                    try:
-                        progress_percent = min(95, (total_inserted / max(total_inserted + total_rejected, 1)) * 100)
-                        cursor = conn.cursor()
-                        cursor.execute("""
-                            UPDATE staging_meta.batch_control
-                            SET metadata = metadata || jsonb_build_object('processing_progress', %s::jsonb)
-                            WHERE batch_id = %s
-                        """, (
-                            json.dumps({
-                                "progress_percentage": progress_percent,
-                                "current_operation": f"Processing chunk {chunks_processed}",
-                                "chunks_processed": chunks_processed,
-                                "rows_processed": total_inserted
-                            }),
-                            batch_id
-                        ))
-                        conn.commit()
-                        cursor.close()
-                    except Exception as e:
-                        logger.warning(f"Failed to update progress: {e}")
-                
-                logger.info(f"Chunk {chunks_processed} completed: {stats['inserted']} inserted")
+                _finalize_chunk(stats, end_idx)
+                row_offset = end_idx
 
         elif file_ext in ['.xlsx', '.xls']:
             # Excel: leer todo primero (limitación de formato)
             df_full = pl.read_excel(file_path)
             
             total_rows = len(df_full)
+            chunks_total = max(1, (total_rows + CHUNK_SIZE_RECORDS - 1) // CHUNK_SIZE_RECORDS)
+            report_processing_progress(
+                progress_conn,
+                batch_id,
+                progress_percentage=8,
+                current_operation=f"Validando {total_rows:,} filas del archivo…",
+                phase="validating",
+                total_rows=total_rows,
+                chunks_total=chunks_total,
+                force=True,
+            )
             for i in range(0, total_rows, CHUNK_SIZE_RECORDS):
                 chunk_df = df_full[i:i+CHUNK_SIZE_RECORDS]
                 
@@ -596,7 +890,25 @@ def process_file_in_chunks(
                     target_schema=target_schema,
                     target_table=target_table,
                     valid_temp_file=valid_temp_file,
-                    rejected_temp_file=rejected_temp_file
+                    rejected_temp_file=rejected_temp_file,
+                    catalog_table=catalog_table,
+                    composite_unique_keys=composite_unique_keys,
+                    seen_composite_keys=seen_composite_keys,
+                    source_file_columns=source_file_columns,
+                    history_mode=history_mode,
+                    process_type=process_type,
+                    organization_id=organization_id,
+                    sku_resolver=sku_resolver,
+                    resolve_sku_id=resolve_sku_id,
+                    source_extension=source_extension,
+                    progress_total_rows=total_rows,
+                    progress_row_offset=i,
+                    progress_loaded_before=total_inserted,
+                    progress_rejected_before=total_rejected,
+                    progress_chunks_processed=chunks_processed,
+                    progress_chunks_total=chunks_total,
+                    progress_conn=progress_conn,
+                    parquet_writer=parquet_writer,
                 )
                 
                 total_inserted += stats['inserted']
@@ -605,33 +917,46 @@ def process_file_in_chunks(
                     quality_scores.append(stats['avg_quality'])
                 
                 chunks_processed += 1
-                
-                # Reportar progreso (requires progress column in job_queue)
-                if job_id:
-                    try:
-                        progress_percent = min(95, (i + CHUNK_SIZE_RECORDS) / total_rows * 100)
-                        cursor = conn.cursor()
-                        cursor.execute("""
-                            UPDATE staging_meta.batch_control
-                            SET metadata = metadata || jsonb_build_object('processing_progress', %s::jsonb)
-                            WHERE batch_id = %s
-                        """, (
-                            json.dumps({
-                                "progress_percentage": progress_percent,
-                                "current_operation": f"Processing chunk {chunks_processed}/{(total_rows // CHUNK_SIZE_RECORDS) + 1}",
-                                "chunks_processed": chunks_processed,
-                                "rows_processed": total_inserted
-                            }),
-                            batch_id
-                        ))
-                        conn.commit()
-                        cursor.close()
-                    except Exception as e:
-                        logger.warning(f"Failed to update progress: {e}")
+                end_idx = min(i + CHUNK_SIZE_RECORDS, total_rows)
+                rows_processed = total_inserted + total_rejected
+                progress_percent = (
+                    min(99.0, (end_idx / total_rows) * 100) if total_rows else 0.0
+                )
+                report_processing_progress(
+                    conn,
+                    batch_id,
+                    progress_percentage=progress_percent,
+                    current_operation=(
+                        f"Validando filas {rows_processed:,} de {total_rows:,} "
+                        f"(bloque {chunks_processed}/{chunks_total})…"
+                    ),
+                    phase="validating",
+                    total_rows=total_rows,
+                    rows_processed=rows_processed,
+                    loaded_rows=total_inserted,
+                    rejected_rows=total_rejected,
+                    chunks_processed=chunks_processed,
+                    chunks_total=chunks_total,
+                )
                 
                 logger.info(f"Chunk {chunks_processed} completed: {stats['inserted']} inserted")
         else:
             raise ValueError(f"Unsupported file type: {file_ext}")
+
+        report_processing_progress(
+            progress_conn,
+            batch_id,
+            progress_percentage=99,
+            current_operation="Finalizando validación…",
+            phase="finishing",
+            total_rows=total_inserted + total_rejected,
+            rows_processed=total_inserted + total_rejected,
+            loaded_rows=total_inserted,
+            rejected_rows=total_rejected,
+            chunks_processed=chunks_processed,
+            chunks_total=max(1, chunks_processed),
+            force=True,
+        )
         
         return {
             "total_inserted": total_inserted,
@@ -639,10 +964,13 @@ def process_file_in_chunks(
             "chunks_processed": chunks_processed,
             "avg_quality_score": float(np.mean(quality_scores)) if quality_scores else 0.0
         }
-        
+
     except Exception as e:
         logger.error(f"Error processing file {file_path}: {e}")
         raise
+    finally:
+        if own_writer is not None:
+            own_writer.close()
 
 
 def process_single_chunk(
@@ -661,7 +989,25 @@ def process_single_chunk(
     target_table: Optional[str] = None,
     foreign_keys_data: Optional[Dict[str, set]] = None,
     valid_temp_file: Optional[Path] = None,
-    rejected_temp_file: Optional[Path] = None
+    rejected_temp_file: Optional[Path] = None,
+    catalog_table: Optional[str] = None,
+    composite_unique_keys: Optional[List[str]] = None,
+    seen_composite_keys: Optional[set] = None,
+    source_file_columns: Optional[List[str]] = None,
+    history_mode: bool = False,
+    process_type: Optional[str] = None,
+    organization_id: Optional[str] = None,
+    sku_resolver=None,
+    resolve_sku_id: bool = False,
+    source_extension: Optional[str] = None,
+    progress_total_rows: int = 0,
+    progress_row_offset: int = 0,
+    progress_loaded_before: int = 0,
+    progress_rejected_before: int = 0,
+    progress_chunks_processed: int = 0,
+    progress_chunks_total: int = 1,
+    progress_conn: Optional[psycopg2.extensions.connection] = None,
+    parquet_writer: Optional[ValidRecordsParquetWriter] = None,
 ):
     """Helper to process a single chunk dataframe."""
     logger.info("--- WORKER CODE VERSION CHECK: NO TRUNCATE_ARG ---")
@@ -676,7 +1022,23 @@ def process_single_chunk(
         selected_columns=selected_columns,
         target_column_types=target_column_types,
         not_null_columns=not_null_columns,
-        foreign_keys_data=foreign_keys_data
+        foreign_keys_data=foreign_keys_data,
+        catalog_table=catalog_table,
+        composite_unique_keys=composite_unique_keys,
+        seen_composite_keys=seen_composite_keys,
+        history_mode=history_mode,
+        process_type=process_type,
+        organization_id=organization_id,
+        sku_resolver=sku_resolver,
+        resolve_sku_id=resolve_sku_id,
+        source_extension=source_extension,
+        progress_conn=progress_conn or conn,
+        progress_total_rows=progress_total_rows,
+        progress_row_offset=progress_row_offset,
+        progress_loaded_before=progress_loaded_before,
+        progress_rejected_before=progress_rejected_before,
+        progress_chunks_processed=progress_chunks_processed,
+        progress_chunks_total=progress_chunks_total,
     )
     
     # Carga Directa (COPY a Prod) vs Temp File (Post-Staging Validation)
@@ -697,53 +1059,44 @@ def process_single_chunk(
                 ingestor.flush()
                 db_inserted = len(passed_records)
     elif valid_temp_file:
-        # Modo estándar: escribir PASSED a CSV temporal local
+        # Modo estándar: escribir PASSED a Parquet local
         if passed_records:
-            target_cols = [c for c in column_mapping.keys() if c in target_column_types] if target_column_types else list(column_mapping.keys())
-            
-            # Write to temporary file line by line
-            file_exists = valid_temp_file.exists()
-            with open(valid_temp_file, "a", encoding="utf-8", newline="") as f:
-                writer = csv.writer(f, delimiter="\t", lineterminator="\n", quoting=csv.QUOTE_MINIMAL)
-                if not file_exists:
-                    # Opcionalmente escribir headers (no para postgres COPY si se especifica los cols exactos)
-                    # Pero ayuda para debuggear
-                    writer.writerow(target_cols + ['_batch_id_', '_source_row_number_'])
-                
-                for pr in passed_records:
-                    p_data = json.loads(pr["processed_data"])
-                    
-                    row_values = []
-                    for col in target_cols:
-                        val = p_data.get(col)
-                        if val is None or val == "" or (isinstance(val, float) and np.isnan(val)):
-                            row_values.append("\\N") # Postgres NULL
-                        else:
-                            s_val = str(val).replace("\t", " ").replace("\n", " ").replace("\r", " ")
-                            row_values.append(s_val)
-                    
-                    # Añadir metadata
-                    row_values.append(pr["batch_id"])
-                    row_values.append(str(pr["source_row_number"]))
-                    writer.writerow(row_values)
-            
-            db_inserted = len(passed_records)
+            if history_mode and passed_records:
+                sample = json.loads(passed_records[0]["processed_data"])
+                target_cols = [
+                    k
+                    for k in sample.keys()
+                    if not target_column_types or k in target_column_types
+                ]
+            else:
+                target_cols = list(column_mapping.keys()) if column_mapping else []
+                if target_column_types:
+                    target_cols = [c for c in target_cols if c in target_column_types]
+                if not target_cols and column_mapping:
+                    target_cols = list(column_mapping.keys())
 
-    # FALLIDOS → archivo en disco (no staging en BD, cero WAL)
+            written = append_valid_records_parquet(
+                valid_temp_file, passed_records, target_cols, writer=parquet_writer
+            )
+            db_inserted = written
+
+    # FALLIDOS → archivo en disco (columna A = línea+errores; resto = columnas del archivo)
     if failed_records and rejected_temp_file is not None:
-        file_exists = rejected_temp_file.exists()
-        with open(rejected_temp_file, "a", encoding="utf-8", newline="") as rf:
-            writer = csv.writer(rf, delimiter="\t", lineterminator="\n", quoting=csv.QUOTE_MINIMAL)
-            if not file_exists:
-                writer.writerow(["source_row_number", "validation_status",
-                                  "error_details", "raw_data"])
-            for fr in failed_records:
-                writer.writerow([
-                    fr["source_row_number"],
-                    fr["validation_status"],
-                    fr.get("error_details") or "",
-                    fr.get("raw_data") or ""
-                ])
+        export_cols = list(source_file_columns or [])
+        if not export_cols and failed_records:
+            first_src = failed_records[0].get("source_file_data")
+            if first_src:
+                try:
+                    parsed = json.loads(first_src) if isinstance(first_src, str) else first_src
+                    if isinstance(parsed, dict):
+                        export_cols = list(parsed.keys())
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        append_rejected_records_csv(
+            rejected_temp_file,
+            failed_records,
+            export_cols,
+        )
         db_rejected = len(failed_records)
 
     # Calcular stats reales basados en validación
@@ -760,6 +1113,43 @@ def process_single_chunk(
     }
 
 
+def _resolve_row_column(row: Dict[str, Any], col: str) -> Optional[str]:
+    """Return key in row only for exact name match (case-insensitive)."""
+    if col in row:
+        return col
+    lower_map = {str(k).lower(): k for k in row.keys()}
+    return lower_map.get(str(col).lower())
+
+
+def _resolve_composite_key(row: Dict[str, Any], unique_keys: List[str]) -> Optional[tuple]:
+    from data_staging.catalog.catalog_transforms import is_empty_value
+
+    parts: List[str] = []
+    for key in unique_keys:
+        col = _resolve_row_column(row, key)
+        if col is None:
+            return None
+        val = row[col]
+        if is_empty_value(val):
+            return None
+        parts.append(str(val).strip())
+    return tuple(parts)
+
+
+def _source_row_from_mapped(
+    row: Dict[str, Any], column_mapping: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Rebuild source-file columns from a pre-mapped row (for rejected export)."""
+    source_file_row: Dict[str, Any] = {}
+    for target_col, val in row.items():
+        mapped_info = column_mapping.get(target_col)
+        if mapped_info and mapped_info.get("source"):
+            source_file_row[mapped_info["source"]] = val
+        else:
+            source_file_row[target_col] = val
+    return source_file_row
+
+
 def validate_and_prepare_chunk(
     chunk_df: pl.DataFrame,
     batch_id: str,
@@ -769,7 +1159,23 @@ def validate_and_prepare_chunk(
     selected_columns: Optional[List[str]] = None,
     target_column_types: Optional[Dict[str, str]] = None,
     not_null_columns: Optional[Dict[str, bool]] = None,
-    foreign_keys_data: Optional[Dict[str, set]] = None
+    foreign_keys_data: Optional[Dict[str, set]] = None,
+    catalog_table: Optional[str] = None,
+    composite_unique_keys: Optional[List[str]] = None,
+    seen_composite_keys: Optional[set] = None,
+    history_mode: bool = False,
+    process_type: Optional[str] = None,
+    organization_id: Optional[str] = None,
+    sku_resolver=None,
+    resolve_sku_id: bool = False,
+    source_extension: Optional[str] = None,
+    progress_conn: Optional[psycopg2.extensions.connection] = None,
+    progress_total_rows: int = 0,
+    progress_row_offset: int = 0,
+    progress_loaded_before: int = 0,
+    progress_rejected_before: int = 0,
+    progress_chunks_processed: int = 0,
+    progress_chunks_total: int = 1,
 ) -> List[Dict[str, Any]]:
     """
     Valida y prepara registros de un chunk.
@@ -777,47 +1183,117 @@ def validate_and_prepare_chunk(
     VALIDA TIPOS Y CARACTERES ESPECIALES.
     """
     import re
+
+    from data_staging.catalog.catalog_registry import get_catalog_table
+    from data_staging.catalog.catalog_transforms import (
+        apply_catalog_transforms_polars,
+        format_date_for_storage,
+        is_empty_value,
+        parse_flexible_datetime,
+        sanitize_row_dict,
+    )
     
     # Regex para caracteres peligrosos o invalidos (control characters except tab/newline)
     INVALID_CHARS_REGEX = re.compile(r'[\x00-\x08\x0B\x0C\x0E-\x1F]')
     
-    # 1. Filtrar columnas si selected_columns está presente
-    if selected_columns:
+    is_already_mapped = False
+    if column_mapping:
+        targets_present = sum(1 for target in column_mapping.keys() if target in chunk_df.columns)
+        if targets_present >= 2:
+            is_already_mapped = True
+
+    # 1. Filtrar columnas si selected_columns está presente (solo si no está pre-mapeado)
+    if selected_columns and not is_already_mapped:
         available_cols = [c for c in selected_columns if c in chunk_df.columns]
         if available_cols:
             chunk_df = chunk_df.select(available_cols)
         else:
             logger.warning(f"None of selected columns {selected_columns} found in dataframe")
+
+    # Conservar filas originales del archivo (antes de mapear) para export de rechazados
+    if is_already_mapped and column_mapping:
+        original_rows = None
+    else:
+        original_rows = chunk_df.to_dicts()
     
     # 2. Aplicar column mapping si está presente
     if column_mapping:
-        # Crear nuevas columnas según mapping
-        for target_col, map_info in column_mapping.items():
-            source_col = map_info.get("source")
-            default_val = map_info.get("default")
-            
-            # REGLA DE NEGOCIO: Si el usuario asignó un default_val explícito, 
-            # tiene prioridad absoluta y omite la información de `source_col`
-            if default_val is not None and str(default_val).strip() != "":
-                chunk_df = chunk_df.with_columns([
-                    pl.lit(default_val).alias(target_col)
-                ])
-            # Si NO hay default_val, entonces tomamos la información de la columna original si existe
-            elif source_col and source_col in chunk_df.columns:
-                chunk_df = chunk_df.rename({source_col: target_col})
-            # Si es una columna nueva (no mapeada) y no tiene default, la llenamos con NULL
-            else:
-                chunk_df = chunk_df.with_columns([
-                    pl.lit(None).alias(target_col)
-                ])
-        
-        # Seleccionar solo columnas target
-        target_cols = list(column_mapping.keys())
-        available_targets = [c for c in target_cols if c in chunk_df.columns]
-        if available_targets:
-            chunk_df = chunk_df.select(available_targets)
+        if is_already_mapped:
+            # Si ya está mapeado, solo nos aseguramos de que existan las columnas del mapping 
+            # (inyectando valores por defecto si no existen)
+            for target_col, map_info in column_mapping.items():
+                if target_col not in chunk_df.columns:
+                    default_val = map_info.get("default")
+                    chunk_df = chunk_df.with_columns([
+                        pl.lit(default_val if default_val is not None else None).alias(target_col)
+                    ])
         else:
-            logger.error(f"No target columns found after mapping")
+            # Crear nuevas columnas según mapping desde columnas originales
+            for target_col, map_info in column_mapping.items():
+                source_col = map_info.get("source")
+                default_val = map_info.get("default")
+                
+                # REGLA DE NEGOCIO: Si el usuario asignó un default_val explícito, 
+                # tiene prioridad absoluta y omite la información de `source_col`
+                if default_val is not None and str(default_val).strip() != "":
+                    chunk_df = chunk_df.with_columns([
+                        pl.lit(default_val).alias(target_col)
+                    ])
+                # Si NO hay default_val, entonces tomamos la información de la columna original si existe
+                elif source_col and source_col in chunk_df.columns:
+                    chunk_df = chunk_df.rename({source_col: target_col})
+                # Si la columna de destino ya existe en el dataframe (ej: archivo ya aglomerado), la conservamos
+                elif target_col in chunk_df.columns:
+                    pass
+                # Si es una columna nueva (no mapeada) y no tiene default, la llenamos con NULL
+                else:
+                    chunk_df = chunk_df.with_columns([
+                        pl.lit(None).alias(target_col)
+                    ])
+            
+            # Seleccionar solo columnas target
+            target_cols = list(column_mapping.keys())
+            available_targets = [c for c in target_cols if c in chunk_df.columns]
+            if available_targets:
+                chunk_df = chunk_df.select(available_targets)
+            else:
+                logger.error(f"No target columns found after mapping")
+
+    if catalog_table:
+        mapped_cols = frozenset(column_mapping.keys()) if column_mapping else None
+        chunk_df = apply_catalog_transforms_polars(
+            chunk_df, catalog_table, mapped_columns=mapped_cols
+        )
+
+    if history_mode and organization_id:
+        from data_staging.history.history_transforms import apply_history_transforms_polars
+
+        chunk_df = apply_history_transforms_polars(
+            chunk_df,
+            organization_id=organization_id,
+            process_type=process_type,
+            source_extension=source_extension,
+            sku_resolver=sku_resolver,
+            resolve_sku_id=resolve_sku_id,
+        )
+
+    from data_staging.utils.vectorized_validation import use_vectorized_validation
+
+    if use_vectorized_validation() and history_mode:
+        from data_staging.utils.vectorized_validation import validate_chunk_vectorized
+
+        return validate_chunk_vectorized(
+            chunk_df=chunk_df,
+            batch_id=batch_id,
+            chunk_idx=chunk_idx,
+            chunk_size=CHUNK_SIZE_RECORDS,
+            column_mapping=column_mapping,
+            target_column_types=target_column_types,
+            not_null_columns=not_null_columns,
+            foreign_keys_data=foreign_keys_data,
+            history_mode=history_mode,
+            original_rows=original_rows,
+        )
     
     # 3. Preparar registros
     records = []
@@ -841,9 +1317,40 @@ def validate_and_prepare_chunk(
     # DEBUG: Log available columns vs target schema
     logger.info(f"Chunk columns: {chunk_df.columns}")
     logger.info(f"Target schema keys: {list(target_column_types.keys())}")
+
+    if progress_conn and progress_total_rows > 0:
+        report_processing_progress(
+            progress_conn,
+            batch_id,
+            progress_percentage=min(
+                99.0, ((progress_row_offset + len(rows)) / progress_total_rows) * 100
+            ),
+            current_operation=(
+                f"Validando filas {progress_row_offset + 1:,}–"
+                f"{progress_row_offset + len(rows):,} de {progress_total_rows:,} "
+                f"(bloque {progress_chunks_processed + 1}/{progress_chunks_total})…"
+            ),
+            phase="validating",
+            total_rows=progress_total_rows,
+            rows_processed=progress_row_offset,
+            loaded_rows=progress_loaded_before,
+            rejected_rows=progress_rejected_before,
+            chunks_processed=progress_chunks_processed,
+            chunks_total=progress_chunks_total,
+        )
     
     logged_errors = 0
+    chunk_passed = 0
+    chunk_failed = 0
+    last_progress_at = time.monotonic()
     for i, row in enumerate(rows):
+        row = sanitize_row_dict(row)
+        if original_rows is not None:
+            source_file_row = original_rows[i] if i < len(original_rows) else {}
+        elif is_already_mapped and column_mapping:
+            source_file_row = _source_row_from_mapped(row, column_mapping)
+        else:
+            source_file_row = {}
         validation_status = "PASSED"
         error_list = []
         
@@ -859,15 +1366,7 @@ def validate_and_prepare_chunk(
                 is_not_null = (not_null_columns or {}).get(col_name, False)
                 has_foreign_key = bool(foreign_keys_data and col_name in foreign_keys_data)
                 
-                # Check for emptiness (None, empty string, or NaN)
-                import math
-                is_empty = (
-                    value is None or 
-                    str(value).strip() == "" or 
-                    str(value).strip().lower() == "nan" or
-                    str(value).strip().lower() == "null" or
-                    (isinstance(value, float) and math.isnan(value))
-                )
+                is_empty = is_empty_value(value)
 
                 # Validar NULL en columnas NOT NULL o llaves foráneas requeridas
                 if is_empty:
@@ -909,33 +1408,28 @@ def validate_and_prepare_chunk(
                         validation_status = "FAILED"
                         error_list.append(f"Invalid format for '{col_name}': expected number, got '{value}'")
 
-                # Validación Date / Timestamp (ESTRICTA)
+                # Validación Date / Timestamp (acepta datetime con fracciones .000000000)
                 elif 'date' in target_type or 'time' in target_type:
-                    val_str = str(value).strip()
-                    if val_str:
-                        import datetime
-                        date_valid = False
-                        date_formats = [
-                            '%Y-%m-%d',
-                            '%d/%m/%Y',
-                            '%m/%d/%Y',
-                            '%Y/%m/%d',
-                            '%d-%m-%Y',
-                            '%Y-%m-%d %H:%M:%S',
-                            '%Y-%m-%dT%H:%M:%S',
-                            '%d/%m/%Y %H:%M:%S',
-                        ]
-                        for fmt in date_formats:
-                            try:
-                                datetime.datetime.strptime(val_str, fmt)
-                                date_valid = True
-                                break
-                            except ValueError:
-                                continue
-
-                        if not date_valid:
+                    if not is_empty:
+                        parsed_dt = parse_flexible_datetime(value)
+                        if not parsed_dt:
                             validation_status = "FAILED"
-                            error_list.append(f"Invalid date format for '{col_name}': got '{value}'")
+                            error_list.append(
+                                f"Invalid date format for '{col_name}': got '{value}'"
+                            )
+                        else:
+                            date_only = (
+                                target_type.strip() == 'date'
+                                or (
+                                    'date' in target_type
+                                    and 'timestamp' not in target_type
+                                )
+                            )
+                            normalized = format_date_for_storage(
+                                parsed_dt, date_only=date_only
+                            )
+                            if normalized is not None:
+                                row[col_name] = normalized
 
                 # Validación String Length (varchar)
                 elif 'char' in target_type or 'text' in target_type:
@@ -947,7 +1441,119 @@ def validate_and_prepare_chunk(
                             validation_status = "FAILED"
                             error_list.append(f"String too long for '{col_name}': len={len(str(value))}, max={max_len}")
 
-        # 2. Validar Caracteres Especiales (en todos los campos string)
+        # 2. Columnas requeridas del catálogo (definición de negocio)
+        if history_mode:
+            from data_staging.history.history_config import (
+                HISTORY_REQUIRED_MAPPING_COLUMNS,
+                HISTORY_SKU_MAPPING_TARGETS,
+            )
+
+            has_sku_value = any(
+                not is_empty_value(row.get(k)) for k in HISTORY_SKU_MAPPING_TARGETS
+            )
+            if not has_sku_value:
+                validation_status = "FAILED"
+                error_list.append(
+                    "Falta código de producto (mapea sku o sku_code)"
+                )
+            elif "sku" in (target_column_types or {}):
+                if is_empty_value(row.get("sku")):
+                    validation_status = "FAILED"
+                    error_list.append("Campo obligatorio vacío: sku")
+            for req in HISTORY_REQUIRED_MAPPING_COLUMNS:
+                if req in (target_column_types or {}) and is_empty_value(row.get(req)):
+                    validation_status = "FAILED"
+                    error_list.append(f"Campo obligatorio vacío: {req}")
+
+            # Validar existencia de SKU en catálogo public.skus de la organización
+            sku_val = row.get("sku")
+            if not is_empty_value(sku_val):
+                sku_str = str(sku_val).strip().lower()
+                if sku_str.endswith(".0"):
+                    sku_str = sku_str[:-2]
+                if foreign_keys_data and "__valid_skus__" in foreign_keys_data:
+                    if sku_str not in foreign_keys_data["__valid_skus__"]:
+                        validation_status = "FAILED"
+                        error_list.append(
+                            f"El SKU '{sku_val}' no existe en la tabla de productos (skus.code) de la organización"
+                        )
+
+            # Validar existencia de Location en catálogo public.locations de la organización
+            loc_val = row.get("location_code")
+            if not is_empty_value(loc_val):
+                loc_str = str(loc_val).strip().lower()
+                if loc_str.endswith(".0"):
+                    loc_str = loc_str[:-2]
+                if foreign_keys_data and "__valid_locations__" in foreign_keys_data:
+                    if loc_str not in foreign_keys_data["__valid_locations__"]:
+                        validation_status = "FAILED"
+                        error_list.append(
+                            f"La locación '{loc_val}' no existe en la tabla de ubicaciones (locations.code) de la organización"
+                        )
+
+            if "granularity" in (target_column_types or {}) and is_empty_value(
+                row.get("granularity")
+            ):
+                validation_status = "FAILED"
+                error_list.append("Campo obligatorio vacío: granularity")
+
+            from data_staging.history.history_config import HISTORY_SALES_CHANNEL_VALUE
+
+            invalid_channel = row.pop("_sales_channel_invalid", None)
+            if invalid_channel is not None:
+                validation_status = "FAILED"
+                error_list.append(
+                    f"sales_channel debe ser '{HISTORY_SALES_CHANNEL_VALUE}' "
+                    f"(valor en archivo: {invalid_channel!r})"
+                )
+
+        if catalog_table:
+            catalog_def = get_catalog_table(catalog_table)
+            if catalog_def:
+                for col in catalog_def.get("required_columns") or []:
+                    if not col or col == "organization_id":
+                        continue
+                    resolved = _resolve_row_column(row, col)
+                    if not resolved:
+                        validation_status = "FAILED"
+                        error_list.append(
+                            f"Columna requerida no mapeada o ausente: '{col}'"
+                        )
+                    elif is_empty_value(row.get(resolved)):
+                        validation_status = "FAILED"
+                        error_list.append(
+                            f"Valor vacío no permitido en columna requerida '{col}'"
+                        )
+
+        # 3. Validar enums de catálogo (status, etc.) cuando la columna está mapeada
+        if catalog_table:
+            from data_staging.catalog.catalog_transforms import validate_catalog_row_enums
+
+            enum_errors = validate_catalog_row_enums(row, catalog_table)
+            if enum_errors:
+                validation_status = "FAILED"
+                error_list.extend(enum_errors)
+
+        if (
+            composite_unique_keys
+            and seen_composite_keys is not None
+            and validation_status == "PASSED"
+        ):
+            key_tuple = _resolve_composite_key(row, composite_unique_keys)
+            if key_tuple is None:
+                validation_status = "FAILED"
+                error_list.append(
+                    f"Faltan columnas para clave única: {', '.join(composite_unique_keys)}"
+                )
+            elif key_tuple in seen_composite_keys:
+                validation_status = "FAILED"
+                error_list.append(
+                    f"Clave duplicada en archivo ({', '.join(composite_unique_keys)})"
+                )
+            else:
+                seen_composite_keys.add(key_tuple)
+
+        # 4. Validar Caracteres Especiales (en todos los campos string)
         for col_name, value in row.items():
             if isinstance(value, str):
                 if INVALID_CHARS_REGEX.search(value):
@@ -974,6 +1580,7 @@ def validate_and_prepare_chunk(
         record = {
             "batch_id": batch_id,
             "source_row_number": start_row_num + i,
+            "source_file_data": json.dumps(source_file_row, default=str),
             "raw_data": json.dumps(row),
             "processed_data": json.dumps(row),
             "validation_status": validation_status,
@@ -983,81 +1590,40 @@ def validate_and_prepare_chunk(
         }
         
         records.append(record)
+
+        if validation_status == "PASSED":
+            chunk_passed += 1
+        else:
+            chunk_failed += 1
+
+        rows_done = progress_row_offset + i + 1
+        should_report_rows = (
+            progress_conn
+            and progress_total_rows > 0
+            and rows_done % PROGRESS_ROW_INTERVAL == 0
+        )
+        should_report_time = (
+            progress_conn
+            and progress_total_rows > 0
+            and (time.monotonic() - last_progress_at) >= PROGRESS_TIME_INTERVAL_SEC
+        )
+        if should_report_rows or should_report_time:
+            last_progress_at = time.monotonic()
+            report_processing_progress(
+                progress_conn,
+                batch_id,
+                progress_percentage=min(99.0, (rows_done / progress_total_rows) * 100),
+                current_operation=(
+                    f"Validando filas {rows_done:,} de {progress_total_rows:,} "
+                    f"(bloque {progress_chunks_processed + 1}/{progress_chunks_total})…"
+                ),
+                phase="validating",
+                total_rows=progress_total_rows,
+                rows_processed=rows_done,
+                loaded_rows=progress_loaded_before + chunk_passed,
+                rejected_rows=progress_rejected_before + chunk_failed,
+                chunks_processed=progress_chunks_processed,
+                chunks_total=progress_chunks_total,
+            )
     
     return records
-
-
-def insert_records_in_batches(
-    conn: psycopg2.extensions.connection,
-    staging_table: str,
-    records: List[Dict[str, Any]],
-    batch_size: int
-) -> tuple[int, int]:
-    # Inserta registros en batches usando execute_values.
-    # Returns: (inserted_count, rejected_count)
-    from psycopg2.extras import execute_values
-    
-    cursor = conn.cursor()
-    inserted = 0
-    rejected = 0
-    
-    # Dividir en batches
-    for i in range(0, len(records), batch_size):
-        batch = records[i:i+batch_size]
-        
-        # Preparar valores como tuplas
-        values = [
-            (
-                r["batch_id"],
-                r["source_row_number"],
-                r["raw_data"],
-                r["processed_data"],
-                r["validation_status"],
-                r["data_quality_score"],
-                r["is_duplicate"],
-                r["error_details"]
-            )
-            for r in batch
-        ]
-        
-        try:
-            # INSERT usando execute_values (más rápido)
-            execute_values(
-                cursor,
-                f"INSERT INTO staging_data.{staging_table} (batch_id, source_row_number, raw_data, processed_data, validation_status, data_quality_score, is_duplicate, error_details) VALUES %s",
-                values,
-                page_size=batch_size
-            )
-            
-            conn.commit()
-            inserted += len(batch)
-            
-        except Exception as e:
-            conn.rollback()
-            logger.error(f"Batch insert failed: {e}")
-            
-            # Intentar insertar uno por uno
-            for record in batch:
-                try:
-                    # Construir query manualmente para evitar error de syntax con f-string multilinea
-                    insert_query = f"INSERT INTO staging_data.{staging_table} (batch_id, source_row_number, raw_data, processed_data, validation_status, data_quality_score, is_duplicate, error_details) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
-                    
-                    cursor.execute(insert_query, (
-                        record["batch_id"],
-                        record["source_row_number"],
-                        record["raw_data"],
-                        record["processed_data"],
-                        record["validation_status"],
-                        record["data_quality_score"],
-                        record["is_duplicate"],
-                        record["error_details"]
-                    ))
-                    conn.commit()
-                    inserted += 1
-                    
-                except Exception as e2:
-                    conn.rollback()
-                    logger.error(f"Individual insert failed: {e2}")
-                    rejected += 1
-    
-    return inserted, rejected

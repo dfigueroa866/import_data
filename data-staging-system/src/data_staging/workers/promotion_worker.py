@@ -4,346 +4,949 @@ import json
 import psycopg2
 import psycopg2.extras
 import os
-import io
 import itertools
-from typing import Dict, Any, List, Optional
+from pathlib import Path
+from typing import Dict, Any, List, Optional, Set, Tuple
+
+import pandas as pd
+
 from data_staging.config import settings
+from data_staging.utils.batch_staging_files import (
+    find_valid_records_file,
+    is_parquet_valid_file,
+    metadata_merge_expr,
+)
+from data_staging.workers.file_processor import report_processing_progress
 
 logger = logging.getLogger(__name__)
 
-# Tamaño de batch para promoción (registros por iteración)
 PROMOTION_BATCH_SIZE = 50000
+PROMOTION_PROGRESS_EVERY_CHUNKS = int(
+    getattr(settings, "PROMOTION_PROGRESS_EVERY_CHUNKS", 3)
+)
+
+
+def _promotion_chunks_total(total_rows: int) -> int:
+    return max(1, (max(total_rows, 1) + PROMOTION_BATCH_SIZE - 1) // PROMOTION_BATCH_SIZE)
+
+
+def report_promotion_progress(
+    conn,
+    batch_id: str,
+    *,
+    promote_total: int,
+    rows_processed: int,
+    chunks_processed: int,
+    force: bool = False,
+) -> None:
+    """Persist promotion progress for wizard Step 4 polling."""
+    if (
+        not force
+        and PROMOTION_PROGRESS_EVERY_CHUNKS > 1
+        and chunks_processed % PROMOTION_PROGRESS_EVERY_CHUNKS != 0
+    ):
+        return
+    chunks_total = _promotion_chunks_total(promote_total)
+    pct = min(99.0, (rows_processed / max(promote_total, 1)) * 100) if promote_total else 0.0
+    report_processing_progress(
+        conn,
+        batch_id,
+        progress_percentage=pct,
+        current_operation=(
+            f"Promoviendo a producción ({rows_processed:,} de {promote_total:,} registros)…"
+        ),
+        phase="promoting",
+        total_rows=promote_total,
+        rows_processed=rows_processed,
+        loaded_rows=rows_processed,
+        rejected_rows=0,
+        chunks_processed=chunks_processed,
+        chunks_total=chunks_total,
+    )
+
+# Fallback si el catálogo no define unique_keys (nombres = columnas físicas en BD)
+_CATALOG_UPSERT_KEYS_FALLBACK = {
+    "skus": ["organization_id", "code"],
+    "location": ["organization_id", "code"],
+}
+
+# Claves legacy en configs viejos → nombre real en tabla locations
+_CONFLICT_KEY_ALIASES = {
+    "location_code": "code",
+    "location_name": "name",
+}
+
+
+def _resolve_db_column_name(
+    key: str,
+    db_columns: Dict[str, str],
+    db_columns_lower: Dict[str, str],
+) -> Optional[str]:
+    if key in db_columns:
+        return key
+    lower = key.lower()
+    if lower in db_columns_lower:
+        return db_columns_lower[lower]
+    alias = _CONFLICT_KEY_ALIASES.get(key) or _CONFLICT_KEY_ALIASES.get(lower)
+    if alias:
+        if alias in db_columns:
+            return alias
+        if alias.lower() in db_columns_lower:
+            return db_columns_lower[alias.lower()]
+    return None
+
+
+def _resolve_history_conflict_columns(
+    metadata: Dict[str, Any],
+    db_columns: Dict[str, str],
+    db_columns_lower: Dict[str, str],
+    insert_columns: Set[str],
+    unique_indexes: List[List[str]],
+) -> List[str]:
+    from data_staging.history.history_schema import (
+        history_preferred_unique_keys,
+        pick_upsert_conflict_columns,
+    )
+
+    preferred = history_preferred_unique_keys(metadata, set(db_columns.keys()))
+    picked = pick_upsert_conflict_columns(
+        preferred,
+        insert_columns,
+        unique_indexes,
+        lambda key: _resolve_db_column_name(key, db_columns, db_columns_lower),
+    )
+    if picked:
+        logger.info("History UPSERT ON CONFLICT (%s)", ", ".join(picked))
+    else:
+        logger.warning(
+            "No hay índice único en sales_history compatible con columnas insertadas %s; "
+            "se hará INSERT sin UPSERT",
+            sorted(insert_columns),
+        )
+    return picked
+
+
+def _resolve_catalog_conflict_columns(
+    catalog_slug: Optional[str],
+    metadata: Dict[str, Any],
+    db_columns: Dict[str, str],
+    db_columns_lower: Dict[str, str],
+    insert_columns: Set[str],
+    unique_indexes: List[List[str]],
+) -> List[str]:
+    """UPSERT: claves del catálogo alineadas a un índice único real en la tabla destino."""
+    from data_staging.history.history_schema import pick_upsert_conflict_columns
+
+    keys: List[str] = []
+    if catalog_slug:
+        from data_staging.catalog.catalog_registry import get_catalog_table
+
+        entry = get_catalog_table(catalog_slug)
+        if entry:
+            keys = list(entry.get("unique_keys") or [])
+
+    if not keys:
+        keys = list(metadata.get("unique_keys") or [])
+
+    if not keys and catalog_slug:
+        keys = list(_CATALOG_UPSERT_KEYS_FALLBACK.get(catalog_slug.lower(), []))
+
+    picked = pick_upsert_conflict_columns(
+        keys,
+        insert_columns,
+        unique_indexes,
+        lambda key: _resolve_db_column_name(key, db_columns, db_columns_lower),
+    )
+    if picked:
+        logger.info("Catalog UPSERT ON CONFLICT (%s)", ", ".join(picked))
+    elif keys:
+        logger.warning(
+            "No hay índice único compatible para catálogo %s (preferido: %s)",
+            catalog_slug,
+            keys,
+        )
+    return picked
+
+
+def _catalog_upsert_clause(
+    load_type: str,
+    insert_cols: List[str],
+    conflict_cols: Optional[List[str]] = None,
+) -> str:
+    if load_type not in ("catalog", "history") or not conflict_cols:
+        return ""
+
+    normalized = [c.strip('"') for c in insert_cols if c.strip('"') != "imported_at"]
+    conflict_set = {c.lower() for c in conflict_cols}
+    update_cols = [
+        c for c in normalized if c.lower() not in conflict_set and c.lower() != "id"
+    ]
+    conflict_str = ", ".join(f'"{c}"' for c in conflict_cols)
+
+    if not update_cols:
+        return f"ON CONFLICT ({conflict_str}) DO NOTHING"
+
+    set_clause = ", ".join(f'"{c}" = EXCLUDED."{c}"' for c in update_cols)
+    return f"ON CONFLICT ({conflict_str}) DO UPDATE SET {set_clause}"
+
+
+def _is_history_promotion(
+    metadata: Dict[str, Any],
+    target_schema: str,
+    target_table: str,
+    load_type: str,
+) -> bool:
+    from data_staging.history.history_config import (
+        HISTORY_TARGET_TABLE,
+        is_sales_history_target,
+    )
+
+    if (load_type or "").lower() == "history":
+        return True
+    if is_sales_history_target(target_schema, target_table):
+        return True
+    if metadata.get("history_config"):
+        return True
+    return (metadata.get("target_table") or "").lower() == HISTORY_TARGET_TABLE.lower()
+
+
+def _ensure_history_valid_db_columns(
+    valid_db_target_cols: List[str],
+    db_columns: Dict[str, str],
+    db_columns_lower: Dict[str, str],
+) -> List[str]:
+    from data_staging.history.history_config import HISTORY_AUTO_PROMOTION_COLUMNS
+
+    seen = set(valid_db_target_cols)
+    out = list(valid_db_target_cols)
+    for col in HISTORY_AUTO_PROMOTION_COLUMNS:
+        resolved = _resolve_db_column_name(col, db_columns, db_columns_lower)
+        if resolved and resolved not in seen:
+            out.append(resolved)
+            seen.add(resolved)
+    return out
+
+
+def _parquet_promotion_columns(
+    file_columns: List[str],
+    valid_db_target_cols: List[str],
+) -> List[str]:
+    """Solo columnas presentes en el archivo temporal y válidas para la tabla destino."""
+    valid_set = set(valid_db_target_cols)
+    return [
+        c
+        for c in file_columns
+        if c in valid_set and not str(c).startswith("_")
+    ]
+
+
+def _build_insert_context(
+    cursor,
+    metadata: Dict[str, Any],
+    target_schema: str,
+    target_table: str,
+) -> Tuple[List[str], Dict[str, str], Dict[str, str]]:
+    wizard_mappings = metadata.get("column_mappings", {})
+    target_columns: List[str] = []
+    for _file_col, config in wizard_mappings.items():
+        if config.get("target") and config.get("target") != "__new__":
+            target_columns.append(config.get("target"))
+
+    if not target_columns:
+        old_mapping = metadata.get("column_mapping", {})
+        if old_mapping:
+            target_columns = list(old_mapping.keys())
+
+    target_columns = list(set(target_columns))
+
+    load_type = metadata.get("load_type", "history")
+    history_promotion = _is_history_promotion(
+        metadata, target_schema, target_table, load_type
+    )
+    if history_promotion:
+        from data_staging.history.history_config import HISTORY_AUTO_PROMOTION_COLUMNS
+
+        for auto_col in HISTORY_AUTO_PROMOTION_COLUMNS:
+            if auto_col not in target_columns:
+                target_columns.append(auto_col)
+    system_managed: frozenset = frozenset()
+    if load_type == "catalog":
+        from data_staging.catalog.catalog_transforms import load_db_system_managed_columns_psycopg2
+
+        system_managed = load_db_system_managed_columns_psycopg2(
+            cursor, target_schema, target_table
+        )
+
+    cursor.execute(
+        """
+        SELECT column_name, data_type
+        FROM information_schema.columns
+        WHERE LOWER(table_schema) = LOWER(%s) AND LOWER(table_name) = LOWER(%s)
+        """,
+        (target_schema, target_table),
+    )
+    db_columns = {row[0]: row[1] for row in cursor.fetchall()}
+    db_columns_lower = {k.lower(): k for k in db_columns.keys()}
+
+    valid_db_target_cols: List[str] = []
+    for requested_col in target_columns:
+        real_col_name = None
+        if requested_col in db_columns:
+            real_col_name = requested_col
+        elif requested_col.lower() in db_columns_lower:
+            real_col_name = db_columns_lower[requested_col.lower()]
+        if real_col_name and real_col_name not in system_managed:
+            valid_db_target_cols.append(real_col_name)
+
+    if not valid_db_target_cols:
+        raise ValueError(
+            f"No columns matched between mapping and target table {target_schema}.{target_table}. "
+            f"Available columns in DB: {list(db_columns.keys())}. Requested columns: {target_columns}"
+        )
+
+    if history_promotion:
+        valid_db_target_cols = _ensure_history_valid_db_columns(
+            valid_db_target_cols, db_columns, db_columns_lower
+        )
+
+    from data_staging.history.history_schema import discover_unique_indexes
+
+    unique_indexes = discover_unique_indexes(cursor, target_schema, target_table)
+    return valid_db_target_cols, db_columns, db_columns_lower, unique_indexes
+
+
+def _prepare_insert_query(
+    valid_db_target_cols: List[str],
+    db_columns: Dict[str, str],
+    file_columns: List[str],
+    target_schema: str,
+    target_table: str,
+    load_type: str,
+    catalog_slug: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    db_columns_lower: Optional[Dict[str, str]] = None,
+    unique_indexes: Optional[List[List[str]]] = None,
+) -> Tuple[str, str, List[int], List[str]]:
+    insert_cols: List[str] = []
+    file_col_indices: List[int] = []
+
+    for idx, col in enumerate(file_columns):
+        if col in valid_db_target_cols:
+            insert_cols.append(f'"{col}"')
+            file_col_indices.append(idx)
+
+    if "imported_at" in db_columns:
+        insert_cols.append('"imported_at"')
+
+    if not insert_cols:
+        raise ValueError("No matching columns could be found between the temp file and target table.")
+
+    insert_cols_str = ", ".join(insert_cols)
+    template_values = "(" + ", ".join(["%s"] * len(file_col_indices))
+    if "imported_at" in db_columns:
+        template_values += ", NOW()"
+    template_values += ")"
+
+    conflict_cols: Optional[List[str]] = None
+    meta = metadata or {}
+    db_lower = db_columns_lower or {k.lower(): k for k in db_columns}
+    insert_col_names = {c.strip('"') for c in insert_cols}
+    indexes = unique_indexes or []
+    if load_type == "catalog":
+        conflict_cols = _resolve_catalog_conflict_columns(
+            catalog_slug,
+            meta,
+            db_columns,
+            db_lower,
+            insert_col_names,
+            indexes,
+        )
+    elif load_type == "history":
+        conflict_cols = _resolve_history_conflict_columns(
+            meta, db_columns, db_lower, insert_col_names, indexes
+        )
+    conflict_clause = _catalog_upsert_clause(load_type, insert_cols, conflict_cols)
+    insert_query = f"""
+        INSERT INTO {target_schema}.{target_table} ({insert_cols_str})
+        VALUES %s
+        {conflict_clause}
+    """
+    return insert_query, template_values, file_col_indices, insert_cols, conflict_clause
+
+
+def _uses_upsert_update(conflict_clause: str) -> bool:
+    return "DO UPDATE" in (conflict_clause or "").upper()
+
+
+def _execute_promotion_batch(
+    cursor,
+    insert_query: str,
+    template_values: str,
+    chunk_data: List[tuple],
+    conflict_clause: str,
+) -> Tuple[int, int, int]:
+    """
+    Ejecuta un lote de INSERT/UPSERT y devuelve (filas_afectadas, insertadas, actualizadas).
+    """
+    if not chunk_data:
+        return 0, 0, 0
+
+    if _uses_upsert_update(conflict_clause):
+        sql = insert_query.rstrip() + "\nRETURNING (xmax = 0) AS is_insert"
+        rows = psycopg2.extras.execute_values(
+            cursor,
+            sql,
+            chunk_data,
+            template=template_values,
+            page_size=10000,
+            fetch=True,
+        )
+        inserted = sum(1 for row in rows if row[0])
+        updated = len(rows) - inserted
+        return len(rows), inserted, updated
+
+    if conflict_clause and "DO NOTHING" in conflict_clause.upper():
+        sql = insert_query.rstrip() + "\nRETURNING true AS is_insert"
+        rows = psycopg2.extras.execute_values(
+            cursor,
+            sql,
+            chunk_data,
+            template=template_values,
+            page_size=10000,
+            fetch=True,
+        )
+        return len(chunk_data), len(rows), 0
+
+    psycopg2.extras.execute_values(
+        cursor,
+        insert_query,
+        chunk_data,
+        template=template_values,
+        page_size=10000,
+    )
+    n = len(chunk_data)
+    return n, n, 0
+
+
+def _merge_promotion_metadata(
+    metadata: Dict[str, Any],
+    *,
+    promoted_rows: int,
+    promoted_inserted: int,
+    promoted_updated: int,
+) -> Dict[str, Any]:
+    return {
+        **metadata,
+        "promoted_rows": promoted_rows,
+        "promoted_inserted": promoted_inserted,
+        "promoted_updated": promoted_updated,
+        "promoted_count": promoted_rows,
+    }
+
+
+def _row_tuple_from_values(raw_vals: List[str], file_col_indices: List[int]) -> tuple:
+    return tuple(None if raw_vals[i] in ("\\N", "", None) else raw_vals[i] for i in file_col_indices)
+
+
+def _promote_from_tsv(
+    conn,
+    cursor,
+    valid_path: Path,
+    valid_db_target_cols: List[str],
+    db_columns: Dict[str, str],
+    db_columns_lower: Dict[str, str],
+    target_schema: str,
+    target_table: str,
+    load_type: str,
+    batch_id: str,
+    metadata: Dict[str, Any],
+    total_inserted: int,
+    promote_total: int,
+    catalog_slug: Optional[str] = None,
+    unique_indexes: Optional[List[List[str]]] = None,
+) -> Tuple[int, int, int]:
+    """Returns (rows_processed, inserted, updated)."""
+    promoted_inserted = int(metadata.get("promoted_inserted") or 0)
+    promoted_updated = int(metadata.get("promoted_updated") or 0)
+    chunks_processed = total_inserted // PROMOTION_BATCH_SIZE if total_inserted else 0
+
+    is_history = _is_history_promotion(metadata, target_schema, target_table, load_type)
+    effective_load_type = "history" if is_history else load_type
+
+    with open(valid_path, "r", encoding="utf-8") as f:
+        header_line = f.readline().strip()
+        file_columns = header_line.split("\t")
+        data_cols = _parquet_promotion_columns(file_columns, valid_db_target_cols)
+        if not data_cols:
+            raise ValueError("No promotable columns found in TSV valid file.")
+
+        insert_query, template_values, file_col_indices, _insert_cols, conflict_clause = (
+            _prepare_insert_query(
+                valid_db_target_cols,
+                db_columns,
+                data_cols,
+                target_schema,
+                target_table,
+                effective_load_type,
+                catalog_slug=catalog_slug,
+                metadata=metadata,
+                db_columns_lower=db_columns_lower,
+                unique_indexes=unique_indexes,
+            )
+        )
+
+        if total_inserted > 0:
+            logger.info(f"Skipping first {total_inserted} previously promoted rows...")
+            for _ in itertools.islice(f, total_inserted):
+                pass
+
+        chunk_data: List[tuple] = []
+        for line in f:
+            raw_vals = line.rstrip("\n").split("\t")
+            chunk_data.append(_row_tuple_from_values(raw_vals, file_col_indices))
+
+            if len(chunk_data) >= PROMOTION_BATCH_SIZE:
+                _aff, ins, upd = _execute_promotion_batch(
+                    cursor, insert_query, template_values, chunk_data, conflict_clause
+                )
+                total_inserted += len(chunk_data)
+                promoted_inserted += ins
+                promoted_updated += upd
+                conn.commit()
+                metadata = _merge_promotion_metadata(
+                    metadata,
+                    promoted_rows=total_inserted,
+                    promoted_inserted=promoted_inserted,
+                    promoted_updated=promoted_updated,
+                )
+                cursor.execute(
+                    f"""
+                    UPDATE staging_meta.batch_control
+                    SET metadata = {metadata_merge_expr("%s::jsonb")},
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE batch_id = %s
+                    """,
+                    (json.dumps(metadata), batch_id),
+                )
+                conn.commit()
+                chunks_processed += 1
+                report_promotion_progress(
+                    conn,
+                    batch_id,
+                    promote_total=promote_total,
+                    rows_processed=total_inserted,
+                    chunks_processed=chunks_processed,
+                )
+                chunk_data = []
+
+        if chunk_data:
+            _aff, ins, upd = _execute_promotion_batch(
+                cursor, insert_query, template_values, chunk_data, conflict_clause
+            )
+            total_inserted += len(chunk_data)
+            promoted_inserted += ins
+            promoted_updated += upd
+            conn.commit()
+            metadata = _merge_promotion_metadata(
+                metadata,
+                promoted_rows=total_inserted,
+                promoted_inserted=promoted_inserted,
+                promoted_updated=promoted_updated,
+            )
+            cursor.execute(
+                f"""
+                UPDATE staging_meta.batch_control
+                SET metadata = {metadata_merge_expr("%s::jsonb")},
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE batch_id = %s
+                """,
+                (json.dumps(metadata), batch_id),
+            )
+            conn.commit()
+            chunks_processed += 1
+            report_promotion_progress(
+                conn,
+                batch_id,
+                promote_total=promote_total,
+                rows_processed=total_inserted,
+                chunks_processed=chunks_processed,
+            )
+
+    return total_inserted, promoted_inserted, promoted_updated
+
+
+def _promote_from_parquet(
+    conn,
+    cursor,
+    valid_path: Path,
+    valid_db_target_cols: List[str],
+    db_columns: Dict[str, str],
+    db_columns_lower: Dict[str, str],
+    target_schema: str,
+    target_table: str,
+    load_type: str,
+    batch_id: str,
+    metadata: Dict[str, Any],
+    total_inserted: int,
+    promote_total: int,
+    catalog_slug: Optional[str] = None,
+    unique_indexes: Optional[List[List[str]]] = None,
+) -> Tuple[int, int, int]:
+    """Returns (rows_processed, inserted, updated)."""
+    promoted_inserted = int(metadata.get("promoted_inserted") or 0)
+    promoted_updated = int(metadata.get("promoted_updated") or 0)
+    chunks_processed = total_inserted // PROMOTION_BATCH_SIZE if total_inserted else 0
+
+    import pyarrow.parquet as pq
+
+    from data_staging.catalog.catalog_transforms import coalesce_empty_to_none
+
+    pf = pq.ParquetFile(valid_path)
+    total_frame_rows = pf.metadata.num_rows
+    if promote_total <= 0:
+        promote_total = total_frame_rows
+    if total_inserted >= total_frame_rows:
+        return total_inserted, promoted_inserted, promoted_updated
+
+    skip = total_inserted
+    is_history = _is_history_promotion(metadata, target_schema, target_table, load_type)
+    effective_load_type = "history" if is_history else load_type
+    insert_query = None
+    template_values = None
+    conflict_clause = None
+    data_cols: List[str] = []
+
+    for batch in pf.iter_batches(batch_size=PROMOTION_BATCH_SIZE):
+        frame = batch.to_pandas()
+        if skip >= len(frame):
+            skip -= len(frame)
+            continue
+        if skip > 0:
+            frame = frame.iloc[skip:].reset_index(drop=True)
+            skip = 0
+        if frame.empty:
+            continue
+
+        if load_type == "catalog" and catalog_slug:
+            from data_staging.catalog.catalog_transforms import normalize_catalog_enum_columns
+
+            frame = normalize_catalog_enum_columns(frame, catalog_slug)
+
+        data_cols = _parquet_promotion_columns(list(frame.columns), valid_db_target_cols)
+        if not data_cols:
+            raise ValueError("No promotable columns found in Parquet file.")
+
+        if insert_query is None:
+            logger.info("Promotion columns from file: %s", ", ".join(data_cols))
+            insert_query, template_values, _file_col_indices, _insert_cols, conflict_clause = (
+                _prepare_insert_query(
+                    valid_db_target_cols,
+                    db_columns,
+                    data_cols,
+                    target_schema,
+                    target_table,
+                    effective_load_type,
+                    catalog_slug=catalog_slug,
+                    metadata=metadata,
+                    db_columns_lower=db_columns_lower,
+                    unique_indexes=unique_indexes,
+                )
+            )
+
+        chunk_data: List[tuple] = []
+        for _, row in frame.iterrows():
+            chunk_data.append(
+                tuple(coalesce_empty_to_none(row[col]) for col in data_cols)
+            )
+
+        _aff, ins, upd = _execute_promotion_batch(
+            cursor, insert_query, template_values, chunk_data, conflict_clause
+        )
+        total_inserted += len(chunk_data)
+        promoted_inserted += ins
+        promoted_updated += upd
+        conn.commit()
+        metadata = _merge_promotion_metadata(
+            metadata,
+            promoted_rows=total_inserted,
+            promoted_inserted=promoted_inserted,
+            promoted_updated=promoted_updated,
+        )
+        cursor.execute(
+            f"""
+            UPDATE staging_meta.batch_control
+            SET metadata = {metadata_merge_expr("%s::jsonb")}
+            WHERE batch_id = %s
+            """,
+            (json.dumps(metadata), batch_id),
+        )
+        conn.commit()
+        chunks_processed += 1
+        report_promotion_progress(
+            conn,
+            batch_id,
+            promote_total=promote_total,
+            rows_processed=total_inserted,
+            chunks_processed=chunks_processed,
+        )
+
+    return total_inserted, promoted_inserted, promoted_updated
+
 
 def promote_batch_job(payload: Dict[str, Any]):
-    """
-    Handler para jobs de tipo 'PROMOTE_BATCH'.
-    Promueve datos de Staging a Producción EN LOTES para manejar grandes volúmenes.
-    
-    payload = {
-        "batch_id": "uuid",
-        "target_schema": "public",
-        "target_table": "hist"
-    }
-    """
     batch_id = payload.get("batch_id")
     target_schema = payload.get("target_schema")
     target_table = payload.get("target_table")
-    
+
     if not batch_id or not target_schema or not target_table:
         raise ValueError("Missing required fields: batch_id, target_schema, target_table")
 
     database_url = str(settings.DATABASE_URL)
-    conn = psycopg2.connect(database_url, 
-                            keepalives=1, 
-                            keepalives_idle=30, 
-                            keepalives_interval=10, 
-                            keepalives_count=5)
+    conn = psycopg2.connect(
+        database_url,
+        keepalives=1,
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=5,
+    )
     conn.autocommit = False
-    
+    valid_path: Optional[Path] = None
+
     try:
         cursor = conn.cursor()
-        
-        # Disable statement timeout for this massive transaction
         cursor.execute("SET statement_timeout = 0;")
-        
-        # 1. Obtener metadata del batch para configuración de dedup
-        cursor.execute("""
-            SELECT metadata, source_name 
-            FROM staging_meta.batch_control 
-            WHERE batch_id = %s
-        """, (batch_id,))
+
+        cursor.execute(
+            "SELECT metadata, source_name, records_count FROM staging_meta.batch_control WHERE batch_id = %s",
+            (batch_id,),
+        )
         batch_row = cursor.fetchone()
-        
         if not batch_row:
             raise ValueError(f"Batch {batch_id} not found")
-            
+
         metadata = batch_row[0] or {}
         if isinstance(metadata, str):
             metadata = json.loads(metadata)
         source_name = batch_row[1]
-        
-        safe_source_name = source_name.lower().replace(' ', '_').replace('-', '_')
+        records_count = int(batch_row[2] or 0)
+        final_stats = metadata.get("processing_stats", {}) or {}
+        promote_total = int(final_stats.get("total_inserted") or records_count or 0)
+
+        safe_source_name = source_name.lower().replace(" ", "_").replace("-", "_")
         staging_table = f"stage_{safe_source_name}"
-        
-        dedup_columns = metadata.get("dedup_columns", [])
-        valid_temp_file_path = metadata.get("valid_temp_file")
-        
+        load_type = metadata.get("load_type", "history")
+        catalog_slug = None
+        if load_type == "catalog":
+            catalog_slug = metadata.get("catalog_name") or metadata.get("target_table") or target_table
+            production_table = metadata.get("production_table")
+            if production_table:
+                target_table = production_table
+            elif catalog_slug:
+                from data_staging.catalog.catalog_registry import resolve_catalog_db_target
+
+                target_schema, target_table = resolve_catalog_db_target(catalog_slug, target_schema)
+        elif load_type == "history" or metadata.get("history_config"):
+            from data_staging.history.history_config import (
+                HISTORY_TARGET_SCHEMA,
+                HISTORY_TARGET_TABLE,
+            )
+
+            load_type = "history"
+            target_schema = HISTORY_TARGET_SCHEMA
+            target_table = HISTORY_TARGET_TABLE
+        else:
+            from data_staging.history.history_config import (
+                HISTORY_TARGET_SCHEMA,
+                HISTORY_TARGET_TABLE,
+                is_sales_history_target,
+            )
+
+            if is_sales_history_target(target_schema, target_table):
+                load_type = "history"
+                target_schema = HISTORY_TARGET_SCHEMA
+                target_table = HISTORY_TARGET_TABLE
+
+        valid_path = find_valid_records_file(batch_id, metadata.get("valid_temp_file"))
+
         logger.info(f"Starting promotion for batch {batch_id} to {target_schema}.{target_table}")
-        
-        if not valid_temp_file_path:
-             logger.warning(f"No valid_temp_file found in metadata for batch {batch_id}. Will fallback to checking staging_data.")
+
+        if not valid_path:
+            logger.warning(
+                f"No valid records file for batch {batch_id} (metadata path: {metadata.get('valid_temp_file')})"
+            )
+        elif not valid_path.is_file():
+            logger.warning(f"Valid records file missing on disk: {valid_path}")
+
+        valid_db_target_cols, db_columns, db_columns_lower, unique_indexes = (
+            _build_insert_context(cursor, metadata, target_schema, target_table)
+        )
+
+        total_inserted = int(metadata.get("promoted_rows") or 0)
+        promoted_inserted = int(metadata.get("promoted_inserted") or 0)
+        promoted_updated = int(metadata.get("promoted_updated") or 0)
+
+        if valid_path and valid_path.is_file() and is_parquet_valid_file(valid_path):
+            import pyarrow.parquet as pq
+
+            promote_total = max(promote_total, pq.ParquetFile(valid_path).metadata.num_rows)
+
+        report_promotion_progress(
+            conn,
+            batch_id,
+            promote_total=max(promote_total, total_inserted, 1),
+            rows_processed=total_inserted,
+            chunks_processed=total_inserted // PROMOTION_BATCH_SIZE if total_inserted else 0,
+            force=True,
+        )
+
+        if valid_path and valid_path.is_file():
+            logger.info(f"Promoting from {valid_path} (format: {valid_path.suffix})")
+            logger.info(f"Resuming from row: {total_inserted}")
+
+            try:
+                upsert_catalog = catalog_slug if load_type == "catalog" else None
+                if is_parquet_valid_file(valid_path):
+                    total_inserted, promoted_inserted, promoted_updated = _promote_from_parquet(
+                        conn,
+                        cursor,
+                        valid_path,
+                        valid_db_target_cols,
+                        db_columns,
+                        db_columns_lower,
+                        target_schema,
+                        target_table,
+                        load_type,
+                        batch_id,
+                        metadata,
+                        total_inserted,
+                        promote_total,
+                        catalog_slug=upsert_catalog,
+                        unique_indexes=unique_indexes,
+                    )
+                else:
+                    total_inserted, promoted_inserted, promoted_updated = _promote_from_tsv(
+                        conn,
+                        cursor,
+                        valid_path,
+                        valid_db_target_cols,
+                        db_columns,
+                        db_columns_lower,
+                        target_schema,
+                        target_table,
+                        load_type,
+                        batch_id,
+                        metadata,
+                        total_inserted,
+                        promote_total,
+                        catalog_slug=upsert_catalog,
+                        unique_indexes=unique_indexes,
+                    )
+                logger.info(
+                    "Promoted batch %s: %s rows (%s inserted, %s updated)",
+                    batch_id,
+                    total_inserted,
+                    promoted_inserted,
+                    promoted_updated,
+                )
+            except (psycopg2.OperationalError, psycopg2.DatabaseError, psycopg2.InterfaceError) as db_err:
+                conn.rollback()
+                error_msg = f"Truncado en registro {total_inserted}. Error: {str(db_err)}"
+                logger.error(f"Batch crashed mid-flight. {error_msg}")
+                try:
+                    rescue_conn = psycopg2.connect(database_url)
+                    rescue_cursor = rescue_conn.cursor()
+                    rescue_cursor.execute(
+                        """
+                        UPDATE staging_meta.batch_control
+                        SET status = 'PARTIALLY_PROMOTED',
+                            error_message = %s,
+                            completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP),
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE batch_id = %s
+                        """,
+                        (error_msg, batch_id),
+                    )
+                    rescue_conn.commit()
+                    rescue_conn.close()
+                except Exception as rescue_err:
+                    logger.error(f"Failed to save PARTIALLY_PROMOTED state for {batch_id}: {rescue_err}")
+                raise Exception(error_msg) from db_err
         else:
-             import os
-             if not os.path.exists(valid_temp_file_path):
-                  logger.warning(f"Temp file {valid_temp_file_path} not found on disk. It may be empty or already deleted.")
-        
-        # ---------------------------------------------------------
-        # FASE 2: PRE-VALIDACIÓN (Check de Duplicados CONDICIONAL)
-        # ---------------------------------------------------------
-        # DISABLED: Validation is skipped to avoid timeouts on large datasets (10M+).
-        # Duplicates will be handled by DB constraints at insert time if they exist.
-        if dedup_columns:
-            logger.info(f"Dedup columns configured: {dedup_columns}. SKIPPING duplicate check (Performance Optimization).")
-        else:
-            logger.info("No dedup columns configured. Skipping duplicate check (Append Mode).")
+            raise ValueError(
+                f"Archivo de registros válidos no encontrado para el batch {batch_id}. "
+                f"Ruta esperada: {metadata.get('valid_temp_file')}. "
+                "Vuelve a procesar el batch antes de promover."
+            )
 
-        # ---------------------------------------------------------
-        # FASE 3: INSERCIÓN EN LOTES / COPY
-        # ---------------------------------------------------------
-        
-        # Obtener columnas del mapping
-        wizard_mappings = metadata.get("column_mappings", {})
-        column_mapping = {}
-        
-        target_columns = []
-        for file_col, config in wizard_mappings.items():
-            if config.get("target") and config.get("target") != "__new__":
-                target_col = config.get("target")
-                target_columns.append(target_col)
-                
-        if not target_columns:
-             old_mapping = metadata.get("column_mapping", {})
-             if old_mapping:
-                 target_columns = list(old_mapping.keys())
-                 
-        target_columns = list(set(target_columns))
-
-        # Construir listas de columnas confirmando su existencia en BD
-        cursor.execute("""
-            SELECT column_name, data_type 
-            FROM information_schema.columns 
-            WHERE LOWER(table_schema) = LOWER(%s) AND LOWER(table_name) = LOWER(%s)
-        """, (target_schema, target_table))
-        
-        db_columns = {row[0]: row[1] for row in cursor.fetchall()}
-        db_columns_lower = {k.lower(): k for k in db_columns.keys()}
-        
-        valid_db_target_cols = []
-        for requested_col in target_columns:
-            real_col_name = None
-            if requested_col in db_columns:
-                real_col_name = requested_col
-            elif requested_col.lower() in db_columns_lower:
-                real_col_name = db_columns_lower[requested_col.lower()]
-                
-            if real_col_name:
-                valid_db_target_cols.append(real_col_name)
-
-        if not valid_db_target_cols:
-             found_cols = list(db_columns.keys())
-             raise ValueError(f"No columns matched between mapping and target table {target_schema}.{target_table}. Available columns in DB: {found_cols}. Requested columns: {target_columns}")
-
-        total_inserted = metadata.get("promoted_rows", 0)
-        batch_num = 0
-        
-        if valid_temp_file_path and os.path.exists(valid_temp_file_path):
-             # ---------------------------------------------------------
-             # METODO DIRECTO A PRODUCCIÓN: Streaming + execute_values
-             # ---------------------------------------------------------
-             logger.info(f"Using Direct Streaming Injection from {valid_temp_file_path}")
-             logger.info(f"Resuming from row: {total_inserted}")
-             
-             
-             with open(valid_temp_file_path, 'r', encoding='utf-8') as f:
-                 header_line = f.readline().strip()
-                 file_columns = header_line.split('\t')
-                 
-                 # Prepare the columns for the INSERT statement
-                 insert_cols = []
-                 file_col_indices = []
-                 
-                 for idx, col in enumerate(file_columns):
-                     if col in valid_db_target_cols:
-                         insert_cols.append(f'"{col}"')
-                         file_col_indices.append(idx)
-                 
-                 if 'imported_at' in db_columns:
-                     insert_cols.append('"imported_at"')
-                     # We will append NOW() logic in the query string or python
-                 
-                 if not insert_cols:
-                     raise ValueError("No matching columns could be found between the temp file and target table.")
-                     
-                 insert_cols_str = ", ".join(insert_cols)
-                 
-                 # Optimization: Prepare base query for execute_values
-                 # Use %s for values. For imported_at add NOW() literally in the VALUES template
-                 template_values = "(" + ", ".join(["%s"] * len(file_col_indices))
-                 if 'imported_at' in db_columns:
-                     template_values += ", NOW()"
-                 template_values += ")"
-                 
-                 insert_query = f"""
-                     INSERT INTO {target_schema}.{target_table} ({insert_cols_str})
-                     VALUES %s
-                 """
-                 
-                 chunk_size = PROMOTION_BATCH_SIZE
-                 
-                 # Skip rows we already inserted in a previous failed run
-                 if total_inserted > 0:
-                     logger.info(f"Skipping first {total_inserted} previously promoted rows...")
-                     # Use islice to safely and quickly consume lines we don't need
-                     next(itertools.islice(f, total_inserted, total_inserted), None)
-                 
-                 chunk_data = []
-                 
-                 try:
-                     for line in f:
-                         # Parse the TSV line
-                         raw_vals = line.rstrip('\n').split('\t')
-                         
-                         # Extract only the targeted columns, convert '\\N' string to None for NULL handling in psycopg2
-                         row_data = tuple([None if raw_vals[i] == '\\N' else raw_vals[i] for i in file_col_indices])
-                         chunk_data.append(row_data)
-                         
-                         if len(chunk_data) >= chunk_size:
-                             # Process chunk directly to production
-                             psycopg2.extras.execute_values(
-                                 cursor, insert_query, chunk_data, template=template_values, page_size=10000
-                             )
-                             total_inserted += len(chunk_data)
-                             batch_num += 1
-                             
-                             # Micro Cómmit
-                             conn.commit()
-                             
-                             # Update Tracker in BD (metadata: promoted_rows)
-                             new_metadata = metadata.copy()
-                             new_metadata["promoted_rows"] = total_inserted
-                             cursor.execute("""
-                                 UPDATE staging_meta.batch_control 
-                                 SET metadata = %s::jsonb 
-                                 WHERE batch_id = %s
-                             """, (json.dumps(new_metadata), batch_id))
-                             conn.commit()
-                             
-                             logger.info(f"Promoted chunk logic: Batch {batch_id}. Total inserted so far: {total_inserted}")
-                             chunk_data = []
-                     
-                     # Process any remaining lines in the final chunk
-                     if chunk_data:
-                         psycopg2.extras.execute_values(
-                             cursor, insert_query, chunk_data, template=template_values, page_size=10000
-                         )
-                         total_inserted += len(chunk_data)
-                         conn.commit()
-                         
-                         new_metadata = metadata.copy()
-                         new_metadata["promoted_rows"] = total_inserted
-                         cursor.execute("""
-                             UPDATE staging_meta.batch_control 
-                             SET metadata = %s::jsonb 
-                             WHERE batch_id = %s
-                         """, (json.dumps(new_metadata), batch_id))
-                         conn.commit()
-                         
-                         logger.info(f"Promoted final chunk: Batch {batch_id}. Total inserted: {total_inserted}")
-                         
-                 except (psycopg2.OperationalError, psycopg2.DatabaseError, psycopg2.InterfaceError) as db_err:
-                     # CRASH CATCHING: WAL limits, connection limits, timeouts
-                     conn.rollback()
-                     error_msg = f"Truncado en registro {total_inserted}. Error: {str(db_err)}"
-                     logger.error(f"Batch crashed mid-flight. {error_msg}")
-                     
-                     # Intentar guardar el estatus PARCIAL
-                     try:
-                         rescue_conn = psycopg2.connect(database_url)
-                         rescue_cursor = rescue_conn.cursor()
-                         rescue_cursor.execute("""
-                             UPDATE staging_meta.batch_control
-                             SET status = 'PARTIALLY_PROMOTED', error_message = %s
-                             WHERE batch_id = %s
-                         """, (error_msg, batch_id))
-                         rescue_conn.commit()
-                         rescue_conn.close()
-                     except Exception as rescue_err:
-                         logger.error(f"Failed to save PARTIALLY_PROMOTED state for {batch_id}: {rescue_err}")
-                     
-                     raise Exception(error_msg) # Propagar para detener worker
-                     
-             # Cleanup specific batch valid file
-             try:
-                 os.remove(valid_temp_file_path)
-                 logger.info(f"Deleted temp file: {valid_temp_file_path}")
-             except OSError as e:
-                 logger.warning(f"Failed to delete temp file {valid_temp_file_path}: {e}")
-                 
-             # Cleanup stage_table NO MATTER WHAT 
-             cursor.execute(f"DELETE FROM staging_data.{staging_table} WHERE batch_id = %s AND validation_status = 'PASSED'", (batch_id,))
-             conn.commit()
-             
-        else:
-             # Si no hay archivo CSV temporal, no podemos insertar.
-             raise ValueError(f"CRITICAL: Archivo CSV Válido {valid_temp_file_path} no fue encontrado para el batch {batch_id}. Promoción abortada.")
-
-        # FINALIZAR SI NO HUBO REGISTROS
         if total_inserted == 0:
-            cursor.execute("""
+            cursor.execute(
+                f"""
                 UPDATE staging_meta.batch_control
                 SET status = 'PROMOTED',
-                    metadata = metadata || %s::jsonb,
-                    error_message = 'No records to promote: all records were rejected or duplicated'
+                    metadata = {metadata_merge_expr("%s::jsonb")},
+                    error_message = 'No records to promote: all records were rejected or duplicated',
+                    completed_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE batch_id = %s
-            """, (json.dumps({"promoted_at": "NOW()", "promoted_count": 0}), batch_id))
+                """,
+                (json.dumps({"promoted_at": "NOW()", "promoted_count": 0}), batch_id),
+            )
             conn.commit()
             return
-            
-        logger.info(f"Successfully promoted {total_inserted} records.")
-        
-        # ---------------------------------------------------------
-        # FASE 4: FINALIZACIÓN
-        # ---------------------------------------------------------
-        
-        # Actualizar estado Batch
-        cursor.execute("""
+
+        promotion_payload = _merge_promotion_metadata(
+            {},
+            promoted_rows=total_inserted,
+            promoted_inserted=promoted_inserted,
+            promoted_updated=promoted_updated,
+        )
+        promotion_payload["promoted_at"] = "NOW()"
+
+        cursor.execute(
+            f"""
             UPDATE staging_meta.batch_control
             SET status = 'PROMOTED',
-                metadata = metadata || %s::jsonb,
-                error_message = NULL
+                metadata = {metadata_merge_expr("%s::jsonb")},
+                error_message = NULL,
+                completed_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
             WHERE batch_id = %s
-        """, (json.dumps({"promoted_at": "NOW()", "promoted_count": total_inserted}), batch_id))
-        
+            """,
+            (json.dumps(promotion_payload), batch_id),
+        )
         conn.commit()
         logger.info("Promotion complete.")
-        
-        # Limpiar registros FAILED restantes en staging (no promovidos)
+
         try:
-            clean_cursor = conn.cursor()
-            clean_cursor.execute(f"""
-                SELECT COUNT(*) FROM staging_data.{staging_table} WHERE batch_id = %s
-            """, (batch_id,))
-            remaining = clean_cursor.fetchone()[0]
-            if remaining > 0:
-                logger.info(f"Cleaning {remaining} rejected/remaining records from staging...")
-                clean_cursor.execute(f"DELETE FROM staging_data.{staging_table} WHERE batch_id = %s", (batch_id,))
-                conn.commit()
-                logger.info("Staging cleanup complete.")
-        except Exception as e:
-            logger.warning(f"Failed to clean remaining staging data (non-fatal): {e}")
+            os.remove(valid_path)
+            logger.info(f"Deleted temp valid file: {valid_path}")
+        except OSError as e:
+            logger.warning(f"Failed to delete temp file {valid_path}: {e}")
 
     except Exception as e:
         conn.rollback()
         logger.error(f"Promotion failed for batch {batch_id}: {e}")
-        # Solo sobre-escribimos a FAILED si no se había setteado a PARTIALLY_PROMOTED previamente.
         try:
-             err_conn = psycopg2.connect(database_url)
-             err_cursor = err_conn.cursor()
-             # Checar si ya es PARTIALLY_PROMOTED
-             err_cursor.execute("SELECT status FROM staging_meta.batch_control WHERE batch_id = %s", (batch_id,))
-             current_st = err_cursor.fetchone()
-             if current_st and current_st[0] != 'PARTIALLY_PROMOTED':
-                 err_cursor.execute("""
+            err_conn = psycopg2.connect(database_url)
+            err_cursor = err_conn.cursor()
+            err_cursor.execute("SELECT status FROM staging_meta.batch_control WHERE batch_id = %s", (batch_id,))
+            current_st = err_cursor.fetchone()
+            if current_st and current_st[0] != "PARTIALLY_PROMOTED":
+                err_cursor.execute(
+                    """
                     UPDATE staging_meta.batch_control
-                    SET error_message = %s, status = 'FAILED'
+                    SET error_message = %s,
+                        status = 'FAILED',
+                        completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP),
+                        updated_at = CURRENT_TIMESTAMP
                     WHERE batch_id = %s
-                 """, (f"Promotion Error: {str(e)}", batch_id))
-                 err_conn.commit()
-             err_conn.close()
-        except:
+                    """,
+                    (f"Promotion Error: {str(e)}", batch_id),
+                )
+                err_conn.commit()
+            err_conn.close()
+        except Exception:
             pass
-        raise e
+        raise
     finally:
-        if conn:
-            conn.close()
-
+        conn.close()

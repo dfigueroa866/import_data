@@ -1,76 +1,30 @@
-import React, { useState, useEffect } from 'react';
-import { getSchemas, getTables, getTableColumns } from '../../services/systemService';
+import React, { useState } from 'react';
 import { uploadFileTemp } from '../../services/wizardService';
+import useSessionLoadGuard from '../../hooks/useSessionLoadGuard';
 import Button from '../Button';
 import LoadingSpinner from '../LoadingSpinner';
+import {
+    HISTORY_TARGET_SCHEMA,
+    HISTORY_TARGET_TABLE,
+    HISTORY_TABLE_META,
+} from '../../constants/historyConfig';
 import './Step1Upload.css';
 
 const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
     const [file, setFile] = useState(wizardData.file || null);
-    const [schemas, setSchemas] = useState([]);
-    const [tables, setTables] = useState([]);
-    const [selectedSchema, setSelectedSchema] = useState(wizardData.selectedSchema || '');
-    const [selectedTable, setSelectedTable] = useState(wizardData.selectedTable || '');
     const [processType, setProcessType] = useState(wizardData.processType || '');
-    const [loading, setLoading] = useState(false);
     const [uploading, setUploading] = useState(false);
     const [error, setError] = useState('');
+
+    useSessionLoadGuard(uploading);
     const [dragActive, setDragActive] = useState(false);
-
-    // Load schemas on mount
-    useEffect(() => {
-        loadSchemas();
-    }, []);
-
-    // Initial load of tables if schema was already selected (on back)
-    useEffect(() => {
-        if (wizardData.selectedSchema && !tables.length) {
-            loadTables(wizardData.selectedSchema);
-        }
-    }, [wizardData.selectedSchema]);
-
-    // Load tables when schema changes
-    useEffect(() => {
-        if (selectedSchema) {
-            loadTables(selectedSchema);
-        } else {
-            setTables([]);
-            setSelectedTable('');
-        }
-    }, [selectedSchema]);
-
-    const loadSchemas = async () => {
-        try {
-            setLoading(true);
-            const data = await getSchemas();
-            setSchemas(data.schemas || []);
-        } catch (err) {
-            setError('Failed to load schemas');
-            console.error(err);
-        } finally {
-            setLoading(false);
-        }
-    };
-
-    const loadTables = async (schema) => {
-        try {
-            setLoading(true);
-            const data = await getTables(schema);
-            setTables(data.tables || []);
-        } catch (err) {
-            setError('Failed to load tables');
-            console.error(err);
-        } finally {
-            setLoading(false);
-        }
-    };
 
     const handleDrag = (e) => {
         e.preventDefault();
         e.stopPropagation();
-        if (e.type === "dragenter" || e.type === "dragover") {
+        if (e.type === 'dragenter' || e.type === 'dragover') {
             setDragActive(true);
-        } else if (e.type === "dragleave") {
+        } else if (e.type === 'dragleave') {
             setDragActive(false);
         }
     };
@@ -94,21 +48,12 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
     };
 
     const handleSubmit = async () => {
-        // Validation
         if (!file) {
-            setError('Please select a file');
+            setError('Selecciona un archivo');
             return;
         }
         if (!processType) {
-            setError('Please select a Process Type (Weekly/Monthly/Other)');
-            return;
-        }
-        if (!selectedSchema) {
-            setError('Please select a schema');
-            return;
-        }
-        if (!selectedTable) {
-            setError('Please select a production table');
+            setError('Selecciona el tipo de proceso (Weekly o Monthly)');
             return;
         }
 
@@ -116,28 +61,41 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
             setUploading(true);
             setError('');
 
-            // Upload file and get headers
-            const response = await uploadFileTemp(file, selectedSchema, selectedTable, processType);
+            const response = await uploadFileTemp(
+                file,
+                HISTORY_TARGET_SCHEMA,
+                HISTORY_TARGET_TABLE,
+                processType,
+                'history'
+            );
 
-            // Update wizard data
             updateWizardData({
                 file: file,
                 fileName: response.file_name,
                 fileHeaders: response.file_headers || [],
-                selectedSchema: selectedSchema,
-                selectedTable: selectedTable,
+                selectedSchema: HISTORY_TARGET_SCHEMA,
+                selectedTable: HISTORY_TARGET_TABLE,
+                historyTableMeta: HISTORY_TABLE_META,
                 sourceName: response.source_name,
                 batchId: response.batch_id,
                 processType: processType,
+                loadMode: 'history',
                 estimatedRows: response.estimated_rows,
-                fileType: response.file_type
+                fileType: response.file_type,
             });
 
-            // Move to next step
             nextStep();
-
         } catch (err) {
-            setError(err.response?.data?.detail || 'Failed to upload file');
+            const detail = err.response?.data?.detail;
+            if (typeof detail === 'string') {
+                setError(
+                    detail === 'Not Found'
+                        ? 'Servicio de carga no disponible. Reinicia el backend (python run_app.py).'
+                        : detail
+                );
+            } else {
+                setError('No se pudo subir el archivo. Verifica que el API esté en ejecución.');
+            }
             console.error(err);
         } finally {
             setUploading(false);
@@ -146,15 +104,18 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
 
     return (
         <div className="step1-upload">
-            <h2>Step 1: Upload File & Select Production Table</h2>
+            <h2>Paso 1: Archivo y tipo de agregación</h2>
             <p className="step-description">
-                Upload your data file and select the production table you want to map to.
+                Los datos se cargarán siempre en{' '}
+                <strong>
+                    {HISTORY_TARGET_SCHEMA}.{HISTORY_TARGET_TABLE}
+                </strong>
+                . Elige cómo consolidar fechas antes de mapear columnas.
             </p>
 
             <div className="step1-content">
-                {/* File Upload Section */}
                 <div className="upload-section">
-                    <h3>Upload File</h3>
+                    <h3>Archivo</h3>
                     <div
                         className={`drop-zone ${dragActive ? 'active' : ''} ${file ? 'has-file' : ''}`}
                         onDragEnter={handleDrag}
@@ -167,14 +128,16 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
                                 <div className="file-icon">📄</div>
                                 <div className="file-details">
                                     <div className="file-name">{file.name}</div>
-                                    <div className="file-size">{(file.size / 1024 / 1024).toFixed(2)} MB</div>
+                                    <div className="file-size">
+                                        {(file.size / 1024 / 1024).toFixed(2)} MB
+                                    </div>
                                 </div>
                                 <button
+                                    type="button"
                                     className="remove-file"
                                     onClick={(e) => {
                                         e.stopPropagation();
                                         setFile(null);
-                                        // Also clear central state
                                         updateWizardData({
                                             file: null,
                                             fileName: '',
@@ -183,7 +146,7 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
                                             processType: '',
                                             sourceName: '',
                                             estimatedRows: 0,
-                                            fileType: null
+                                            fileType: null,
                                         });
                                     }}
                                 >
@@ -193,9 +156,9 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
                         ) : (
                             <>
                                 <div className="drop-icon">📁</div>
-                                <p className="drop-text">Drag & drop your file here or</p>
+                                <p className="drop-text">Arrastra tu archivo aquí o</p>
                                 <label className="browse-button">
-                                    Browse Files
+                                    Examinar
                                     <input
                                         type="file"
                                         accept=".csv,.xlsx,.xls,.json"
@@ -203,92 +166,61 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
                                         style={{ display: 'none' }}
                                     />
                                 </label>
-                                <p className="drop-hint">Supported: CSV, Excel, JSON</p>
+                                <p className="drop-hint">CSV, Excel o JSON</p>
                             </>
                         )}
                     </div>
                 </div>
 
-                {/* Schema & Table Selection */}
                 <div className="selection-section">
-                    <h3>Select Configuration</h3>
+                    <h3>Configuración</h3>
 
                     <div className="form-group">
-                        <label htmlFor="processType">Process Type *</label>
+                        <label htmlFor="processType">Tipo de proceso *</label>
                         <select
                             id="processType"
                             value={processType}
                             onChange={(e) => setProcessType(e.target.value)}
-                            disabled={loading}
                         >
-                            <option value="">-- Select Process Type --</option>
-                            <option value="Weekly">Weekly</option>
-                            <option value="Monthly">Monthly</option>
-                            <option value="Other">Other</option>
+                            <option value="">-- Seleccionar --</option>
+                            <option value="Weekly">Weekly (agrupa por semana)</option>
+                            <option value="Monthly">Monthly (agrupa por mes)</option>
                         </select>
                     </div>
 
-                    <div className="form-group">
-                        <label htmlFor="schema">Schema *</label>
-                        <select
-                            id="schema"
-                            value={selectedSchema}
-                            onChange={(e) => setSelectedSchema(e.target.value)}
-                            disabled={loading}
-                        >
-                            <option value="">-- Select Schema --</option>
-                            {schemas.map(schema => (
-                                <option key={schema} value={schema}>{schema}</option>
-                            ))}
-                        </select>
-                    </div>
-
-                    <div className="form-group">
-                        <label htmlFor="table">Production Table *</label>
-                        <select
-                            id="table"
-                            value={selectedTable}
-                            onChange={(e) => setSelectedTable(e.target.value)}
-                            disabled={!selectedSchema || loading}
-                        >
-                            <option value="">-- Select Table --</option>
-                            {tables.map(table => (
-                                <option key={table.table_name} value={table.table_name}>
-                                    {table.table_name} ({table.column_count} columns)
-                                </option>
-                            ))}
-                        </select>
-                    </div>
-
-                    {selectedTable && (
-                        <div className="info-box">
-                            <div className="info-label">Staging Table:</div>
-                            <div className="info-value">staging_data.stage_{selectedTable}</div>
-                            <p className="info-hint">Data will be loaded here for validation before production</p>
+                    <div className="info-box history-target-box">
+                        <div className="info-label">Tabla destino</div>
+                        <div className="info-value">
+                            {HISTORY_TARGET_SCHEMA}.{HISTORY_TARGET_TABLE}
                         </div>
-                    )}
+                        <p className="info-hint">
+                            Columnas clave: location_code, sku, period_start, quantity.
+                            granularity (week/month) y source (extensión del archivo) se asignan automáticamente.
+                        </p>
+                        <ul className="history-hints-list">
+                            {HISTORY_TABLE_META.validation_hints.map((hint) => (
+                                <li key={hint}>{hint}</li>
+                            ))}
+                        </ul>
+                    </div>
                 </div>
             </div>
 
-            {error && (
-                <div className="error-message">
-                    {error}
-                </div>
-            )}
+            {error && <div className="error-message">{error}</div>}
 
             <div className="step-actions">
                 <Button
                     variant="primary"
                     onClick={handleSubmit}
-                    disabled={!file || !selectedSchema || !selectedTable || !processType || uploading}
+                    disabled={!file || !processType || uploading}
                 >
                     {uploading ? (
                         <>
                             <LoadingSpinner size="small" />
-                            Uploading...
+                            Subiendo...
                         </>
                     ) : (
-                        'Next: Map Columns →'
+                        'Siguiente: mapear columnas →'
                     )}
                 </Button>
             </div>

@@ -1,4 +1,4 @@
-# PRD - Data Staging System
+# PRD - M8 Connect
 **Product Requirements Document**
 
 ---
@@ -7,13 +7,15 @@
 
 | Field | Value |
 |-------|-------|
-| **Product** | Data Staging System |
+| **Product** | M8 Connect |
 | **Version** | 2.0.0 |
 | **Date** | January 2025 |
 | **Author** | Data Engineering Team |
 | **Status** | 🚧 **IN DEVELOPMENT** |
-| **Last Updated** | January 23, 2025 |
-| **Current Phase** | **MVP Enhancement - Core Features Complete** |
+| **Last Updated** | June 2026 |
+| **Current Phase** | **Wizard + Auth + Catálogos — legacy staging BD retirado** |
+
+> **Nota (jun 2026):** UI actual: `/upload` landing, `/upload/history`, `/upload/catalog`, auth JWT, promoción desde archivos Parquet temp. Flujo `staging_data.stage_*` y router `/api/v1/staging/*` eliminados. Ver `docs/FUNCIONAMIENTO_APLICACION.md`.
 
 ---
 
@@ -23,7 +25,7 @@
 Create a robust, scalable, and enterprise-grade **data staging system** that enables organizations to ingest, validate, transform, and monitor data from multiple sources with automated quality controls, comprehensive validation, and real-time monitoring capabilities.
 
 ### Current Status - **MVP COMPLETE ✅**
-The Data Staging System has successfully completed its MVP phase with all core functionality operational. The system is production-ready for basic use cases and provides a solid foundation for advanced features.
+M8 Connect has successfully completed its MVP phase with all core functionality operational. The system is production-ready for basic use cases and provides a solid foundation for advanced features.
 
 ### Value Proposition
 - **🚀 Rapid Data Onboarding** - Upload and process files in minutes
@@ -626,7 +628,7 @@ Acceptance Criteria:
 ## 🎯 Conclusion
 
 ### **Current State**
-The Data Staging System has successfully completed its MVP phase with all core functionality operational. The system provides:
+M8 Connect has successfully completed its MVP phase with all core functionality operational. The system provides:
 
 - ✅ **Complete file processing pipeline** with multi-format support
 - ✅ **Comprehensive data validation** with 15+ rules and quality scoring
@@ -642,7 +644,7 @@ The Data Staging System has successfully completed its MVP phase with all core f
 5. **🔄 Documentation** - Complete user and developer documentation
 
 ### **Long-term Vision**
-Transform the Data Staging System into the industry-leading platform for data ingestion, validation, and processing with AI-powered capabilities, enterprise-grade security, and seamless integration with modern data stacks.
+Transform M8 Connect into the industry-leading platform for data ingestion, validation, and processing with AI-powered capabilities, enterprise-grade security, and seamless integration with modern data stacks.
 
 ---
 

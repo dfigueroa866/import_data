@@ -1,20 +1,47 @@
 import api from './api';
+import { FALLBACK_CATALOG_TABLES } from '../constants/catalogTables';
 
 /**
  * Wizard-specific upload service
  */
 
 /**
- * Upload file for wizard (temp upload with header parsing)
- * Step 1 - Returns batch_id and file headers
+ * Catalog tables for upload wizard (API + fallback if backend not restarted).
  */
-export const uploadFileTemp = async (file, targetSchema = null, targetTable = null, processType = null) => {
+export const getCatalogTables = async () => {
+    try {
+        const response = await api.get('/api/v1/system/catalog-tables');
+        const tables = response.data?.tables;
+        if (Array.isArray(tables) && tables.length > 0) {
+            return { tables, fromFallback: false };
+        }
+    } catch (error) {
+        const status = error.response?.status;
+        if (status && status !== 404 && status !== 502) {
+            console.warn('getCatalogTables:', error);
+        }
+    }
+
+    console.warn(
+        'catalog-tables API no disponible; usando lista local. Reinicia el backend: python run_app.py'
+    );
+    return { tables: FALLBACK_CATALOG_TABLES, fromFallback: true };
+};
+
+export const uploadFileTemp = async (
+    file,
+    targetSchema = null,
+    targetTable = null,
+    processType = null,
+    loadType = 'history'
+) => {
     try {
         const formData = new FormData();
         formData.append('file', file);
         if (targetSchema) formData.append('target_schema', targetSchema);
         if (targetTable) formData.append('target_table', targetTable);
         if (processType) formData.append('process_type', processType);
+        if (loadType) formData.append('load_type', loadType);
 
         const response = await api.post('/api/v1/upload/file-temp', formData, {
             headers: {
@@ -32,8 +59,11 @@ export const uploadFileTemp = async (file, targetSchema = null, targetTable = nu
  * Save column mappings for a batch
  * Step 2 - Saves mappings, toggles, and dedup columns
  */
-export const saveColumnMapping = async (batchId, mappingData, processType = null) => {
+export const saveColumnMapping = async (batchId, mappingData, processType = null, loadType = null) => {
     try {
+        if (loadType) {
+            mappingData.load_type = loadType;
+        }
         if (processType) {
             mappingData.process_type = processType;
         }
@@ -51,7 +81,9 @@ export const saveColumnMapping = async (batchId, mappingData, processType = null
  */
 export const generatePreview = async (batchId) => {
     try {
-        const response = await api.post(`/api/v1/upload/batch/${batchId}/preview`);
+        const response = await api.post(`/api/v1/upload/batch/${batchId}/preview`, null, {
+            timeout: 600000,
+        });
         return response.data;
     } catch (error) {
         console.error('Error generating preview:', error);
@@ -105,24 +137,39 @@ export const promoteBatch = async (batchId) => {
  * Download rejected records CSV
  * Helper for handling rejections
  */
+const triggerBlobDownload = (blob, filename) => {
+    const url = window.URL.createObjectURL(new Blob([blob]));
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', filename);
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
+};
+
 export const downloadRejectedRecords = async (batchId) => {
     try {
         const response = await api.get(`/api/v1/upload/staging/batch/${batchId}/rejected/download`, {
-            responseType: 'blob', // Important for file download
+            responseType: 'blob',
         });
-
-        // Create download link
-        const url = window.URL.createObjectURL(new Blob([response.data]));
-        const link = document.createElement('a');
-        link.href = url;
-        link.setAttribute('download', `rejected_records_${batchId}.csv`);
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-
+        triggerBlobDownload(response.data, `rejected_records_${batchId}.csv`);
         return true;
     } catch (error) {
         console.error('Error downloading rejected records:', error);
+        throw error;
+    }
+};
+
+export const downloadValidRecords = async (batchId) => {
+    try {
+        const response = await api.get(`/api/v1/upload/staging/batch/${batchId}/valid/download`, {
+            responseType: 'blob',
+        });
+        triggerBlobDownload(response.data, `valid_records_${batchId}.csv`);
+        return true;
+    } catch (error) {
+        console.error('Error downloading valid records:', error);
         throw error;
     }
 };

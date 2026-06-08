@@ -45,7 +45,7 @@ def main():
     """Main application entry point for development."""
     setup_logging()
     
-    print("🚀 Starting Data Staging System (Development Mode)")
+    print("🚀 Starting M8 Connect (Development Mode)")
     print("=" * 60)
     print("⚠️  WARNING: Running in development mode without database checks")
     print("=" * 60)

@@ -8,6 +8,7 @@ from typing import Dict, Any, Optional, List, Union
 import logging
 import chardet
 import csv
+from data_staging.utils.encoding_utils import detect_file_encoding
 from datetime import datetime
 import tempfile
 import shutil
@@ -215,21 +216,9 @@ class FileHandler:
     def _detect_encoding(self, file_path: Path) -> str:
         """Detect file encoding"""
         try:
-            with open(file_path, 'rb') as f:
-                # Read first 10KB to detect encoding
-                raw_data = f.read(10240)
-                result = chardet.detect(raw_data)
-                encoding = result['encoding']
-                confidence = result['confidence']
-                
-                # If confidence is low, use utf-8 as fallback
-                if confidence < 0.8:
-                    logger.warning(f"Low encoding confidence ({confidence:.2f}) for {file_path}, using utf-8")
-                    encoding = 'utf-8'
-                
-                logger.debug(f"Detected encoding: {encoding} (confidence: {confidence:.2f})")
-                return encoding
-                
+            encoding = detect_file_encoding(file_path)
+            logger.debug(f"Detected encoding: {encoding} for {file_path}")
+            return encoding
         except Exception as e:
             logger.warning(f"Could not detect encoding for {file_path}: {e}")
             return 'utf-8'

@@ -1,0 +1,64 @@
+{
+  "source_name": "skus",
+  "source_type": "file",
+  "description": "Catálogo de productos (SKUs) en public.skus",
+  "connection_config": {
+    "read_options": {
+      "delimiter": ",",
+      "encoding": "utf-8",
+      "header": 0,
+      "na_values": ["", "NULL", "null", "N/A", "n/a", "NA"],
+      "keep_default_na": true
+    }
+  },
+  "validation_rules": {
+    "not_null": {
+      "columns": ["organization_id", "code", "name"],
+      "severity": "critical"
+    },
+    "unique": {
+      "columns": ["code"],
+      "severity": "critical"
+    },
+    "lookup_validation": {
+      "lookups": {
+        "status": {
+          "type": "values",
+          "values": ["active", "inactive", "discontinued", "new_launch"],
+          "case_sensitive": false
+        }
+      },
+      "severity": "error"
+    }
+  },
+  "transformation_rules": [
+    {
+      "name": "clean_whitespace",
+      "columns": ["code", "name", "category", "family", "brand", "status"]
+    },
+    {
+      "name": "handle_nulls",
+      "strategy": "fill",
+      "fill_values": {
+        "status": "active"
+      }
+    }
+  ],
+  "target_table": "stage_skus",
+  "target_schema": "staging_data",
+  "production_table": "skus",
+  "production_schema": "public",
+  "is_active": true,
+  "load_type": "catalog",
+  "processing_config": {
+    "batch_size": 5000,
+    "max_retries": 3,
+    "timeout_seconds": 300
+  },
+  "metadata": {
+    "catalog_table": "skus",
+    "unique_keys": ["organization_id", "code"],
+    "required_columns": ["organization_id", "code", "name", "status"],
+    "optional_columns": ["category", "family", "brand", "attributes"]
+  }
+}

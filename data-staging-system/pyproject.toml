@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "data-staging-system"
 version = "2.0.0"
-description = "Production-ready data staging system with validation and ETL capabilities"
+description = "M8 Connect — plataforma de ingesta, validación y promoción de datos"
 authors = [
     {name = "Data Team", email = "data@company.com"}
 ]

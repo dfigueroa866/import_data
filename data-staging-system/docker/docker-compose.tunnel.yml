@@ -1,0 +1,41 @@
+# Túnel SSH hacia PostgreSQL en servidor Ubuntu
+#
+# Uso:
+#   1. Copia docker/.env.tunnel.example → docker/.env.tunnel y completa valores
+#   2. docker compose -f docker/docker-compose.tunnel.yml --env-file docker/.env.tunnel up -d
+#   3. En .env del proyecto: DATABASE_URL=postgresql://USER:PASS@127.0.0.1:5433/NOMBRE_BD
+#
+# El puerto LOCAL_TUNNEL_PORT (por defecto 5433) evita conflicto con PostgreSQL local en 5432.
+
+services:
+  postgres-ssh-tunnel:
+    image: alpine:3.20
+    container_name: data-staging-pg-tunnel
+    restart: unless-stopped
+    ports:
+      - "${LOCAL_TUNNEL_PORT:-5433}:5432"
+    environment:
+      SSH_HOST: ${SSH_HOST}
+      SSH_PORT: ${SSH_PORT:-22}
+      SSH_USER: ${SSH_USER}
+      REMOTE_PG_HOST: ${REMOTE_PG_HOST:-127.0.0.1}
+      REMOTE_PG_PORT: ${REMOTE_PG_PORT:-5432}
+    volumes:
+      # Clave privada para autenticación (sin passphrase, o usar ssh-agent)
+      - ${SSH_KEY_PATH}:/root/.ssh/id_rsa:ro
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        apk add --no-cache openssh-client
+        chmod 600 /root/.ssh/id_rsa
+        echo "Túnel: localhost:5432 → $${SSH_USER}@$${SSH_HOST}:$${REMOTE_PG_HOST}:$${REMOTE_PG_PORT}"
+        exec ssh -N \
+          -o StrictHostKeyChecking=accept-new \
+          -o ServerAliveInterval=60 \
+          -o ServerAliveCountMax=3 \
+          -i /root/.ssh/id_rsa \
+          -p "$${SSH_PORT}" \
+          -L "0.0.0.0:5432:$${REMOTE_PG_HOST}:$${REMOTE_PG_PORT}" \
+          "$${SSH_USER}@$${SSH_HOST}"

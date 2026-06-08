@@ -1,5 +1,5 @@
-"""API routers for Data Staging System."""
+"""API routers for M8 Connect."""
 
 # Import routers individually to avoid circular imports
 
-__all__ = ["staging", "monitoring", "system"]
+__all__ = ["monitoring", "system"]

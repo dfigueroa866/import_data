@@ -1,13 +1,28 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { generatePreview } from '../../services/wizardService';
+import { useAuth } from '../../context/AuthContext';
+import useSessionLoadGuard from '../../hooks/useSessionLoadGuard';
 import Button from '../Button';
 import LoadingSpinner from '../LoadingSpinner';
+import {
+    enrichHistoryPreviewRows,
+    getHistoryPreviewColumnKeys,
+} from '../../constants/historyConfig';
 import './Step3Preview.css';
 
 const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
+    const { user } = useAuth();
     const [previewData, setPreviewData] = useState(null);
+
+    const organizationDisplayName =
+        previewData?.organization_name ||
+        user?.organization_name ||
+        wizardData.organizationName ||
+        '';
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
+
+    useSessionLoadGuard(loading);
 
     useEffect(() => {
         loadPreview();
@@ -29,20 +44,88 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
             }
         } catch (err) {
             console.error("Preview Load Error:", err);
-            setError(err.response?.data?.detail || 'Failed to generate preview');
+            const detail = err.response?.data?.detail;
+            if (err.code === 'ECONNABORTED') {
+                setError(
+                    'La vista previa tardó demasiado (archivo muy grande). '
+                    + 'Intenta de nuevo o reduce el tamaño del archivo.'
+                );
+            } else if (detail) {
+                setError(typeof detail === 'string' ? detail : JSON.stringify(detail));
+            } else {
+                setError('No se pudo generar la vista previa. Verifica que el backend esté activo.');
+            }
         } finally {
             setLoading(false);
         }
     };
 
     const val = previewData?.validation_summary || {};
-    const processType = previewData?.process_type || 'Other';
+    const loadMode = previewData?.load_type || wizardData?.loadMode || 'history';
+    const isCatalog = loadMode === 'catalog';
+    const processType = previewData?.process_type || wizardData?.processType || '';
+    const catalogBlocked = false;
+
+    const sourceExtension =
+        previewData?.source_extension ||
+        wizardData?.fileName?.split('.').pop()?.toLowerCase() ||
+        '';
+
+    const displayPreviewRows = useMemo(() => {
+        const raw = previewData?.preview_data || [];
+        if (isCatalog) return raw;
+        return enrichHistoryPreviewRows(raw, {
+            processType,
+            sourceExtension,
+            organizationId: user?.organization_id || wizardData.organizationId,
+        });
+    }, [
+        previewData?.preview_data,
+        isCatalog,
+        processType,
+        sourceExtension,
+        user?.organization_id,
+        wizardData.organizationId,
+    ]);
+
+    const previewColumnKeys = useMemo(() => {
+        if (!displayPreviewRows.length) return [];
+        return isCatalog
+            ? Object.keys(displayPreviewRows[0])
+            : getHistoryPreviewColumnKeys(displayPreviewRows);
+    }, [displayPreviewRows, isCatalog]);
+
+    const formatPreviewColumnLabel = (key) => {
+        if (key === 'organization_id') {
+            return 'Organización';
+        }
+        if (key === 'sales_channel') {
+            return 'Canal (sales_channel)';
+        }
+        return key;
+    };
+
+    const formatPreviewCellValue = (key, cellVal) => {
+        if (key === 'organization_id' && organizationDisplayName) {
+            return organizationDisplayName;
+        }
+        return cellVal !== null && cellVal !== undefined ? String(cellVal) : '';
+    };
+
+    const targetTableName =
+        previewData?.target_table ||
+        wizardData?.selectedTable ||
+        wizardData?.catalogTable ||
+        '-';
 
     if (loading) {
         return (
             <div className="step3-loading">
                 <LoadingSpinner />
-                <p>Generating preview and validating data...</p>
+                <p>Generando vista previa del mapeo…</p>
+                <p className="step3-loading__hint">
+                    Archivos grandes pueden tardar varios minutos. No cierres esta ventana.
+                </p>
             </div>
         );
     }
@@ -51,14 +134,14 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
         return (
             <div className="step3-error">
                 <div className="error-icon">⚠</div>
-                <h3>Preview Generation Failed</h3>
+                <h3>Error al generar la vista previa</h3>
                 <p>{error}</p>
                 <div className="error-actions">
                     <Button variant="secondary" onClick={prevStep}>
-                        ← Back to Mapping
+                        ← Volver al mapeo
                     </Button>
                     <Button variant="primary" onClick={loadPreview}>
-                        Try Again
+                        Reintentar
                     </Button>
                 </div>
             </div>
@@ -85,13 +168,29 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
 
     return (
         <div className="step3-preview">
-            <h2>Step 3: Preview & Validate</h2>
+            <h2>{isCatalog ? 'Paso 3: Vista previa del mapeo' : 'Step 3: Preview & Validate'}</h2>
             <p className="step-description">
-                Review transformed data and validation results before continuing.
+                {isCatalog
+                    ? 'Revisa cómo quedarán los datos tras el mapeo. La validación contra la tabla destino se hará en el siguiente paso, antes de promover a producción.'
+                    : 'Review transformed data and validation results before continuing.'}
             </p>
 
-            {/* Validation Dashboard */}
-            {processType !== 'Other' ? (
+            {isCatalog ? (
+                <div className="catalog-preview-summary">
+                    <div className="validation-alert info catalog-preview-hint">
+                        Las comprobaciones de formato, tipos, enums y duplicados se ejecutan al procesar
+                        el archivo. Podrás descargar los registros rechazados para corregirlos.
+                    </div>
+                    <div className="summary-card">
+                        <div className="card-label">Filas en archivo</div>
+                        <span className="value">{val.total_rows?.toLocaleString() || 0}</span>
+                    </div>
+                    <div className="summary-card summary-card--target">
+                        <div className="card-label">Tabla destino</div>
+                        <span className="value value--table">{targetTableName}</span>
+                    </div>
+                </div>
+            ) : (
                 <>
                     {val.has_error && (
                         <div className="validation-alert error">
@@ -206,44 +305,49 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                         </div>
                     </div>
                 </>
-            ) : (
-                <div className="preview-summary validation-grid">
-                    <div className="summary-card stat-pair">
-                        <div className="card-label">Modo: Other (Carga Directa)</div>
-                        <div className="stat-compare">
-                            <div className="stat-box">
-                                <span className="value">{val.total_rows?.toLocaleString() || 0}</span>
-                                <span className="label">Originales</span>
-                            </div>
-                            <span className="arrow">→</span>
-                            <div className="stat-box">
-                                <span className="value">0</span>
-                                <span className="label">Agrupadas</span>
-                            </div>
-                        </div>
-                    </div>
-                </div>
             )}
 
             {/* Preview Table */}
-            {previewData?.preview_data && previewData.preview_data.length > 0 ? (
-                <div className="preview-table-container" style={{ marginTop: '2rem' }}>
-                    <h3>Data Preview (First 20 Aggregated Rows)</h3>
+            {displayPreviewRows.length > 0 ? (
+                <div className="preview-table-container">
+                    <div className="preview-table-header">
+                        <h3>
+                            {isCatalog
+                                ? 'Vista previa (primeras 20 filas)'
+                                : 'Data Preview (First 20 Aggregated Rows)'}
+                        </h3>
+                        <span className="preview-table-meta">
+                            {displayPreviewRows.length} filas · {previewColumnKeys.length} columnas
+                        </span>
+                    </div>
                     <div className="table-wrapper">
                         <table className="preview-table">
                             <thead>
                                 <tr>
-                                    {Object.keys(previewData.preview_data[0]).map((key) => (
-                                        <th key={key}>{key}</th>
+                                    <th className="preview-table__row-num">#</th>
+                                    {previewColumnKeys.map((key) => (
+                                        <th key={key}>{formatPreviewColumnLabel(key)}</th>
                                     ))}
                                 </tr>
                             </thead>
                             <tbody>
-                                {previewData.preview_data.map((row, index) => (
+                                {displayPreviewRows.map((row, index) => (
                                     <tr key={index}>
-                                        {Object.values(row).map((val, i) => (
-                                            <td key={i}>{val !== null ? String(val) : ''}</td>
-                                        ))}
+                                        <td className="preview-table__row-num">{index + 1}</td>
+                                        {previewColumnKeys.map((key) => {
+                                            const cellVal = row[key];
+                                            const display = formatPreviewCellValue(key, cellVal);
+                                            const isEmpty = !display;
+                                            return (
+                                                <td
+                                                    key={key}
+                                                    title={display || undefined}
+                                                    className={isEmpty ? 'preview-table__empty' : ''}
+                                                >
+                                                    {isEmpty ? '—' : display}
+                                                </td>
+                                            );
+                                        })}
                                     </tr>
                                 ))}
                             </tbody>
@@ -251,28 +355,12 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                     </div>
                 </div>
             ) : (
-                <div className="preview-table-container" style={{ marginTop: '2rem', padding: '1rem', background: '#ffebee', color: '#c62828', borderRadius: '4px' }}>
+                <div className="preview-table-container preview-table-container--empty">
                     <h3>Data Preview Not Available</h3>
                     <p>Debug info: previewData.preview_data type is {typeof previewData?.preview_data}</p>
                     <pre style={{ maxWidth: '100%', overflow: 'auto' }}>{JSON.stringify(previewData, null, 2)}</pre>
                 </div>
             )}
-
-            {/* Target Info */}
-            <div className="target-info">
-                <div className="info-row">
-                    <span className="info-label">Target Schema:</span>
-                    <span className="info-value">{previewData.target_schema || '-'}</span>
-                </div>
-                <div className="info-row">
-                    <span className="info-label">Target Table:</span>
-                    <span className="info-value">{previewData.target_table || '-'}</span>
-                </div>
-                <div className="info-row">
-                    <span className="info-label">Staging Table:</span>
-                    <span className="info-value">stage_{previewData.staging_table || '-'}</span>
-                </div>
-            </div>
 
             <div className="step-actions">
                 <Button variant="secondary" onClick={prevStep}>
@@ -281,8 +369,14 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                 <Button
                     variant="primary"
                     onClick={nextStep}
+                    disabled={catalogBlocked}
+                    title={
+                        catalogBlocked
+                            ? 'Corrige los errores de validación antes de continuar'
+                            : undefined
+                    }
                 >
-                    Confirm & Process →
+                    {catalogBlocked ? 'Corrija errores para continuar' : isCatalog ? 'Procesar y validar →' : 'Confirmar y procesar →'}
                 </Button>
             </div>
         </div>

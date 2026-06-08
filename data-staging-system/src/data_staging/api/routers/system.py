@@ -3,7 +3,7 @@ import os
 import logging
 from pathlib import Path
 from typing import Optional
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -206,4 +206,62 @@ async def get_tables(
     except Exception as e:
         logger.error(f"Error retrieving tables for schema '{schema}': {e}")
         raise HTTPException(status_code=500, detail=f"Failed to retrieve tables: {str(e)}")
+
+
+@router.get("/catalog-tables")
+async def get_catalog_tables():
+    """
+    List catalog tables (skus, location) for the catalog upload wizard.
+    Duplicated under /upload for convenience; kept here for clients hitting system API.
+    """
+    try:
+        from data_staging.catalog.catalog_registry import list_catalog_tables
+
+        return {"tables": list_catalog_tables()}
+    except Exception as e:
+        logger.error(f"Error listing catalog tables: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to list catalog tables: {str(e)}")
+
+
+@router.get("/table-columns")
+async def get_table_columns(
+    schema: str = Query(..., description="The database schema (e.g., public)"),
+    table: str = Query(..., description="The table name"),
+    db: Session = Depends(get_database_session),
+):
+    """Get columns for a specific table in any schema."""
+    try:
+        from sqlalchemy import text
+
+        query = text("""
+            SELECT column_name, data_type, is_nullable, column_default
+            FROM information_schema.columns
+            WHERE table_schema = :schema
+            AND table_name = :table
+            ORDER BY ordinal_position
+        """)
+
+        result = db.execute(query, {"schema": schema, "table": table}).fetchall()
+
+        if not result:
+            return {
+                "columns": [],
+                "error": f"Table {schema}.{table} not found or has no columns",
+            }
+
+        columns = [
+            {
+                "name": row.column_name,
+                "type": row.data_type,
+                "nullable": row.is_nullable == "YES",
+                "default": row.column_default,
+            }
+            for row in result
+        ]
+
+        return {"columns": columns, "schema": schema, "table": table}
+
+    except Exception as e:
+        logger.error(f"Error fetching columns for {schema}.{table}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 

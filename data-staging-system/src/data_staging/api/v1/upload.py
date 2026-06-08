@@ -1,6 +1,6 @@
 # src/data_staging/api/v1/upload.py - Complete File Upload Implementation
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks, Depends
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -8,18 +8,36 @@ import uuid
 import os
 import shutil
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 import polars as pl
 import json
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from pydantic import BaseModel
 import logging
 
 from data_staging.database import get_database_session
 from data_staging.config import settings
-from data_staging.utils.file_handler import FileHandler
-from data_staging.core.validators.data_validator import DataValidator
-from data_staging.core.etl.engine import ETLEngine
+from data_staging.utils.encoding_utils import (
+    detect_file_encoding,
+    encoding_for_polars,
+    encoding_for_python,
+    normalize_encoding_name,
+)
+from data_staging.utils.json_helpers import to_json_safe
+from data_staging.auth.security import (
+    TokenUser,
+    get_current_user,
+    ensure_organization_id_mapping,
+)
+from data_staging.utils.batch_control import (
+    collect_batch_file_paths,
+    is_safe_sql_identifier,
+    normalize_metadata,
+    resolve_effective_file_path,
+    resolve_original_file_path,
+    staging_table_for_source,
+    with_file_path,
+)
 
 
 
@@ -27,6 +45,223 @@ logger = logging.getLogger(__name__)
 
 
 router = APIRouter()
+
+
+_batch_org_column_ready = False
+
+
+def _ensure_batch_control_org_column(db: Session) -> None:
+    """Columna organization_id: una sola vez por proceso, sin ALTER en cada request."""
+    global _batch_org_column_ready
+    if _batch_org_column_ready:
+        return
+    try:
+        exists = db.execute(
+            text("""
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = 'staging_meta'
+                  AND table_name = 'batch_control'
+                  AND column_name = 'organization_id'
+                LIMIT 1
+            """)
+        ).fetchone()
+        if not exists:
+            db.execute(
+                text("""
+                    ALTER TABLE staging_meta.batch_control
+                    ADD COLUMN IF NOT EXISTS organization_id TEXT
+                """)
+            )
+            db.execute(
+                text("""
+                    UPDATE staging_meta.batch_control
+                    SET organization_id = metadata->>'organization_id'
+                    WHERE (organization_id IS NULL OR organization_id = '')
+                      AND metadata->>'organization_id' IS NOT NULL
+                      AND metadata->>'organization_id' <> ''
+                """)
+            )
+        db.commit()
+        _batch_org_column_ready = True
+    except Exception as exc:
+        db.rollback()
+        logger.warning("No se pudo asegurar organization_id en batch_control: %s", exc)
+
+
+def _staging_table_exists(db: Session, table_name: str) -> bool:
+    if not is_safe_sql_identifier(table_name):
+        return False
+    return (
+        db.execute(
+            text("""
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = 'staging_data'
+                  AND table_name = :table_name
+                LIMIT 1
+            """),
+            {"table_name": table_name},
+        ).fetchone()
+        is not None
+    )
+
+
+def _delete_batch_files(batch_id: str, row_metadata: Any, file_path_column: Optional[str]) -> None:
+    meta = normalize_metadata(row_metadata)
+    paths = collect_batch_file_paths(meta, file_path_column)
+    
+    # Buscar archivos en disco que comiencen con el batch_id prefix
+    try:
+        from data_staging.config import settings
+        upload_dir = Path(settings.UPLOAD_PATH)
+        temp_dir = Path(settings.TEMP_PATH)
+        
+        for directory in (upload_dir, temp_dir):
+            if directory.exists() and directory.is_dir():
+                for file_in_dir in directory.iterdir():
+                    if file_in_dir.is_file() and file_in_dir.name.startswith(batch_id):
+                        paths.append(str(file_in_dir.resolve()))
+    except Exception as exc:
+        logger.warning("Error al buscar archivos adicionales para el batch %s: %s", batch_id, exc)
+
+    seen = set()
+    for path_str in paths:
+        p = Path(path_str).resolve()
+        p_str = str(p)
+        if p_str in seen:
+            continue
+        seen.add(p_str)
+        try:
+            if p.is_file():
+                p.unlink()
+                logger.info("Archivo eliminado: %s", p_str)
+        except OSError as exc:
+            logger.warning("No se pudo borrar archivo %s: %s", p_str, exc)
+
+
+def _purge_batches_bulk(db: Session, rows: list) -> int:
+    """Elimina varios batches en pocas consultas (sin timeout por fila)."""
+    if not rows:
+        return 0
+
+    db.execute(text("SET LOCAL statement_timeout = '0'"))
+
+    batch_ids = [str(r.batch_id) for r in rows]
+    by_table: Dict[str, List[str]] = {}
+    for row in rows:
+        table = staging_table_for_source(row.source_name or "")
+        by_table.setdefault(table, []).append(str(row.batch_id))
+
+    for table, ids in by_table.items():
+        if not _staging_table_exists(db, table):
+            continue
+        db.execute(
+            text(
+                f"DELETE FROM staging_data.{table} "
+                "WHERE batch_id::text = ANY(:ids)"
+            ),
+            {"ids": ids},
+        )
+
+    db.execute(
+        text("""
+            DELETE FROM staging_meta.job_queue
+            WHERE payload->>'batch_id' = ANY(:ids)
+        """),
+        {"ids": batch_ids},
+    )
+    db.execute(
+        text(
+            "DELETE FROM staging_meta.validation_logs "
+            "WHERE batch_id::text = ANY(:ids)"
+        ),
+        {"ids": batch_ids},
+    )
+    db.execute(
+        text(
+            "DELETE FROM staging_meta.load_history "
+            "WHERE batch_id::text = ANY(:ids)"
+        ),
+        {"ids": batch_ids},
+    )
+    db.execute(
+        text(
+            "DELETE FROM staging_meta.batch_control "
+            "WHERE batch_id::text = ANY(:ids)"
+        ),
+        {"ids": batch_ids},
+    )
+
+    for row in rows:
+        _delete_batch_files(str(row.batch_id), row.metadata, row.file_path)
+
+    return len(batch_ids)
+
+
+def _batch_filters_where(
+    *,
+    status: Optional[str] = None,
+    source_name: Optional[str] = None,
+    search: Optional[str] = None,
+    organization_id: Optional[str] = None,
+) -> tuple[str, Dict[str, Any]]:
+    conditions: List[str] = []
+    params: Dict[str, Any] = {}
+    if status:
+        conditions.append("bc.status = :status")
+        params["status"] = status
+    if source_name:
+        conditions.append("bc.source_name ILIKE :source_name")
+        params["source_name"] = f"%{source_name}%"
+    if search:
+        conditions.append(
+            "("
+            "bc.batch_id::text ILIKE :search OR "
+            "bc.source_name ILIKE :search OR "
+            "COALESCE(bc.file_name, '') ILIKE :search"
+            ")"
+        )
+        params["search"] = f"%{search.strip()}%"
+    if organization_id:
+        conditions.append(
+            "COALESCE(bc.organization_id, bc.metadata->>'organization_id') = :organization_id"
+        )
+        params["organization_id"] = organization_id
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    return where_clause, params
+
+
+def _batch_id_exists_clause(where_clause: str) -> str:
+    return (
+        " AND bc.batch_id = :batch_id"
+        if where_clause
+        else " WHERE bc.batch_id = :batch_id"
+    )
+
+
+def _delete_batch_record(db: Session, batch_id: str) -> bool:
+    """Elimina batch, staging, jobs y archivos en disco."""
+    row = db.execute(
+        text("""
+            SELECT batch_id, source_name, file_path, metadata
+            FROM staging_meta.batch_control
+            WHERE batch_id = :batch_id
+        """),
+        {"batch_id": batch_id},
+    ).fetchone()
+    if not row:
+        return False
+    return _purge_batches_bulk(db, [row]) > 0
+
+
+class BulkDeleteRequest(BaseModel):
+    batch_ids: List[str] = []
+
+
+class BulkDeleteFiltersRequest(BaseModel):
+    status: Optional[str] = None
+    search: Optional[str] = None
 
 class FileUploadService:
     """Service for handling file uploads and processing"""
@@ -66,41 +301,75 @@ class FileUploadService:
             "file_size": getattr(file, 'size', None)
         }
     
-    async def save_file(self, file: UploadFile, batch_id: str) -> Path:
-        """Save uploaded file to disk"""
-        # Create unique filename
+    async def save_file(
+        self, file: UploadFile, batch_id: str
+    ) -> Tuple[Path, Optional[Dict[str, Any]]]:
+        """Save upload to disk. CSV uploads are converted to .raw.parquet and the CSV is removed."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         file_ext = Path(file.filename).suffix
         safe_filename = f"{batch_id}_{timestamp}_{file.filename}"
         file_path = self.upload_dir / safe_filename
-        
+
         try:
-            # Save file
             with open(file_path, "wb") as buffer:
                 content = await file.read()
                 buffer.write(content)
-            
+
             logger.info(f"File saved: {file_path}")
-            return file_path
-            
+
+            if file_ext.lower() == ".csv":
+                file_analysis = self.analyze_file_structure(file_path)
+                if file_analysis.get("error"):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=file_analysis["error"],
+                    )
+                try:
+                    from data_staging.utils.raw_parquet import csv_to_raw_parquet
+
+                    raw_parquet = csv_to_raw_parquet(
+                        file_path,
+                        delimiter=file_analysis.get("delimiter", ","),
+                    )
+                    file_path.unlink(missing_ok=True)
+                    logger.info(
+                        "CSV converted to raw Parquet (source removed): %s",
+                        raw_parquet,
+                    )
+                    file_analysis["logical_file_type"] = "csv"
+                    file_analysis["stored_format"] = "raw_parquet"
+                    return raw_parquet, file_analysis
+                except HTTPException:
+                    raise
+                except Exception as conv_exc:
+                    logger.error("CSV to Parquet conversion failed: %s", conv_exc)
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Error converting CSV to Parquet: {conv_exc}",
+                    ) from conv_exc
+
+            return file_path, None
+
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Error saving file: {e}")
             raise HTTPException(status_code=500, detail=f"Error saving file: {str(e)}")
     
     def detect_file_type(self, file_path: Path) -> str:
         """Detect file type and structure"""
+        name_lower = file_path.name.lower()
         file_ext = file_path.suffix.lower()
-        
-        if file_ext in ['.csv']:
-            return 'csv'
-        elif file_ext in ['.xlsx', '.xls']:
-            return 'excel'
-        elif file_ext in ['.json']:
-            return 'json'
-        elif file_ext in ['.parquet']:
-            return 'parquet'
-        else:
-            return 'unknown'
+
+        if name_lower.endswith(".raw.parquet") or file_ext == ".parquet":
+            return "parquet"
+        if file_ext in [".csv"]:
+            return "csv"
+        if file_ext in [".xlsx", ".xls"]:
+            return "excel"
+        if file_ext in [".json"]:
+            return "json"
+        return "unknown"
     
     def analyze_file_structure(self, file_path: Path) -> Dict[str, Any]:
         """Analyze file structure and extract metadata"""
@@ -108,58 +377,51 @@ class FileUploadService:
         
         try:
             if file_type == 'csv':
-                # Analyze CSV with robust detection using Polars
-                encodings = ['utf-8', 'latin-1', 'cp1252']
+                detected_encoding = normalize_encoding_name(
+                    detect_file_encoding(file_path)
+                )
+                pl_encoding = encoding_for_polars(detected_encoding)
                 sample_df = None
                 read_error = None
                 detected_delimiter = ","
-                detected_encoding = "utf-8"
-                
-                # Try different encodings
-                for encoding in encodings:
-                    try:
-                        # Try default separator first
-                        curr_delimiter = ","
-                        sample_df = pl.read_csv(
-                            file_path,
-                            n_rows=100,
-                            encoding=encoding,
-                            ignore_errors=True,
-                            truncate_ragged_lines=True,
-                            infer_schema_length=100
-                        )
-                        
-                        # If parsed into 1 column, try sniffing delimiter
-                        if len(sample_df.columns) == 1:
-                            with open(file_path, 'r', encoding=encoding) as f:
-                                first_line = f.readline()
-                                if ',' in first_line or ';' in first_line or '\t' in first_line:
-                                    # Try sniffing
-                                    f.seek(0)
-                                    import csv
-                                    dialect = csv.Sniffer().sniff(f.read(1024))
-                                    curr_delimiter = dialect.delimiter
-                                    
-                                    sample_df = pl.read_csv(
-                                        file_path,
-                                        n_rows=100,
-                                        separator=curr_delimiter,
-                                        encoding=encoding,
-                                        ignore_errors=True,
-                                        truncate_ragged_lines=True,
-                                        infer_schema_length=100
-                                    )
-                        
-                        if sample_df is not None and not sample_df.is_empty():
-                            detected_encoding = encoding
-                            detected_delimiter = curr_delimiter
-                            break # Success
-                    except Exception as e:
-                        read_error = e
-                        continue
-                
+                text_encoding = encoding_for_python(detected_encoding)
+
+                try:
+                    curr_delimiter = ","
+                    sample_df = pl.read_csv(
+                        file_path,
+                        n_rows=100,
+                        encoding=pl_encoding,
+                        ignore_errors=True,
+                        truncate_ragged_lines=True,
+                        infer_schema_length=100,
+                    )
+
+                    if len(sample_df.columns) == 1:
+                        with open(file_path, "r", encoding=text_encoding) as f:
+                            first_line = f.readline()
+                            if "," in first_line or ";" in first_line or "\t" in first_line:
+                                f.seek(0)
+                                import csv
+
+                                dialect = csv.Sniffer().sniff(f.read(1024))
+                                curr_delimiter = dialect.delimiter
+
+                                sample_df = pl.read_csv(
+                                    file_path,
+                                    n_rows=100,
+                                    separator=curr_delimiter,
+                                    encoding=pl_encoding,
+                                    ignore_errors=True,
+                                    truncate_ragged_lines=True,
+                                    infer_schema_length=100,
+                                )
+                    detected_delimiter = curr_delimiter
+                except Exception as e:
+                    read_error = e
+
                 if sample_df is None:
-                     raise Exception(f"Failed to read CSV. Last error: {read_error}")
+                    raise Exception(f"Failed to read CSV. Last error: {read_error}")
 
                 # Convert column types to string for JSON serialization
                 column_types = {col: str(dtype) for col, dtype in zip(sample_df.columns, sample_df.dtypes)}
@@ -176,6 +438,28 @@ class FileUploadService:
                     "sample_data": sample_rows,
                     "delimiter": detected_delimiter,
                     "encoding": detected_encoding
+                }
+
+            elif file_type == "parquet":
+                from data_staging.utils.chunk_iterators import count_parquet_rows
+
+                sample_df = pl.scan_parquet(file_path).head(100).collect()
+                column_types = {
+                    col: str(dtype) for col, dtype in zip(sample_df.columns, sample_df.dtypes)
+                }
+                sample_rows = sample_df.head(5).to_dicts()
+                return {
+                    "file_type": "parquet",
+                    "columns": list(sample_df.columns),
+                    "column_types": column_types,
+                    "sample_rows": len(sample_df),
+                    "estimated_total_rows": count_parquet_rows(file_path),
+                    "sample_data": sample_rows,
+                    "delimiter": ",",
+                    "encoding": "utf-8",
+                    "stored_format": "raw_parquet"
+                    if file_path.name.lower().endswith(".raw.parquet")
+                    else "parquet",
                 }
             
             elif file_type == 'excel':
@@ -296,8 +580,8 @@ async def upload_file(
         # 2. Generate batch ID
         batch_id = str(uuid.uuid4())
         
-        # 3. Save file
-        file_path = await upload_service.save_file(file, batch_id)
+        # 3. Save file (CSV → .raw.parquet, source CSV removed)
+        file_path, _csv_analysis = await upload_service.save_file(file, batch_id)
         file_size = file_path.stat().st_size
         
         # 4. Determine source name
@@ -305,15 +589,26 @@ async def upload_file(
             source_name = Path(file.filename).stem
         
         # 5. Create batch record
+        file_path_str = str(file_path)
+        upload_metadata = with_file_path(
+            {"uploaded_at": datetime.utcnow().isoformat() + "Z", "original_file_path": file_path_str},
+            file_path_str,
+        )
         db.execute(text("""
             INSERT INTO staging_meta.batch_control 
-            (batch_id, source_name, source_type, file_name, file_size, status)
-            VALUES (:batch_id, :source_name, 'file', :file_name, :file_size, 'UPLOADED')
+            (batch_id, source_name, source_type, file_name, file_path, file_size,
+             status, metadata, created_at, updated_at)
+            VALUES (
+                :batch_id, :source_name, 'file', :file_name, :file_path, :file_size,
+                'UPLOADED', :metadata, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            )
         """), {
             "batch_id": batch_id,
             "source_name": source_name,
             "file_name": file.filename,
-            "file_size": file_size
+            "file_path": file_path_str,
+            "file_size": file_size,
+            "metadata": json.dumps(upload_metadata),
         })
         db.commit()
         
@@ -473,7 +768,8 @@ class ProcessRequest(BaseModel):
 async def process_batch(
     batch_id: str,
     request: ProcessRequest,
-    db: Session = Depends(get_database_session)
+    db: Session = Depends(get_database_session),
+    current_user: TokenUser = Depends(get_current_user),
 ):
     """
     Procesa un batch con configuración avanzada.
@@ -482,7 +778,7 @@ async def process_batch(
     try:
         # 1. Verificar batch existe
         result = db.execute(text("""
-            SELECT batch_id, file_name, source_name, metadata 
+            SELECT batch_id, file_name, source_name, file_path, metadata 
             FROM staging_meta.batch_control 
             WHERE batch_id = :batch_id
         """), {"batch_id": batch_id})
@@ -492,9 +788,7 @@ async def process_batch(
             raise HTTPException(status_code=404, detail="Batch not found")
         
         # 2. Obtener metadata
-        metadata = batch.metadata if batch.metadata else {}
-        if isinstance(metadata, str):
-            metadata = json.loads(metadata)
+        metadata = normalize_metadata(batch.metadata)
         
         # 3. Actualizar metadata con request
         if request.column_mapping:
@@ -512,23 +806,44 @@ async def process_batch(
         if request.auto_production:
             metadata["auto_production"] = True
             logger.info(f"Auto-production enabled for batch {batch_id}")
+
+        org_id = current_user.organization_id
+        mappings, toggles = ensure_organization_id_mapping(
+            metadata.get("column_mappings", {}),
+            metadata.get("column_toggles", {}),
+            org_id,
+        )
+        metadata["column_mappings"] = mappings
+        metadata["column_toggles"] = toggles
+        metadata["organization_id"] = org_id
+
+        effective_path = resolve_effective_file_path(
+            metadata, file_path_column=getattr(batch, "file_path", None)
+        )
+        if not effective_path:
+            effective_path = str(Path(settings.UPLOAD_PATH) / f"{batch_id}_{batch.file_name}")
+        metadata = with_file_path(metadata, effective_path)
+        metadata.pop("processing_progress", None)
         
-        # 4. Guardar metadata actualizado
+        # 4. Guardar metadata y columnas de control
         db.execute(text("""
             UPDATE staging_meta.batch_control
             SET metadata = :metadata,
-                status = 'PENDING'
+                file_path = :file_path,
+                status = 'PROCESSING',
+                started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+                error_message = NULL,
+                updated_at = CURRENT_TIMESTAMP
             WHERE batch_id = :batch_id
         """), {
             "metadata": json.dumps(metadata),
+            "file_path": effective_path,
             "batch_id": batch_id
         })
         db.commit()
         
-        # 5. Obtener file_path
-        file_path = metadata.get("aggregated_file_path") or metadata.get("file_path")
-        if not file_path:
-            file_path = str(settings.upload_path / f"{batch_id}_{batch.file_name}")
+        # 5. Ruta para el job
+        file_path = effective_path
             
         # 5b. Fetch Target Column Types for Validation
         target_schema = metadata.get("target_schema")
@@ -613,37 +928,123 @@ async def process_batch(
         logger.error(f"Error queueing processing: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+_BATCH_ACTIVE_STATUSES = frozenset({
+    "PROCESSING",
+    "PENDING",
+    "PENDING_PROCESS",
+    "PENDING_MAPPING",
+    "PENDING_PREVIEW",
+})
+
+
+def _as_utc_aware(dt: Optional[datetime]) -> Optional[datetime]:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _format_duration_seconds(seconds: int) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        minutes, secs = divmod(seconds, 60)
+        return f"{minutes}m {secs}s" if secs else f"{minutes}m"
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    parts = [f"{hours}h"]
+    if minutes:
+        parts.append(f"{minutes}m")
+    if secs and hours < 2:
+        parts.append(f"{secs}s")
+    return " ".join(parts)
+
+
+def _compute_batch_load_duration(
+    *,
+    status: str,
+    created_at: Optional[datetime],
+    started_at: Optional[datetime],
+    completed_at: Optional[datetime],
+    promotion_in_progress: bool = False,
+) -> Dict[str, Any]:
+    """Duration from processing start until completion (or now if still running)."""
+    start = _as_utc_aware(started_at or created_at)
+    if not start:
+        return {
+            "duration_seconds": None,
+            "duration_label": None,
+            "duration_in_progress": False,
+        }
+
+    in_progress = status in _BATCH_ACTIVE_STATUSES or promotion_in_progress
+    end = datetime.now(timezone.utc) if in_progress else _as_utc_aware(completed_at)
+    if not end:
+        return {
+            "duration_seconds": None,
+            "duration_label": None,
+            "duration_in_progress": in_progress,
+        }
+
+    seconds = max(0, int((end - start).total_seconds()))
+    label = _format_duration_seconds(seconds)
+    if in_progress:
+        label = f"{label}…"
+
+    return {
+        "duration_seconds": seconds,
+        "duration_label": label,
+        "duration_in_progress": in_progress,
+    }
+
+
 @router.get("/batches")
 async def list_batches(
-    limit: int = 50,
+    limit: int = 10,
     offset: int = 0,
     status: Optional[str] = None,
     source_name: Optional[str] = None,
-    db: Session = Depends(get_database_session)
+    search: Optional[str] = None,
+    db: Session = Depends(get_database_session),
+    current_user: TokenUser = Depends(get_current_user),
 ):
-    """List uploaded batches with optional filtering"""
+    """List uploaded batches with optional filtering and pagination."""
     
     try:
-        # Build query with filters
-        where_conditions = []
-        params = {"limit": limit, "offset": offset}
-        
-        if status:
-            where_conditions.append("status = :status")
-            params["status"] = status
-        
-        if source_name:
-            where_conditions.append("source_name ILIKE :source_name")
-            params["source_name"] = f"%{source_name}%"
-        
-        where_clause = "WHERE " + " AND ".join(where_conditions) if where_conditions else ""
-        
+        _ensure_batch_control_org_column(db)
+        limit = max(1, min(int(limit), 100))
+        offset = max(0, int(offset))
+
+        where_clause, params = _batch_filters_where(
+            status=status,
+            source_name=source_name,
+            search=search,
+            organization_id=current_user.organization_id,
+        )
+        params["limit"] = limit
+        params["offset"] = offset
+
         query = text(f"""
-            SELECT batch_id, source_name, source_type, file_name, file_size,
-                   records_count, status, created_at, completed_at, error_message
-            FROM staging_meta.batch_control 
+            SELECT bc.batch_id, bc.source_name, bc.source_type, bc.file_name, bc.file_size,
+                   bc.records_count, bc.status,
+                   bc.created_at, bc.started_at, bc.completed_at, bc.error_message,
+                   COALESCE(bc.organization_id, bc.metadata->>'organization_id') AS organization_id,
+                   o.name AS organization_name,
+                   EXISTS (
+                       SELECT 1
+                       FROM staging_meta.job_queue jq
+                       WHERE jq.payload->>'batch_id' = bc.batch_id::text
+                         AND jq.job_type = 'PROMOTE_BATCH'
+                         AND jq.status IN ('PENDING', 'PROCESSING')
+                   ) AS promotion_in_progress
+            FROM staging_meta.batch_control bc
+            LEFT JOIN public.organizations o
+              ON o.id::text = COALESCE(bc.organization_id, bc.metadata->>'organization_id')
             {where_clause}
-            ORDER BY created_at DESC
+            ORDER BY COALESCE(bc.created_at, bc.started_at, bc.completed_at) DESC NULLS LAST
             LIMIT :limit OFFSET :offset
         """)
         
@@ -651,198 +1052,59 @@ async def list_batches(
         
         batches = []
         for row in result:
+            created_at = row.created_at
+            started_at = row.started_at
+            completed_at = row.completed_at
+            display_at = created_at or started_at or completed_at
+            duration = _compute_batch_load_duration(
+                status=row.status,
+                created_at=created_at,
+                started_at=started_at,
+                completed_at=completed_at,
+                promotion_in_progress=bool(row.promotion_in_progress),
+            )
+
             batches.append({
-                "batch_id": row.batch_id,
+                "batch_id": str(row.batch_id),
                 "source_name": row.source_name,
                 "source_type": row.source_type,
                 "file_name": row.file_name,
                 "file_size": row.file_size,
                 "records_count": row.records_count,
                 "status": row.status,
-                "created_at": row.created_at.isoformat() if row.created_at else None,
-                "completed_at": row.completed_at.isoformat() if row.completed_at else None,
-                "error_message": row.error_message
+                "created_at": created_at.isoformat() if created_at else None,
+                "started_at": started_at.isoformat() if started_at else None,
+                "completed_at": completed_at.isoformat() if completed_at else None,
+                "display_at": display_at.isoformat() if display_at else None,
+                "duration_seconds": duration["duration_seconds"],
+                "duration_label": duration["duration_label"],
+                "duration_in_progress": duration["duration_in_progress"],
+                "promotion_in_progress": bool(row.promotion_in_progress),
+                "error_message": row.error_message,
+                "organization_id": row.organization_id,
+                "organization_name": row.organization_name,
             })
         
-        # Get total count
         count_query = text(f"""
-            SELECT COUNT(*) FROM staging_meta.batch_control {where_clause}
+            SELECT COUNT(*) FROM staging_meta.batch_control bc
+            {where_clause}
         """)
-        total_count = db.execute(count_query, params).scalar()
+        total_count = db.execute(count_query, params).scalar() or 0
+        page = (offset // limit) + 1 if limit else 1
+        total_pages = max(1, (total_count + limit - 1) // limit) if limit else 1
         
         return {
             "batches": batches,
             "total": total_count,
             "limit": limit,
-            "offset": offset
+            "offset": offset,
+            "page": page,
+            "total_pages": total_pages,
         }
         
     except Exception as e:
         logger.error(f"Error listing batches: {e}")
         raise HTTPException(status_code=500, detail=f"Error retrieving batches: {str(e)}")
-
-
-async def process_file_async(batch_id: str, file_path: str, source_name: str, columns: Optional[List[str]] = None):
-    """Background task to process uploaded file"""
-    
-    try:
-        logger.info(f"Starting async processing for batch {batch_id} with columns: {columns}")
-        
-        # Get database session
-        from data_staging.database import get_database_manager
-        db_manager = get_database_manager()
-        
-        with db_manager.get_session() as db:
-            # Update status to processing
-            db.execute(text("""
-                UPDATE staging_meta.batch_control 
-                SET status = 'PROCESSING', started_at = CURRENT_TIMESTAMP
-                WHERE batch_id = :batch_id
-            """), {"batch_id": batch_id})
-            db.commit()
-            
-            # Fetch metadata to get encoding/delimiter
-            batch_result = db.execute(text("SELECT metadata FROM staging_meta.batch_control WHERE batch_id = :batch_id"), {"batch_id": batch_id}).fetchone()
-            metadata = batch_result.metadata if batch_result and batch_result.metadata else {}
-            file_analysis = metadata.get("file_analysis", {})
-            
-            # Create load history record
-            load_id = str(uuid.uuid4())
-            start_time = datetime.now()
-            
-            db.execute(text("""
-                INSERT INTO staging_meta.load_history 
-                (load_id, batch_id, source_name, load_type, load_start_time, status)
-                VALUES (:load_id, :batch_id, :source_name, 'FILE_UPLOAD', :start_time, 'IN_PROGRESS')
-            """), {
-                "load_id": load_id,
-                "batch_id": batch_id,
-                "source_name": source_name,
-                "start_time": start_time
-            })
-            db.commit()
-            
-            try:
-                # Initialize file handler and validator
-                file_handler = FileHandler()
-                validator = DataValidator()
-                
-                # Check for incompatible dependencies
-                try:
-                    import pyarrow
-                except ImportError:
-                    logger.warning("pyarrow not installed. Parquet support may be limited.")
-                
-                # Read and process file
-                # Use columns if provided
-                read_options = {}
-                if columns:
-                   read_options["usecols"] = columns
-                
-                # Use detected encoding and delimiter if available
-                if file_analysis.get("encoding"):
-                    read_options["encoding"] = file_analysis["encoding"]
-                if file_analysis.get("delimiter"):
-                    read_options["delimiter"] = file_analysis["delimiter"]
-                
-                # Handle ragged lines (skip them to avoid failure)
-                read_options["on_bad_lines"] = "skip"
-
-                # Pass options to read_file if it supports kwargs, otherwise read full and filter
-                try:
-                    df = file_handler.read_file(Path(file_path), **read_options)
-                except TypeError:
-                     # Fallback if read_file doesn't accept kwargs
-                    df = file_handler.read_file(Path(file_path))
-                    
-                if df is not None and not df.empty:
-                    # Filter columns if not already filtered
-                    if columns:
-                        valid_columns = [c for c in columns if c in df.columns]
-                        if valid_columns:
-                            df = df[valid_columns]
-                        else:
-                            logger.warning(f"None of the selected columns {columns} found in file. Using all columns.")
-
-                    records_count = len(df)
-                    
-                    # Validate data
-                    validation_result = validator.validate_dataframe(df)
-                    quality_score = validation_result.get("overall_score", 0)
-                    
-                    # For now, just log the results
-                    # In a full implementation, you would:
-                    # 1. Save to staging table
-                    # 2. Apply transformations
-                    # 3. Load to target table
-                    
-                    logger.info(f"Processed {records_count} records with quality score {quality_score}")
-                    
-                    # Update successful completion
-                    end_time = datetime.now()
-                    duration = int((end_time - start_time).total_seconds())
-                    
-                    db.execute(text("""
-                        UPDATE staging_meta.load_history 
-                        SET load_end_time = :end_time, duration_seconds = :duration,
-                            status = 'COMPLETED', records_inserted = :records_count,
-                            data_quality_score = :quality_score
-                        WHERE load_id = :load_id
-                    """), {
-                        "load_id": load_id,
-                        "end_time": end_time,
-                        "duration": duration,
-                        "records_count": records_count,
-                        "quality_score": quality_score
-                    })
-                    
-                    db.execute(text("""
-                        UPDATE staging_meta.batch_control 
-                        SET status = 'COMPLETED', completed_at = CURRENT_TIMESTAMP,
-                            records_count = :records_count
-                        WHERE batch_id = :batch_id
-                    """), {
-                        "batch_id": batch_id,
-                        "records_count": records_count
-                    })
-                    
-                else:
-                    raise Exception("No data found in file or file is empty")
-            
-            except Exception as e:
-                # Update failure status
-                error_msg = str(e)
-                logger.error(f"Processing failed for batch {batch_id}: {error_msg}")
-                
-                end_time = datetime.now()
-                duration = int((end_time - start_time).total_seconds())
-                
-                db.execute(text("""
-                    UPDATE staging_meta.load_history 
-                    SET load_end_time = :end_time, duration_seconds = :duration,
-                        status = 'FAILED', error_details = :error_msg
-                    WHERE load_id = :load_id
-                """), {
-                    "load_id": load_id,
-                    "end_time": end_time,
-                    "duration": duration,
-                    "error_msg": error_msg
-                })
-                
-                db.execute(text("""
-                    UPDATE staging_meta.batch_control 
-                    SET status = 'FAILED', completed_at = CURRENT_TIMESTAMP,
-                        error_message = :error_msg
-                    WHERE batch_id = :batch_id
-                """), {
-                    "batch_id": batch_id,
-                    "error_msg": error_msg
-                })
-            
-            db.commit()
-            
-    except Exception as e:
-        logger.error(f"Critical error in async processing for batch {batch_id}: {e}")
 
 
 # ============================================================================
@@ -852,9 +1114,12 @@ async def process_file_async(batch_id: str, file_path: str, source_name: str, co
 @router.post("/file-temp")
 async def upload_file_temp(
     file: UploadFile = File(...),
-    target_schema: Optional[str] = None,
-    target_table: Optional[str] = None,
-    db: Session = Depends(get_database_session)
+    target_schema: Optional[str] = Form(None),
+    target_table: Optional[str] = Form(None),
+    load_type: Optional[str] = Form("history"),
+    process_type: Optional[str] = Form(None),
+    db: Session = Depends(get_database_session),
+    current_user: TokenUser = Depends(get_current_user),
 ):
     """
     Upload file for wizard - parses headers but doesn't process yet.
@@ -877,12 +1142,12 @@ async def upload_file_temp(
         # 2. Generate batch ID
         batch_id = str(uuid.uuid4())
         
-        # 3. Save file
-        file_path = await upload_service.save_file(file, batch_id)
+        # 3. Save file (CSV → .raw.parquet, source CSV removed)
+        file_path, csv_analysis = await upload_service.save_file(file, batch_id)
         file_size = file_path.stat().st_size
         
         # 4. Analyze file structure and parse headers
-        file_analysis = upload_service.analyze_file_structure(file_path)
+        file_analysis = csv_analysis or upload_service.analyze_file_structure(file_path)
         
         if "error" in file_analysis:
             raise HTTPException(
@@ -898,26 +1163,90 @@ async def upload_file_temp(
         else:
             source_name = Path(file.filename).stem
         
+        normalized_load_type = (load_type or "history").lower()
+        if normalized_load_type not in ("history", "catalog"):
+            normalized_load_type = "history"
+
+        production_table = None
+        catalog_name = None
+        if normalized_load_type == "history":
+            from data_staging.history.history_config import (
+                HISTORY_SOURCE_NAME,
+                HISTORY_TARGET_SCHEMA,
+                HISTORY_TARGET_TABLE,
+                HISTORY_VALID_PROCESS_TYPES,
+                get_history_table_meta,
+                source_from_filename,
+            )
+
+            if process_type not in HISTORY_VALID_PROCESS_TYPES:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Selecciona tipo de proceso Weekly o Monthly.",
+                )
+
+            target_schema = HISTORY_TARGET_SCHEMA
+            target_table = HISTORY_TARGET_TABLE
+            source_name = HISTORY_SOURCE_NAME
+        if normalized_load_type == "catalog":
+            if not target_table:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Selecciona un catálogo configurado (target_table).",
+                )
+            from data_staging.catalog.catalog_registry import get_catalog_table
+
+            catalog_entry = get_catalog_table(target_table)
+            if not catalog_entry:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Catálogo desconocido o inactivo: {target_table}",
+                )
+            catalog_name = target_table
+            target_schema = target_schema or catalog_entry.get("target_schema")
+            production_table = catalog_entry.get("target_table") or target_table
+
         # 6. Create batch record with PENDING_MAPPING status
+        file_path_str = str(file_path)
         metadata = {
             "file_analysis": file_analysis,
             "file_headers": file_headers,
-           "file_path": str(file_path),
+            "file_path": file_path_str,
+            "original_file_path": file_path_str,
             "target_schema": target_schema,
             "target_table": target_table,
+            "load_type": normalized_load_type,
+            "process_type": process_type if normalized_load_type == "history" else None,
+            "organization_id": current_user.organization_id,
             "wizard_step": 1
         }
-        
+        if catalog_name:
+            metadata["catalog_name"] = catalog_name
+            metadata["production_table"] = production_table
+        if normalized_load_type == "history":
+            metadata["history_config"] = get_history_table_meta()
+            metadata["unique_keys"] = get_history_table_meta().get("unique_keys", [])
+            metadata["source_extension"] = source_from_filename(file.filename or "")
+
+        _ensure_batch_control_org_column(db)
+        org_id = current_user.organization_id
         db.execute(text("""
             INSERT INTO staging_meta.batch_control 
-            (batch_id, source_name, source_type, file_name, file_size, status, metadata)
-            VALUES (:batch_id, :source_name, 'file', :file_name, :file_size, 'PENDING_MAPPING', :metadata)
+            (batch_id, source_name, source_type, file_name, file_path, file_size,
+             status, metadata, organization_id, created_at, updated_at)
+            VALUES (
+                :batch_id, :source_name, 'file', :file_name, :file_path, :file_size,
+                'PENDING_MAPPING', :metadata, :organization_id,
+                CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            )
         """), {
             "batch_id": batch_id,
             "source_name": source_name,
             "file_name": file.filename,
+            "file_path": file_path_str,
             "file_size": file_size,
-            "metadata": json.dumps(metadata)
+            "metadata": json.dumps(metadata),
+            "organization_id": org_id,
         })
         db.commit()
         
@@ -947,7 +1276,8 @@ async def upload_file_temp(
 async def save_column_mapping(
     batch_id: str,
     mapping_data: Dict[str, Any],
-    db: Session = Depends(get_database_session)
+    db: Session = Depends(get_database_session),
+    current_user: TokenUser = Depends(get_current_user),
 ):
     """
     Save column mappings for wizard Step 2.
@@ -979,45 +1309,103 @@ async def save_column_mapping(
             raise HTTPException(status_code=404, detail="Batch not found")
         
         # 2. Get existing metadata
-        metadata = batch.metadata if batch.metadata else {}
-        if isinstance(metadata, str):
-            metadata = json.loads(metadata)
+        metadata = normalize_metadata(batch.metadata)
         
-        # 3. Update metadata with mappings
+        # 3. Update metadata with mappings (organization_id always from authenticated user)
+        load_type = mapping_data.get("load_type") or metadata.get("load_type", "history")
+        org_id = current_user.organization_id
+        column_mappings, column_toggles = ensure_organization_id_mapping(
+            mapping_data.get("column_mappings", {}),
+            mapping_data.get("column_toggles", {}),
+            org_id,
+        )
         metadata.update({
             "target_schema": mapping_data.get("target_schema"),
             "target_table": mapping_data.get("target_table"),
-            "column_mappings": mapping_data.get("column_mappings", {}),
-            "column_toggles": mapping_data.get("column_toggles", {}),
+            "column_mappings": column_mappings,
+            "column_toggles": column_toggles,
             "dedup_columns": mapping_data.get("dedup_columns"),
-            "process_type": mapping_data.get("process_type"),
+            "load_type": load_type,
+            "process_type": mapping_data.get("process_type") if load_type == "history" else None,
+            "organization_id": org_id,
             "wizard_step": 2
         })
-        
+        if load_type == "catalog":
+            production_table = mapping_data.get("production_table")
+            catalog_slug = mapping_data.get("target_table")
+            if catalog_slug:
+                metadata["catalog_name"] = catalog_slug
+            if production_table:
+                metadata["production_table"] = production_table
+            elif catalog_slug:
+                from data_staging.catalog.catalog_registry import get_catalog_table
+
+                entry = get_catalog_table(catalog_slug)
+                if entry:
+                    metadata["production_table"] = entry.get("target_table") or catalog_slug
+        elif load_type == "history":
+            from data_staging.history.history_config import (
+                HISTORY_SOURCE_NAME,
+                HISTORY_TARGET_SCHEMA,
+                HISTORY_TARGET_TABLE,
+                get_history_table_meta,
+            )
+
+            metadata["target_schema"] = HISTORY_TARGET_SCHEMA
+            metadata["target_table"] = HISTORY_TARGET_TABLE
+            metadata["history_config"] = get_history_table_meta()
+            metadata["unique_keys"] = get_history_table_meta().get("unique_keys", [])
+            mapping_data["target_schema"] = HISTORY_TARGET_SCHEMA
+            mapping_data["target_table"] = HISTORY_TARGET_TABLE
+
         # 4. Update source_name if target_table changed
         target_table = mapping_data.get("target_table")
-        if target_table:
-            source_name = target_table  # Worker will add 'stage_' prefix
-            
+        if load_type == "history":
+            from data_staging.history.history_config import HISTORY_SOURCE_NAME
+
+            source_name = HISTORY_SOURCE_NAME
             db.execute(text("""
                 UPDATE staging_meta.batch_control
                 SET metadata = :metadata,
                     source_name = :source_name,
-                    status = 'PENDING_PREVIEW'
+                    organization_id = :organization_id,
+                    status = 'PENDING_PREVIEW',
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE batch_id = :batch_id
             """), {
                 "metadata": json.dumps(metadata),
                 "source_name": source_name,
+                "organization_id": org_id,
+                "batch_id": batch_id
+            })
+        elif target_table:
+            source_name = target_table
+
+            db.execute(text("""
+                UPDATE staging_meta.batch_control
+                SET metadata = :metadata,
+                    source_name = :source_name,
+                    organization_id = :organization_id,
+                    status = 'PENDING_PREVIEW',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE batch_id = :batch_id
+            """), {
+                "metadata": json.dumps(metadata),
+                "source_name": source_name,
+                "organization_id": org_id,
                 "batch_id": batch_id
             })
         else:
             db.execute(text("""
                 UPDATE staging_meta.batch_control
                 SET metadata = :metadata,
-                    status = 'PENDING_PREVIEW'
+                    organization_id = :organization_id,
+                    status = 'PENDING_PREVIEW',
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE batch_id = :batch_id
             """), {
                 "metadata": json.dumps(metadata),
+                "organization_id": org_id,
                 "batch_id": batch_id
             })
         
@@ -1042,13 +1430,16 @@ async def save_column_mapping(
 @router.post("/batch/{batch_id}/preview")
 async def generate_preview(
     batch_id: str,
-    db: Session = Depends(get_database_session)
+    db: Session = Depends(get_database_session),
+    current_user: TokenUser = Depends(get_current_user),
 ):
     """
     Generate preview for wizard Step 3.
     Applies mappings to first N rows and returns preview + validation stats.
     """
     try:
+        db.execute(text("SET LOCAL statement_timeout = '0'"))
+
         # 1. Get batch metadata
         result = db.execute(text("""
             SELECT batch_id, metadata, source_name FROM staging_meta.batch_control 
@@ -1059,66 +1450,143 @@ async def generate_preview(
         if not batch:
             raise HTTPException(status_code=404, detail="Batch not found")
         
-        metadata = batch.metadata if batch.metadata else {}
-        if isinstance(metadata, str):
-            metadata = json.loads(metadata)
+        metadata = normalize_metadata(batch.metadata)
         
-        # 2. Extract mappings and process_type
-        file_path = metadata.get("file_path", "")
-        column_mappings = metadata.get("column_mappings", {})
-        column_toggles = metadata.get("column_toggles", {})
-        process_type = metadata.get("process_type", "Other")
-        file_analysis = metadata.get("file_analysis", {})
-        encoding = file_analysis.get("encoding", "utf-8")
-        delimiter = file_analysis.get("delimiter", ",")
-        
-        # 3. Process aggregation
-        from data_staging.services.aggregation_service import process_aggregation, AggregationError
-        
-        try:
-            agg_stats, agg_file_path = process_aggregation(
-                file_path=file_path,
-                column_mappings=column_mappings,
-                column_toggles=column_toggles,
-                process_type=process_type,
-                encoding=encoding,
-                delimiter=delimiter
+        file_path = resolve_original_file_path(
+            metadata, file_path_column=getattr(batch, "file_path", None)
+        )
+        if not file_path or not Path(file_path).is_file():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No se encontró el archivo original del batch. "
+                    "Vuelve al paso 1 y sube el archivo de nuevo."
+                ),
             )
-        except AggregationError as ae:
-            raise HTTPException(status_code=400, detail=str(ae))
-        
-        # 4. Save path to aggregated file so worker uses it if Weekly/Monthly
-        if process_type in ["Weekly", "Monthly"] and not agg_stats.get("has_error"):
-            metadata["aggregated_file_path"] = str(agg_file_path)
+
+        # 2. Extract mappings and process_type
+        org_id = current_user.organization_id
+        column_mappings, column_toggles = ensure_organization_id_mapping(
+            metadata.get("column_mappings", {}),
+            metadata.get("column_toggles", {}),
+            org_id,
+        )
+        metadata["column_mappings"] = column_mappings
+        metadata["column_toggles"] = column_toggles
+        metadata["organization_id"] = org_id
+        load_type = metadata.get("load_type", "history")
+        process_type = metadata.get("process_type")
+        if load_type == "history" and process_type not in ("Weekly", "Monthly"):
+            raise HTTPException(
+                status_code=400,
+                detail="Tipo de proceso inválido. Debe ser Weekly o Monthly.",
+            )
+        file_analysis = metadata.get("file_analysis", {})
+        delimiter = file_analysis.get("delimiter", ",")
+        target_table = metadata.get("target_table", "")
+        encoding = normalize_encoding_name(
+            file_analysis.get("encoding", "utf-8")
+            if Path(file_path).suffix.lower() == ".parquet"
+            else (
+                detect_file_encoding(file_path)
+                if file_path and Path(file_path).is_file()
+                else file_analysis.get("encoding", "utf-8")
+            )
+        )
+        if encoding != file_analysis.get("encoding"):
+            file_analysis = {**file_analysis, "encoding": encoding}
+            metadata["file_analysis"] = file_analysis
+
+        # 3. Preview: catalog validation vs history aggregation
+        if load_type == "catalog":
+            from data_staging.services.catalog_preview_service import (
+                process_catalog_preview_light,
+                CatalogPreviewError,
+            )
+
+            try:
+                agg_stats, agg_file_path = process_catalog_preview_light(
+                    file_path=file_path,
+                    target_table=target_table,
+                    column_mappings=column_mappings,
+                    column_toggles=column_toggles,
+                    encoding=encoding,
+                    delimiter=delimiter,
+                    organization_id=org_id,
+                )
+                process_type = "Catalog"
+            except CatalogPreviewError as ce:
+                raise HTTPException(status_code=400, detail=str(ce))
+        else:
+            from data_staging.services.aggregation_service import process_aggregation, AggregationError
+
+            try:
+                agg_stats, agg_file_path = process_aggregation(
+                    file_path=file_path,
+                    column_mappings=column_mappings,
+                    column_toggles=column_toggles,
+                    process_type=process_type,
+                    encoding=encoding,
+                    delimiter=delimiter
+                )
+            except AggregationError as ae:
+                raise HTTPException(status_code=400, detail=str(ae))
+
+            if not agg_stats.get("has_error"):
+                agg_path = str(agg_file_path)
+                metadata["aggregated_file_path"] = agg_path
+                metadata = with_file_path(metadata, agg_path)
         
         # 5. Update metadata
         metadata["wizard_step"] = 3
         metadata["preview_generated"] = True
-        
-        db.execute(text("""
+
+        update_sql = """
             UPDATE staging_meta.batch_control
             SET metadata = :metadata,
-                status = 'PENDING_PROCESS'
-            WHERE batch_id = :batch_id
-        """), {
+                status = 'PENDING_PROCESS',
+                updated_at = CURRENT_TIMESTAMP
+        """
+        update_params = {
             "metadata": json.dumps(metadata),
-            "batch_id": batch_id
-        })
+            "batch_id": batch_id,
+        }
+        if metadata.get("aggregated_file_path"):
+            update_sql += ", file_path = :file_path"
+            update_params["file_path"] = metadata["aggregated_file_path"]
+        update_sql += " WHERE batch_id = :batch_id"
+
+        db.execute(text(update_sql), update_params)
         db.commit()
         
         logger.info(f"Preview generated for batch {batch_id}")
         
-        preview_data = agg_stats.pop("preview_data", [])
+        preview_data = agg_stats.pop("preview_data", None)
+        if preview_data is None:
+            preview_data = []
 
-        return {
+        if load_type == "history":
+            from data_staging.history.history_config import enrich_history_preview_rows
+
+            preview_data = enrich_history_preview_rows(
+                preview_data or [],
+                process_type=process_type,
+                source_extension=metadata.get("source_extension"),
+                organization_id=org_id,
+            )
+
+        return to_json_safe({
             "batch_id": batch_id,
             "validation_summary": agg_stats,
             "target_schema": metadata.get("target_schema"),
             "target_table": metadata.get("target_table"),
             "staging_table": batch.source_name,
+            "load_type": load_type,
             "process_type": process_type,
+            "organization_id": org_id,
+            "organization_name": None,
             "preview_data": preview_data
-        }
+        })
         
     except HTTPException:
         raise
@@ -1127,6 +1595,113 @@ async def generate_preview(
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to generate preview: {str(e)}")
+
+
+def _format_promotion_summary(inserted: int, updated: int) -> str:
+    """Human-readable insert vs update counts after catalog promotion."""
+    if inserted <= 0 and updated <= 0:
+        return "Importación a producción completada."
+    if updated <= 0:
+        return f"{inserted:,} registro(s) insertado(s) (nuevos en la tabla)."
+    if inserted <= 0:
+        return f"{updated:,} registro(s) actualizado(s) (ya existían; se sobrescribieron con el archivo)."
+    return (
+        f"{inserted:,} insertado(s) y {updated:,} actualizado(s) "
+        f"({inserted + updated:,} en total)."
+    )
+
+
+_PROMOTION_BATCH_SIZE = 50000
+
+
+def _promotion_chunks_total(total_rows: int) -> int:
+    return max(1, (max(total_rows, 1) + _PROMOTION_BATCH_SIZE - 1) // _PROMOTION_BATCH_SIZE)
+
+
+def _initial_promotion_progress(
+    *,
+    promote_total: int,
+    rows_processed: int = 0,
+    queued: bool = True,
+) -> Dict[str, Any]:
+    """Seed metadata.processing_progress when a PROMOTE_BATCH job is queued."""
+    chunks_total = _promotion_chunks_total(promote_total)
+    chunks_processed = rows_processed // _PROMOTION_BATCH_SIZE if rows_processed else 0
+    pct = min(99.0, (rows_processed / max(promote_total, 1)) * 100) if promote_total else 0.0
+    return {
+        "progress_percentage": round(pct, 1),
+        "current_operation": (
+            "En cola — esperando promoción a producción…"
+            if queued
+            else f"Promoviendo a producción ({rows_processed:,} de {promote_total:,} registros)…"
+        ),
+        "phase": "queued" if queued else "promoting",
+        "total_rows": promote_total,
+        "rows_processed": rows_processed,
+        "loaded_rows": rows_processed,
+        "rejected_rows": 0,
+        "chunks_processed": chunks_processed,
+        "chunks_total": chunks_total,
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+    }
+
+
+def _apply_active_promotion_progress(
+    *,
+    metadata: Dict[str, Any],
+    batch,
+    live_progress: Dict[str, Any],
+    final_stats: Dict[str, Any],
+    job_status: Optional[str],
+) -> Dict[str, Any]:
+    """Build live progress fields while batch stays COMPLETED/PARTIALLY_PROMOTED during promotion."""
+    promoted = int(metadata.get("promoted_rows") or live_progress.get("rows_processed") or 0)
+    promoted_inserted = int(metadata.get("promoted_inserted") or 0)
+    promoted_updated = int(metadata.get("promoted_updated") or 0)
+    promote_total = int(
+        live_progress.get("total_rows")
+        or final_stats.get("total_inserted")
+        or batch.records_count
+        or 0
+    )
+    if promote_total <= 0:
+        promote_total = max(promoted, 1)
+
+    chunks_total = int(
+        live_progress.get("chunks_total") or _promotion_chunks_total(promote_total)
+    )
+    chunks_processed = int(live_progress.get("chunks_processed") or 0)
+    if chunks_processed == 0 and promoted > 0:
+        chunks_processed = min(chunks_total, promoted // _PROMOTION_BATCH_SIZE + (1 if promoted % _PROMOTION_BATCH_SIZE else 0))
+
+    if job_status == "PENDING":
+        progress_percentage = max(float(live_progress.get("progress_percentage") or 0), 2.0)
+        current_operation = live_progress.get("current_operation") or (
+            "En cola — esperando promoción a producción…"
+        )
+        phase = live_progress.get("phase") or "queued"
+    else:
+        progress_percentage = float(live_progress.get("progress_percentage") or 0)
+        row_pct = min(99.0, (promoted / max(promote_total, 1)) * 100)
+        progress_percentage = max(progress_percentage, row_pct)
+        current_operation = live_progress.get("current_operation") or (
+            f"Promoviendo a producción ({promoted:,} de {promote_total:,} registros)…"
+        )
+        phase = live_progress.get("phase") or "promoting"
+
+    return {
+        "progress_percentage": progress_percentage,
+        "current_operation": current_operation,
+        "phase": phase,
+        "total_rows": promote_total,
+        "processed_rows": promoted,
+        "loaded_rows": promoted,
+        "rejected_count": int(final_stats.get("total_rejected") or 0),
+        "chunks_processed": chunks_processed,
+        "chunks_total": chunks_total,
+        "promoted_inserted": promoted_inserted,
+        "promoted_updated": promoted_updated,
+    }
 
 
 @router.get("/batch/{batch_id}/progress")
@@ -1138,6 +1713,8 @@ async def get_processing_progress(
     Get real-time processing progress for wizard Step 4.
     """
     try:
+        db.execute(text("SET LOCAL statement_timeout = '15000'"))
+
         # Get batch info
         result = db.execute(text("""
             SELECT batch_id, status, records_count, error_message, metadata,
@@ -1153,63 +1730,220 @@ async def get_processing_progress(
         metadata = batch.metadata if batch.metadata else {}
         if isinstance(metadata, str):
             metadata = json.loads(metadata)
-        
-        # Get job progress from metadata (worker updates it there)
-        # Note: job_queue doesn't have a progress column - progress is stored in batch_control metadata
-        processing_stats = metadata.get("processing_progress", {})
-        
-        # Calculate progress
+
+        # Prefer active job; stale FAILED jobs must not mask a new PROCESS_FILE run
+        job_row = db.execute(text("""
+            SELECT job_id, job_type, status, error_message
+            FROM staging_meta.job_queue
+            WHERE payload->>'batch_id' = :batch_id
+              AND status IN ('PENDING', 'PROCESSING')
+            ORDER BY created_at DESC
+            LIMIT 1
+        """), {"batch_id": batch_id}).fetchone()
+
+        if not job_row:
+            job_row = db.execute(text("""
+                SELECT job_id, job_type, status, error_message
+                FROM staging_meta.job_queue
+                WHERE payload->>'batch_id' = :batch_id
+                ORDER BY created_at DESC
+                LIMIT 1
+            """), {"batch_id": batch_id}).fetchone()
+
+        job_status = job_row.status if job_row else None
+        job_type = job_row.job_type if job_row else None
+        job_error = job_row.error_message if job_row else None
+        job_id = str(job_row.job_id) if job_row and job_row.job_id else None
+
+        # Real-time progress written by workers into metadata.processing_progress
+        live_progress = metadata.get("processing_progress", {}) or {}
+        final_stats = metadata.get("processing_stats", {}) or {}
+
         status = batch.status
-        progress_percentage = 0
-        current_operation = "Initializing..."
-        
+        error_message = batch.error_message
+        progress_percentage = 0.0
+        current_operation = "Iniciando…"
+        phase = "preparing"
+
+        file_analysis = metadata.get("file_analysis", {}) or {}
+        total_rows = int(
+            live_progress.get("total_rows")
+            or file_analysis.get("estimated_total_rows")
+            or file_analysis.get("row_count")
+            or 0
+        )
+        processed_rows = 0
+        loaded_rows = 0
+        rejected_count = 0
+        chunks_processed = int(live_progress.get("chunks_processed") or 0)
+        chunks_total = int(live_progress.get("chunks_total") or 1)
+
+        # Job failed but batch still in-progress → sync only when no active job remains
+        if (
+            job_status == "FAILED"
+            and status not in ("PROMOTED", "PARTIALLY_PROMOTED", "FAILED", "PROCESSING")
+        ):
+            label = "Procesamiento" if job_type == "PROCESS_FILE" else "Promoción"
+            error_message = job_error or error_message or f"{label} falló en el worker"
+            db.execute(text("""
+                UPDATE staging_meta.batch_control
+                SET status = 'FAILED',
+                    error_message = :error_message,
+                    completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE batch_id = :batch_id
+            """), {"batch_id": batch_id, "error_message": error_message})
+            db.commit()
+            status = "FAILED"
+
+        is_promote_job = job_type == "PROMOTE_BATCH"
+        active_promotion = (
+            is_promote_job
+            and job_status in ("PENDING", "PROCESSING")
+            and status in ("COMPLETED", "PARTIALLY_PROMOTED")
+        )
+
         if status == "PENDING_MAPPING":
             progress_percentage = 25
-            current_operation = "Waiting for column mapping"
+            current_operation = "Esperando mapeo de columnas"
+            phase = "preparing"
         elif status == "PENDING_PREVIEW":
             progress_percentage = 50
-            current_operation = "Waiting for preview confirmation"
+            current_operation = "Esperando confirmación de vista previa"
+            phase = "preparing"
         elif status == "PENDING_PROCESS" or status == "PENDING":
-            progress_percentage = 60
-            current_operation = "Ready to process"
-        elif status == "PROCESSING":
-            # Progress is stored in batch metadata, not job table
-            progress_percentage = processing_stats.get("progress_percentage", 75)
-            current_operation = processing_stats.get("current_operation", "Processing data...")
+            progress_percentage = 5
+            current_operation = "Listo para validar — iniciando…"
+            phase = "queued"
+        elif status == "PROCESSING" or (
+            status in ("PENDING", "PENDING_PROCESS")
+            and job_status in ("PENDING", "PROCESSING")
+        ):
+            if job_status == "PENDING":
+                progress_percentage = max(float(live_progress.get("progress_percentage") or 0), 5.0)
+                current_operation = (
+                    "En cola — el worker tomará el trabajo en breve…"
+                    if not is_promote_job
+                    else "En cola — esperando promoción a producción…"
+                )
+                phase = "queued"
+            else:
+                progress_percentage = float(live_progress.get("progress_percentage") or 12.0)
+                current_operation = live_progress.get("current_operation") or (
+                    "Promoviendo a producción…" if is_promote_job else "Validando filas del archivo…"
+                )
+                phase = live_progress.get("phase") or (
+                    "promoting" if is_promote_job else "validating"
+                )
+            total_rows = int(live_progress.get("total_rows") or total_rows)
+            processed_rows = int(live_progress.get("rows_processed") or 0)
+            loaded_rows = int(live_progress.get("loaded_rows") or 0)
+            rejected_count = int(live_progress.get("rejected_rows") or 0)
+            chunks_processed = int(live_progress.get("chunks_processed") or chunks_processed)
+            chunks_total = int(live_progress.get("chunks_total") or chunks_total)
+            if is_promote_job and job_status == "PROCESSING":
+                promoted = int(metadata.get("promoted_rows") or 0)
+                promote_total = int(batch.records_count or total_rows or 1)
+                progress_percentage = max(
+                    progress_percentage,
+                    min(99.0, (promoted / max(promote_total, 1)) * 100),
+                )
+                processed_rows = promoted
+                loaded_rows = promoted
+                total_rows = promote_total
+                current_operation = (
+                    f"Promoviendo a producción ({promoted:,} de {promote_total:,} registros)…"
+                )
+                phase = "promoting"
+        elif active_promotion:
+            promo = _apply_active_promotion_progress(
+                metadata=metadata,
+                batch=batch,
+                live_progress=live_progress,
+                final_stats=final_stats,
+                job_status=job_status,
+            )
+            progress_percentage = promo["progress_percentage"]
+            current_operation = promo["current_operation"]
+            phase = promo["phase"]
+            total_rows = promo["total_rows"]
+            processed_rows = promo["processed_rows"]
+            loaded_rows = promo["loaded_rows"]
+            rejected_count = promo["rejected_count"]
+            chunks_processed = promo["chunks_processed"]
+            chunks_total = promo["chunks_total"]
         elif status == "COMPLETED":
             progress_percentage = 100
-            current_operation = "Processing complete"
+            current_operation = "Validación completada"
+            phase = "done"
+            loaded_rows = int(final_stats.get("total_inserted") or batch.records_count or 0)
+            rejected_count = int(final_stats.get("total_rejected") or 0)
+            processed_rows = loaded_rows + rejected_count
+            if not total_rows:
+                total_rows = processed_rows
         elif status == "PROMOTED":
             progress_percentage = 100
-            current_operation = "Promotion to Production complete"
+            promoted_inserted = int(metadata.get("promoted_inserted") or 0)
+            promoted_updated = int(metadata.get("promoted_updated") or 0)
+            loaded_rows = int(metadata.get("promoted_rows") or batch.records_count or 0)
+            if promoted_inserted == 0 and promoted_updated == 0 and loaded_rows > 0:
+                promoted_inserted = loaded_rows
+            current_operation = _format_promotion_summary(promoted_inserted, promoted_updated)
+            phase = "done"
+            rejected_count = int(final_stats.get("total_rejected") or 0)
+            processed_rows = loaded_rows
+            total_rows = loaded_rows + rejected_count
         elif status == "FAILED":
             progress_percentage = 0
-            current_operation = f"Failed: {batch.error_message}"
-        
-        # Get processed/total rows
-        total_rows = metadata.get("file_analysis", {}).get("estimated_total_rows", 0)
-        processed_rows = batch.records_count or 0
-        
-        # Get stats from metadata if available
-        processing_stats = metadata.get("processing_stats", {})
-        rejected_count = processing_stats.get("total_rejected", 0)
-        
+            current_operation = f"Error: {error_message or batch.error_message or 'Proceso fallido'}"
+            phase = "failed"
+        else:
+            progress_percentage = float(live_progress.get("progress_percentage") or 0)
+            current_operation = live_progress.get("current_operation") or current_operation
+            phase = live_progress.get("phase") or phase
+
+        if status == "COMPLETED" and processed_rows == 0 and batch.records_count and not active_promotion:
+            loaded_rows = int(batch.records_count)
+            rejected_count = int(final_stats.get("total_rejected") or rejected_count)
+            processed_rows = loaded_rows + rejected_count
+
+        is_successful = status in ("COMPLETED", "PROMOTED")
+
+        promoted_inserted = int(metadata.get("promoted_inserted") or 0)
+        promoted_updated = int(metadata.get("promoted_updated") or 0)
+        if status == "PROMOTED" and promoted_inserted == 0 and promoted_updated == 0 and loaded_rows > 0:
+            promoted_inserted = loaded_rows
+
         return {
             "batch_id": batch_id,
             "status": status,
-            "progress_percentage": progress_percentage,
+            "job_id": job_id,
+            "job_status": job_status,
+            "job_type": job_type,
+            "is_successful": is_successful,
+            "progress_percentage": round(progress_percentage, 1),
+            "phase": phase,
             "current_operation": current_operation,
             "total_rows": total_rows,
             "processed_rows": processed_rows,
-            "loaded_rows": processed_rows,
+            "loaded_rows": loaded_rows,
             "rejected_rows": rejected_count,
+            "promoted_inserted": promoted_inserted,
+            "promoted_updated": promoted_updated,
+            "promotion_summary": _format_promotion_summary(promoted_inserted, promoted_updated)
+            if status == "PROMOTED"
+            else None,
+            "chunks_processed": chunks_processed,
+            "chunks_total": chunks_total,
             "target_schema": metadata.get("target_schema"),
             "target_table": metadata.get("target_table"),
             "staging_table": batch.source_name,
             "started_at": batch.started_at.isoformat() if batch.started_at else None,
             "completed_at": batch.completed_at.isoformat() if batch.completed_at else None,
-            "error_message": batch.error_message,
-            "direct_load": metadata.get("direct_load", False)
+            "error_message": error_message or batch.error_message,
+            "direct_load": metadata.get("direct_load", False),
+            "auto_production": metadata.get("auto_production", False),
+            "progress_updated_at": live_progress.get("updated_at"),
         }
         
     except HTTPException:
@@ -1218,40 +1952,6 @@ async def get_processing_progress(
         logger.error(f"Error getting progress: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get progress: {str(e)}")
 
-
-
-# --- Helper Functions ---
-
-def create_job(
-    db: Session,
-    job_type: str,
-    payload: Dict[str, Any],
-    priority: int = 0
-) -> str:
-    """Create a background job in the queue"""
-    job_id = str(uuid.uuid4())
-    
-    try:
-        query = text("""
-            INSERT INTO staging_meta.job_queue 
-            (job_id, job_type, payload, priority, status)
-            VALUES (:job_id, :job_type, :payload, :priority, 'PENDING')
-        """)
-        
-        db.execute(query, {
-            "job_id": job_id,
-            "job_type": job_type,
-            "payload": json.dumps(payload, default=str),
-            "priority": priority
-        })
-        db.commit()
-        logger.info(f"Job created: {job_id} ({job_type})")
-        return job_id
-        
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Error creating job: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to create job: {str(e)}")
 
 
 # --- Promotion Endpoints ---
@@ -1266,7 +1966,13 @@ async def promote_batch(
     """
     try:
         # 1. Validate batch exists and is ready
-        batch = db.execute(text("SELECT status, metadata FROM staging_meta.batch_control WHERE batch_id = :batch_id"), {"batch_id": batch_id}).fetchone()
+        batch = db.execute(
+            text(
+                "SELECT status, metadata, records_count FROM staging_meta.batch_control "
+                "WHERE batch_id = :batch_id"
+            ),
+            {"batch_id": batch_id},
+        ).fetchone()
         
         if not batch:
             raise HTTPException(status_code=404, detail="Batch not found")
@@ -1301,20 +2007,39 @@ async def promote_batch(
             )
 
         # 3. Create Promotion Job
-        # Clear previous error message if retrying
-        db.execute(text("UPDATE staging_meta.batch_control SET error_message = NULL WHERE batch_id = :batch_id"), {"batch_id": batch_id})
+        # Clear previous error message if retrying; reset live progress for Step 4 UI
+        final_stats = metadata.get("processing_stats", {}) or {}
+        promote_total = int(
+            final_stats.get("total_inserted") or batch.records_count or 0
+        )
+        rows_already_promoted = int(metadata.get("promoted_rows") or 0)
+        metadata["processing_progress"] = _initial_promotion_progress(
+            promote_total=promote_total,
+            rows_processed=rows_already_promoted,
+            queued=True,
+        )
+
+        db.execute(text("""
+            UPDATE staging_meta.batch_control
+            SET error_message = NULL,
+                metadata = :metadata,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE batch_id = :batch_id
+        """), {"batch_id": batch_id, "metadata": json.dumps(metadata)})
         db.commit()
 
-        job_id = create_job(
-            db=db,
+        from data_staging.workers.job_queue import create_job as enqueue_job
+
+        job_id = enqueue_job(
+            database_url=str(settings.DATABASE_URL),
             job_type="PROMOTE_BATCH",
             payload={
                 "batch_id": batch_id,
                 "target_schema": target_schema,
                 "target_table": target_table,
-                "dedup_columns": metadata.get("dedup_columns", [])
+                "dedup_columns": metadata.get("dedup_columns", []),
             },
-            priority=10 # Higher priority
+            priority=10,
         )
         
         return {
@@ -1374,19 +2099,28 @@ async def resume_promotion(
 
         # 3. Create Promotion Job
         # Clear previous error message if retrying
-        db.execute(text("UPDATE staging_meta.batch_control SET error_message = NULL, status = 'PROCESSING' WHERE batch_id = :batch_id"), {"batch_id": batch_id})
+        db.execute(text("""
+            UPDATE staging_meta.batch_control
+            SET error_message = NULL,
+                status = 'PROCESSING',
+                started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE batch_id = :batch_id
+        """), {"batch_id": batch_id})
         db.commit()
 
-        job_id = create_job(
-            db=db,
+        from data_staging.workers.job_queue import create_job as enqueue_job
+
+        job_id = enqueue_job(
+            database_url=str(settings.DATABASE_URL),
             job_type="PROMOTE_BATCH",
             payload={
                 "batch_id": batch_id,
                 "target_schema": target_schema,
                 "target_table": target_table,
-                "dedup_columns": metadata.get("dedup_columns", [])
+                "dedup_columns": metadata.get("dedup_columns", []),
             },
-            priority=10 # Higher priority for resumes
+            priority=10,
         )
         
         return {
@@ -1399,6 +2133,64 @@ async def resume_promotion(
         raise
     except Exception as e:
         logger.error(f"Error resuming promotion: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/batch/{batch_id}/cancel")
+async def cancel_batch(
+    batch_id: str,
+    db: Session = Depends(get_database_session),
+):
+    """Cancel a batch and stop pending/processing background jobs."""
+    try:
+        batch = db.execute(
+            text("SELECT batch_id, status FROM staging_meta.batch_control WHERE batch_id = :batch_id"),
+            {"batch_id": batch_id},
+        ).fetchone()
+
+        if not batch:
+            raise HTTPException(status_code=404, detail="Batch not found")
+
+        if batch.status in ("PROMOTED", "CANCELLED"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"No se puede cancelar un batch en estado '{batch.status}'",
+            )
+
+        db.execute(
+            text("""
+                UPDATE staging_meta.job_queue
+                SET status = 'CANCELLED',
+                    error_message = 'Cancelled by user',
+                    completed_at = CURRENT_TIMESTAMP,
+                    started_at = NULL,
+                    worker_id = NULL
+                WHERE payload->>'batch_id' = :batch_id
+                  AND status IN ('PENDING', 'PROCESSING')
+            """),
+            {"batch_id": batch_id},
+        )
+
+        db.execute(
+            text("""
+                UPDATE staging_meta.batch_control
+                SET status = 'CANCELLED',
+                    error_message = COALESCE(error_message, 'Cancelado por el usuario'),
+                    completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE batch_id = :batch_id
+            """),
+            {"batch_id": batch_id},
+        )
+        db.commit()
+
+        return {"message": "Batch cancelled", "batch_id": batch_id, "status": "CANCELLED"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error cancelling batch {batch_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1427,27 +2219,43 @@ async def download_rejected_records(
             metadata = _json.loads(metadata)
 
         rejected_file_path = metadata.get("rejected_temp_file")
+        source_file_columns = metadata.get("source_file_columns") or []
 
-        if not rejected_file_path or not Path(rejected_file_path).exists():
+        from data_staging.utils.batch_staging_files import (
+            REJECTED_EXPORT_ERROR_COL,
+            iter_rejected_download_lines,
+            resolve_staging_path,
+        )
+
+        resolved_rejected = resolve_staging_path(rejected_file_path)
+
+        if not resolved_rejected or not resolved_rejected.exists():
             # Si no hay archivo = no hubo rechazados, devolver CSV vacío
             async def empty_csv():
-                yield "source_row_number\tvalidation_status\terror_details\traw_data\n"
+                yield "\ufeff"
+                import csv as _csv
+                import io as _io
+
+                buf = _io.StringIO()
+                _csv.writer(buf, delimiter=",").writerow([REJECTED_EXPORT_ERROR_COL])
+                yield buf.getvalue()
 
             return StreamingResponse(
                 empty_csv(),
-                media_type="text/csv",
+                media_type="text/csv; charset=utf-8",
                 headers={"Content-Disposition": f"attachment; filename=rejected_records_{batch_id}.csv"}
             )
 
-        # Streaming directo desde disco — sin cargar todo en memoria
         def stream_file():
-            with open(rejected_file_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    yield line
+            for line in iter_rejected_download_lines(
+                resolved_rejected,
+                source_file_columns=source_file_columns,
+            ):
+                yield line
 
         return StreamingResponse(
             stream_file(),
-            media_type="text/csv",
+            media_type="text/csv; charset=utf-8",
             headers={"Content-Disposition": f"attachment; filename=rejected_records_{batch_id}.csv"}
         )
 
@@ -1456,33 +2264,171 @@ async def download_rejected_records(
     except Exception as e:
         logger.error(f"Error downloading rejected records: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-@router.delete("/batch/{batch_id}")
-async def delete_batch(
+
+
+@router.get("/staging/batch/{batch_id}/valid/download")
+async def download_valid_records(
     batch_id: str,
     db: Session = Depends(get_database_session)
 ):
     """
-    Elimina un batch y todos sus datos relacionados (archivo, registros de staging, etc.)
+    Descarga los registros válidos desde el archivo Parquet/CSV en disco.
     """
     try:
-        batch = db.query(BatchControl).filter(BatchControl.batch_id == batch_id).first()
+        batch = db.execute(
+            text("SELECT metadata FROM staging_meta.batch_control WHERE batch_id = :batch_id"),
+            {"batch_id": batch_id}
+        ).fetchone()
+
         if not batch:
             raise HTTPException(status_code=404, detail="Batch not found")
 
-        # 1. Eliminar archivo físico si existe
-        if batch.file_path:
-            file_path = Path(batch.file_path)
-            if file_path.exists():
-                file_path.unlink()
+        metadata = batch.metadata or {}
+        if isinstance(metadata, str):
+            import json as _json
+            metadata = _json.loads(metadata)
 
-        # 2. El modelo BatchControl tiene cascade="all, delete-orphan",
-        # así que eliminar el batch limpiará staging_records, validation_logs, etc.
-        db.delete(batch)
+        from data_staging.utils.batch_staging_files import (
+            find_valid_records_file,
+            iter_valid_download_lines,
+        )
+
+        resolved_valid = find_valid_records_file(batch_id, metadata.get("valid_temp_file"))
+
+        if not resolved_valid or not resolved_valid.exists():
+            async def empty_csv():
+                yield "\ufeff"
+
+            return StreamingResponse(
+                empty_csv(),
+                media_type="text/csv; charset=utf-8",
+                headers={"Content-Disposition": f"attachment; filename=valid_records_{batch_id}.csv"}
+            )
+
+        def stream_file():
+            for line in iter_valid_download_lines(resolved_valid):
+                yield line
+
+        return StreamingResponse(
+            stream_file(),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f"attachment; filename=valid_records_{batch_id}.csv"}
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error downloading valid records: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/batch/{batch_id}")
+async def delete_batch(
+    batch_id: str,
+    db: Session = Depends(get_database_session),
+    current_user: TokenUser = Depends(get_current_user),
+):
+    """Elimina un batch y todos sus datos relacionados (archivo, jobs, etc.)."""
+    try:
+        where_clause, params = _batch_filters_where(organization_id=current_user.organization_id)
+        params["batch_id"] = batch_id
+        exists = db.execute(
+            text(f"""
+                SELECT 1 FROM staging_meta.batch_control bc
+                {where_clause}{_batch_id_exists_clause(where_clause)}
+            """),
+            params,
+        ).fetchone()
+        if not exists:
+            raise HTTPException(status_code=404, detail="Batch not found")
+
+        if not _delete_batch_record(db, batch_id):
+            raise HTTPException(status_code=404, detail="Batch not found")
         db.commit()
-
         return {"status": "success", "message": f"Batch {batch_id} deleted successfully"}
 
+    except HTTPException:
+        raise
     except Exception as e:
         db.rollback()
         logger.error(f"Error deleting batch {batch_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/batches/bulk-delete")
+async def bulk_delete_batches(
+    body: BulkDeleteRequest,
+    db: Session = Depends(get_database_session),
+    current_user: TokenUser = Depends(get_current_user),
+):
+    """Elimina varios batches por ID (solo de la organización del usuario)."""
+    if not body.batch_ids:
+        raise HTTPException(status_code=400, detail="batch_ids vacío")
+
+    not_found: List[str] = []
+    try:
+        where_clause, params = _batch_filters_where(
+            organization_id=current_user.organization_id
+        )
+        params["ids"] = body.batch_ids
+        id_clause = (
+            " AND bc.batch_id::text = ANY(:ids)"
+            if where_clause
+            else " WHERE bc.batch_id::text = ANY(:ids)"
+        )
+        rows = db.execute(
+            text(f"""
+                SELECT bc.batch_id, bc.source_name, bc.file_path, bc.metadata
+                FROM staging_meta.batch_control bc
+                {where_clause}{id_clause}
+            """),
+            params,
+        ).fetchall()
+        found = {str(r.batch_id) for r in rows}
+        not_found = [bid for bid in body.batch_ids if bid not in found]
+        deleted = _purge_batches_bulk(db, rows)
+        db.commit()
+        return {
+            "status": "success",
+            "deleted": deleted,
+            "not_found": not_found,
+            "message": f"{deleted} batch(es) eliminado(s)",
+        }
+    except Exception as e:
+        db.rollback()
+        logger.error("Error bulk delete batches: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/batches/delete-all")
+async def delete_all_batches(
+    body: BulkDeleteFiltersRequest,
+    db: Session = Depends(get_database_session),
+    current_user: TokenUser = Depends(get_current_user),
+):
+    """Elimina todos los batches que coincidan con filtros (organización del usuario)."""
+    try:
+        where_clause, params = _batch_filters_where(
+            status=body.status,
+            search=body.search,
+            organization_id=current_user.organization_id,
+        )
+        rows = db.execute(
+            text(f"""
+                SELECT bc.batch_id, bc.source_name, bc.file_path, bc.metadata
+                FROM staging_meta.batch_control bc
+                {where_clause}
+            """),
+            params,
+        ).fetchall()
+        deleted = _purge_batches_bulk(db, rows)
+        db.commit()
+        return {
+            "status": "success",
+            "deleted": deleted,
+            "message": f"{deleted} batch(es) eliminado(s)",
+        }
+    except Exception as e:
+        db.rollback()
+        logger.error("Error delete-all batches: %s", e)
         raise HTTPException(status_code=500, detail=str(e))

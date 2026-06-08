@@ -13,6 +13,52 @@ from typing import Optional, Callable, Dict, Any, List
 logger = logging.getLogger(__name__)
 
 
+def parse_job_payload(payload) -> Dict[str, Any]:
+    """Normalize job payload from DB (json/jsonb may arrive as str)."""
+    if payload is None:
+        return {}
+    if isinstance(payload, str):
+        return json.loads(payload)
+    if isinstance(payload, dict):
+        return payload
+    return {}
+
+
+def sync_batch_on_job_failure(
+    database_url: str,
+    payload,
+    error_message: str,
+    job_type: str,
+) -> None:
+    """Mark batch_control as FAILED when a background job dies permanently."""
+    data = parse_job_payload(payload)
+    batch_id = data.get("batch_id")
+    if not batch_id:
+        return
+
+    label = "Procesamiento" if job_type == "PROCESS_FILE" else "Promoción"
+    full_error = f"{label} falló: {error_message}"[:2000]
+
+    conn = psycopg2.connect(database_url)
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE staging_meta.batch_control
+            SET status = 'FAILED',
+                error_message = %s,
+                completed_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE batch_id = %s
+              AND status NOT IN ('PROMOTED', 'PARTIALLY_PROMOTED')
+            """,
+            (full_error, batch_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 class PostgresQueueWorker:
     """Worker que procesa jobs desde PostgreSQL."""
     
@@ -164,7 +210,7 @@ class PostgresQueueWorker:
         """Procesa un job."""
         job_id = job["job_id"]
         job_type = job["job_type"]
-        payload = job["payload"]
+        payload = parse_job_payload(job["payload"])
         
         logger.info(f"Worker {self.worker_id}: Processing job {job_id} ({job_type})")
         
@@ -184,7 +230,14 @@ class PostgresQueueWorker:
             
         except Exception as e:
             logger.error(f"Worker {self.worker_id}: Job {job_id} failed: {e}")
-            self._fail_job(job_id, str(e), job["retry_count"], job["max_retries"])
+            self._fail_job(
+                job_id,
+                str(e),
+                job["retry_count"],
+                job["max_retries"],
+                payload,
+                job_type,
+            )
     
     def _complete_job(self, job_id: str):
         """Marca un job como completado."""
@@ -201,7 +254,15 @@ class PostgresQueueWorker:
         finally:
             conn.close()
     
-    def _fail_job(self, job_id: str, error_message: str, retry_count: int, max_retries: int):
+    def _fail_job(
+        self,
+        job_id: str,
+        error_message: str,
+        retry_count: int,
+        max_retries: int,
+        payload: Dict[str, Any],
+        job_type: str,
+    ):
         """Marca un job como fallido o lo reintenta."""
         conn = psycopg2.connect(self.database_url)
         try:
@@ -229,6 +290,17 @@ class PostgresQueueWorker:
                 WHERE job_id = %s
             """, (new_status, new_retry, error_message, new_status, job_id))
             conn.commit()
+
+            if new_status == 'FAILED':
+                try:
+                    sync_batch_on_job_failure(
+                        self.database_url,
+                        payload,
+                        error_message,
+                        job_type,
+                    )
+                except Exception as sync_err:
+                    logger.error(f"Job {job_id}: Could not sync batch failure: {sync_err}")
         finally:
             conn.close()
 

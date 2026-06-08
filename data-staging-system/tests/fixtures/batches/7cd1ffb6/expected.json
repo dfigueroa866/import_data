@@ -1,0 +1,71 @@
+{
+  "batch_id": "7cd1ffb6-71a7-48e2-80c1-f38d25667342",
+  "raw_rows": 509,
+  "aggregated_rows": 143,
+  "process_type": "Monthly",
+  "unique_keys": [
+    "organization_id",
+    "location_code",
+    "sku",
+    "period_start",
+    "granularity"
+  ],
+  "aggregation": {
+    "orig_qty": 41319.0,
+    "agg_qty": 41319.0,
+    "group_checksum": "e49fe4eb50e1a66e"
+  },
+  "processing_stats": {
+    "total_inserted": 143,
+    "total_rejected": 0
+  },
+  "promotion_stats": {
+    "promoted_inserted": 143,
+    "promoted_updated": 0,
+    "promoted_rows": 143
+  },
+  "valid_parquet_schema": [
+    "organization_id",
+    "location_code",
+    "sku",
+    "period_start",
+    "quantity",
+    "pieces",
+    "granularity",
+    "source",
+    "sales_channel"
+  ],
+  "column_mappings": {
+    "sku": {
+      "target": "sku",
+      "auto_mapped": true,
+      "default_value": ""
+    },
+    "pieces": {
+      "target": "pieces",
+      "auto_mapped": true,
+      "default_value": ""
+    },
+    "location": {
+      "target": "location_code",
+      "auto_mapped": true,
+      "default_value": ""
+    },
+    "quantity": {
+      "target": "quantity",
+      "auto_mapped": true,
+      "default_value": ""
+    },
+    "start_date": {
+      "target": "period_start",
+      "auto_mapped": true,
+      "default_value": ""
+    },
+    "__fixed_organization_id__": {
+      "target": "organization_id",
+      "is_fixed": true,
+      "auto_mapped": false,
+      "default_value": "34b43c21-7aac-4f1c-b6b4-df8d29f7b091"
+    }
+  }
+}

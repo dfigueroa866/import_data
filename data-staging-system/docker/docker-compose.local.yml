@@ -1,0 +1,31 @@
+# PostgreSQL local para desarrollo (coincide con DATABASE_URL app:app@127.0.0.1:5432/app)
+#
+# Requisito: Docker Desktop en ejecución
+#
+#   docker compose -f docker/docker-compose.local.yml up -d
+#   docker compose -f docker/docker-compose.local.yml logs -f postgres
+#
+# Detener:
+#   docker compose -f docker/docker-compose.local.yml down
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: data-staging-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: app
+    volumes:
+      - data-staging-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  data-staging-pg-data:

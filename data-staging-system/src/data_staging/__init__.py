@@ -1,5 +1,5 @@
 """
-Data Staging System - Production-ready data processing platform
+M8 Connect - Production-ready data processing platform
 
 A comprehensive system for ingesting, validating, and processing data
 from multiple sources with enterprise-grade quality controls.

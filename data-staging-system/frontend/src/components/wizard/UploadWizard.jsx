@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
+import { Link } from 'react-router-dom';
 import './UploadWizard.css';
 import Step1Upload from './Step1Upload';
+import { HISTORY_TABLE_META, HISTORY_TARGET_SCHEMA, HISTORY_TARGET_TABLE } from '../../constants/historyConfig';
 import Step2Mapping from './Step2Mapping';
 import Step3Preview from './Step3Preview';
 import Step4Process from './Step4Process';
@@ -8,12 +10,14 @@ import Step4Process from './Step4Process';
 const UploadWizard = () => {
     const [currentStep, setCurrentStep] = useState(1);
     const [wizardData, setWizardData] = useState({
+        loadMode: 'history',
         // Step 1 data
         file: null,
         fileName: '',
         fileHeaders: [],
-        selectedSchema: '',
-        selectedTable: '',
+        selectedSchema: HISTORY_TARGET_SCHEMA,
+        selectedTable: HISTORY_TARGET_TABLE,
+        historyTableMeta: HISTORY_TABLE_META,
         sourceName: '',
         batchId: '',
         processType: '',
@@ -57,11 +61,13 @@ const UploadWizard = () => {
         setProcessingComplete(false);
         setHasError(false);
         setWizardData({
+            loadMode: 'history',
             file: null,
             fileName: '',
             fileHeaders: [],
-            selectedSchema: '',
-            selectedTable: '',
+            selectedSchema: HISTORY_TARGET_SCHEMA,
+            selectedTable: HISTORY_TARGET_TABLE,
+            historyTableMeta: HISTORY_TABLE_META,
             sourceName: '',
             batchId: '',
             processType: '',
@@ -73,6 +79,11 @@ const UploadWizard = () => {
             validationSummary: null,
             processing: false
         });
+    };
+
+    const handleProcessingStart = () => {
+        setHasError(false);
+        setProcessingComplete(false);
     };
 
     const handleProcessComplete = () => {
@@ -120,6 +131,7 @@ const UploadWizard = () => {
                         resetWizard={resetWizard}
                         onComplete={handleProcessComplete}
                         onError={handleProcessError}
+                        onProcessingStart={handleProcessingStart}
                     />
                 );
             default:
@@ -130,8 +142,11 @@ const UploadWizard = () => {
     return (
         <div className="upload-wizard">
             <div className="wizard-header">
-                <h1>Upload Data</h1>
-                <p>Import data to staging in 4 easy steps</p>
+                <Link to="/upload" className="wizard-back-link">
+                    ← Volver a tipo de carga
+                </Link>
+                <h1>Carga de historia</h1>
+                <p>Importa ventas históricas a public.sales_history en 4 pasos</p>
             </div>
 
             {/* Stepper */}
