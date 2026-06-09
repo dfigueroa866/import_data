@@ -11,6 +11,37 @@ import pyarrow.parquet as pq
 
 from data_staging.utils.encoding_utils import encoding_for_polars, repair_mojibake_text
 
+_MOJIBAKE_SAMPLE_ROWS = 1000
+
+
+def _columns_needing_mojibake_repair(part: pl.DataFrame) -> list[str]:
+    """Sample Utf8 columns and repair only those with suspicious bytes."""
+    utf8_cols = [c for c in part.columns if part.schema[c] == pl.Utf8]
+    if not utf8_cols:
+        return []
+    sample = part.select(utf8_cols).head(_MOJIBAKE_SAMPLE_ROWS)
+    needs_repair: list[str] = []
+    for col in utf8_cols:
+        series = sample[col]
+        if series.is_null().all():
+            continue
+        joined = "\n".join(str(v) for v in series.to_list() if v is not None)
+        if repair_mojibake_text(joined) != joined:
+            needs_repair.append(col)
+    return needs_repair
+
+
+def _apply_mojibake_repair(part: pl.DataFrame) -> pl.DataFrame:
+    cols = _columns_needing_mojibake_repair(part)
+    if not cols:
+        return part
+    return part.with_columns(
+        [
+            pl.col(col).map_elements(repair_mojibake_text, return_dtype=pl.Utf8)
+            for col in cols
+        ]
+    )
+
 
 def count_csv_rows(file_path: Path, delimiter: str = ",", encoding: str = "utf-8") -> int:
     pl_encoding = encoding_for_polars(encoding)
@@ -59,11 +90,7 @@ def iter_csv_chunks(
 
     for record_batch in reader:
         part = pl.from_arrow(record_batch)
-        for col in part.columns:
-            if part.schema[col] == pl.Utf8:
-                part = part.with_columns(
-                    pl.col(col).map_elements(repair_mojibake_text, return_dtype=pl.Utf8)
-                )
+        part = _apply_mojibake_repair(part)
         offset = 0
         while offset < part.height:
             take = min(chunk_size - buffer_rows, part.height - offset)

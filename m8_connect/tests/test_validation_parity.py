@@ -2,26 +2,67 @@
 
 from __future__ import annotations
 
+import json
+from unittest.mock import patch
+
 import polars as pl
 import pytest
 
 from data_staging.workers.file_processor import validate_and_prepare_chunk
-from data_staging.utils.vectorized_validation import validate_chunk_vectorized
+from data_staging.utils.vectorized_validation import (
+    ChunkValidationResult,
+    validate_chunk_vectorized,
+)
+
+
+def _flatten_validation_result(
+    result: ChunkValidationResult,
+    *,
+    batch_id: str,
+    chunk_idx: int,
+    chunk_size: int,
+    total_cols: int,
+) -> list:
+    records = list(result.failed_records)
+    start_row_num = (chunk_idx * chunk_size) + 1
+    for i, raw_row in enumerate(result.passed_df.to_dicts()):
+        null_count = sum(1 for v in raw_row.values() if v is None)
+        quality_score = 100.0 - (null_count * 100.0 / total_cols) if total_cols > 0 else 100.0
+        records.append(
+            {
+                "batch_id": batch_id,
+                "source_row_number": start_row_num + i,
+                "source_file_data": json.dumps({}),
+                "raw_data": json.dumps(raw_row),
+                "processed_data": json.dumps(raw_row),
+                "validation_status": "PASSED",
+                "data_quality_score": quality_score,
+                "is_duplicate": False,
+                "error_details": None,
+            }
+        )
+    return records
 
 
 def _run_both(df, **kwargs):
-    legacy = validate_and_prepare_chunk(chunk_df=df.clone(), **kwargs)
-    vector = validate_chunk_vectorized(
-        chunk_df=df.clone(),
-        batch_id=kwargs["batch_id"],
-        chunk_idx=kwargs.get("chunk_idx", 0),
-        chunk_size=250_000,
-        column_mapping=kwargs.get("column_mapping"),
-        target_column_types=kwargs.get("target_column_types"),
-        not_null_columns=kwargs.get("not_null_columns"),
-        foreign_keys_data=kwargs.get("foreign_keys_data"),
-        history_mode=kwargs.get("history_mode", False),
-    )
+    chunk_size = kwargs.get("chunk_size", 250_000)
+    with patch(
+        "data_staging.utils.vectorized_validation.use_vectorized_validation",
+        return_value=False,
+    ):
+        legacy = validate_and_prepare_chunk(chunk_df=df.clone(), **kwargs)
+
+    prepped = validate_and_prepare_chunk(chunk_df=df.clone(), **kwargs)
+    if isinstance(prepped, ChunkValidationResult):
+        vector = _flatten_validation_result(
+            prepped,
+            batch_id=kwargs["batch_id"],
+            chunk_idx=kwargs.get("chunk_idx", 0),
+            chunk_size=chunk_size,
+            total_cols=len(df.columns),
+        )
+    else:
+        vector = prepped
     return legacy, vector
 
 

@@ -75,7 +75,30 @@ class Settings(BaseSettings):
     )
     API_DB_POOL_SIZE: int = Field(25, description="Pool SQLAlchemy del API (run_app)")
     API_DB_MAX_OVERFLOW: int = Field(45, description="Overflow del pool SQLAlchemy del API")
-    USE_VECTORIZED_VALIDATION: bool = Field(False, description="Validación vectorizada (feature flag)")
+    USE_VECTORIZED_VALIDATION: bool = Field(
+        True,
+        description="Validación vectorizada Polars (paridad con legacy vía tests)",
+    )
+    PROMOTION_BATCH_SIZE: int = Field(
+        100_000, description="Filas por chunk en PROMOTE_BATCH"
+    )
+    PROMOTION_METADATA_EVERY_CHUNKS: int = Field(
+        3, description="Persistir metadata promoted_rows cada N chunks UPSERT"
+    )
+    PROMOTION_WORK_MEM: str = Field(
+        "256MB", description="work_mem de sesión durante promoción masiva"
+    )
+    PROMOTION_SYNCHRONOUS_COMMIT: bool = Field(
+        False,
+        description="Si False, SET synchronous_commit=off en worker de promoción",
+    )
+    USE_VALIDATION_MULTIPROCESSING: bool = Field(
+        False,
+        description="Validación en paralelo (solo sin claves compuestas; ver parallel_validation)",
+    )
+    VALIDATION_WORKER_PROCESSES: int = Field(
+        2, description="Procesos para validación paralela opcional"
+    )
     
     # === CONFIGURACIÓN DE ETL ===
     ETL_BATCH_SIZE: int = Field(10000, description="Tamaño de lote para procesamiento ETL")

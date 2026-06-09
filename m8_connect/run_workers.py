@@ -29,6 +29,7 @@ print(f"DEBUG: LOADED FILE_PROCESSOR FROM: {fp.__file__}")
 
 try:
     from data_staging.config import settings
+    from data_staging.utils.parallel_validation import configure_polars_threads
     from data_staging.workers.job_queue import PostgresQueueWorker
     from data_staging.workers.file_processor import process_file_job
     from data_staging.workers.promotion_worker import promote_batch_job
@@ -38,6 +39,7 @@ except ImportError as e:
 
 
 def start_workers(num_workers: int = 3):
+    configure_polars_threads()
     """Inicia múltiples workers."""
     workers = []
     threads = []

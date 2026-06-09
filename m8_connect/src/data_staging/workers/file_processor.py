@@ -23,6 +23,11 @@ from data_staging.utils.batch_staging_files import (
     rejected_records_path,
     valid_records_path,
 )
+from data_staging.utils.pipeline_timing import PipelineTimer, persist_timing_metadata
+from data_staging.utils.parallel_validation import (
+    configure_polars_threads,
+    should_use_parallel_validation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -608,6 +613,9 @@ def process_file_job(payload: Dict[str, Any]):
         )
         conn.commit()
 
+        configure_polars_threads()
+        process_timer = PipelineTimer("process")
+
         stats = process_file_in_chunks(
             conn=conn,
             progress_conn=progress_conn,
@@ -638,6 +646,7 @@ def process_file_job(payload: Dict[str, Any]):
             sku_resolver=sku_resolver,
             resolve_sku_id=resolve_sku_id,
             source_extension=source_extension if history_mode else None,
+            pipeline_timer=process_timer,
         )
 
         # 4. COMPLETED si el archivo se procesó (aunque todo sea rechazado); FAILED solo si vacío/error
@@ -668,12 +677,14 @@ def process_file_job(payload: Dict[str, Any]):
             stats["total_inserted"],
             json.dumps({
                 "processing_stats": stats,
-                "completed_at": datetime.now().isoformat()
+                "completed_at": datetime.now().isoformat(),
+                **process_timer.snapshot(),
             }),
             error_msg,
             batch_id
         ))
         conn.commit()
+        persist_timing_metadata(conn, batch_id, process_timer.snapshot())
         
         logger.info(f"Batch {batch_id} finished with status {final_status}: {stats['total_inserted']} records processed")
         
@@ -754,6 +765,7 @@ def process_file_in_chunks(
     source_extension: Optional[str] = None,
     progress_conn: Optional[psycopg2.extensions.connection] = None,
     parquet_writer: Optional[ValidRecordsParquetWriter] = None,
+    pipeline_timer: Optional[PipelineTimer] = None,
 ) -> Dict[str, Any]:
     """
     Procesa archivo en chunks usando Polars.
@@ -821,8 +833,10 @@ def process_file_in_chunks(
             row_offset = 0
             for chunk_df in chunk_source:
                 end_idx = min(row_offset + len(chunk_df), total_rows)
+                with (pipeline_timer.phase("read_ms") if pipeline_timer else _null_phase()):
+                    chunk_to_process = chunk_df
                 stats = process_single_chunk(
-                    chunk_df,
+                    chunk_to_process,
                     chunk_idx=chunks_processed,
                     batch_id=batch_id,
                     staging_table=staging_table,
@@ -856,6 +870,7 @@ def process_file_in_chunks(
                     progress_chunks_total=chunks_total,
                     progress_conn=progress_conn,
                     parquet_writer=parquet_writer,
+                    pipeline_timer=pipeline_timer,
                 )
                 _finalize_chunk(stats, end_idx)
                 row_offset = end_idx
@@ -913,6 +928,7 @@ def process_file_in_chunks(
                     progress_chunks_total=chunks_total,
                     progress_conn=progress_conn,
                     parquet_writer=parquet_writer,
+                    pipeline_timer=pipeline_timer,
                 )
                 
                 total_inserted += stats['inserted']
@@ -1012,77 +1028,140 @@ def process_single_chunk(
     progress_chunks_total: int = 1,
     progress_conn: Optional[psycopg2.extensions.connection] = None,
     parquet_writer: Optional[ValidRecordsParquetWriter] = None,
+    pipeline_timer: Optional[PipelineTimer] = None,
 ):
     """Helper to process a single chunk dataframe."""
-    logger.info("--- WORKER CODE VERSION CHECK: NO TRUNCATE_ARG ---")
-    
-    # Validar y preparar registros
-    processed_records = validate_and_prepare_chunk(
-        chunk_df=chunk_df,
-        batch_id=batch_id,
-        chunk_idx=chunk_idx,
-        source_name=source_name,
-        column_mapping=column_mapping,
-        selected_columns=selected_columns,
-        target_column_types=target_column_types,
-        not_null_columns=not_null_columns,
-        foreign_keys_data=foreign_keys_data,
-        catalog_table=catalog_table,
-        composite_unique_keys=composite_unique_keys,
-        seen_composite_keys=seen_composite_keys,
-        history_mode=history_mode,
-        process_type=process_type,
-        organization_id=organization_id,
-        sku_resolver=sku_resolver,
-        resolve_sku_id=resolve_sku_id,
-        source_extension=source_extension,
-        progress_conn=progress_conn or conn,
-        progress_total_rows=progress_total_rows,
-        progress_row_offset=progress_row_offset,
-        progress_loaded_before=progress_loaded_before,
-        progress_rejected_before=progress_rejected_before,
-        progress_chunks_processed=progress_chunks_processed,
-        progress_chunks_total=progress_chunks_total,
-    )
-    
-    # Carga Directa (COPY a Prod) vs Temp File (Post-Staging Validation)
-    
-    passed_records = [r for r in processed_records if r["validation_status"] == "PASSED"]
-    failed_records = [r for r in processed_records if r["validation_status"] == "FAILED"]
-    
+    from data_staging.utils.vectorized_validation import ChunkValidationResult
+    from data_staging.utils.parallel_validation import should_use_parallel_validation
+
+    if should_use_parallel_validation(composite_unique_keys):
+        logger.debug(
+            "USE_VALIDATION_MULTIPROCESSING=true: using Polars multi-threading "
+            "(set POLARS_MAX_THREADS for CPU parallelism)"
+        )
+
+    with (pipeline_timer.phase("validate_ms") if pipeline_timer else _null_phase()):
+        validation_out = validate_and_prepare_chunk(
+            chunk_df=chunk_df,
+            batch_id=batch_id,
+            chunk_idx=chunk_idx,
+            source_name=source_name,
+            column_mapping=column_mapping,
+            selected_columns=selected_columns,
+            target_column_types=target_column_types,
+            not_null_columns=not_null_columns,
+            foreign_keys_data=foreign_keys_data,
+            catalog_table=catalog_table,
+            composite_unique_keys=composite_unique_keys,
+            seen_composite_keys=seen_composite_keys,
+            history_mode=history_mode,
+            process_type=process_type,
+            organization_id=organization_id,
+            sku_resolver=sku_resolver,
+            resolve_sku_id=resolve_sku_id,
+            source_extension=source_extension,
+            progress_conn=progress_conn or conn,
+            progress_total_rows=progress_total_rows,
+            progress_row_offset=progress_row_offset,
+            progress_loaded_before=progress_loaded_before,
+            progress_rejected_before=progress_rejected_before,
+            progress_chunks_processed=progress_chunks_processed,
+            progress_chunks_total=progress_chunks_total,
+            pipeline_timer=pipeline_timer,
+        )
+
+    if isinstance(validation_out, ChunkValidationResult):
+        passed_df = validation_out.passed_df
+        failed_records = validation_out.failed_records
+        chunk_quality = validation_out.avg_quality
+        passed_records: List[Dict[str, Any]] = []
+    else:
+        processed_records = validation_out
+        passed_records = [r for r in processed_records if r["validation_status"] == "PASSED"]
+        failed_records = [r for r in processed_records if r["validation_status"] == "FAILED"]
+        passed_df = None
+        chunk_quality = (
+            float(np.mean([r["data_quality_score"] for r in processed_records]))
+            if processed_records
+            else 0.0
+        )
+
     db_inserted = 0
     db_rejected = 0
 
+    def _resolve_target_cols() -> List[str]:
+        if passed_df is not None and not passed_df.is_empty():
+            return [
+                c
+                for c in passed_df.columns
+                if not str(c).startswith("_")
+                and (not target_column_types or c in target_column_types)
+            ]
+        if history_mode and passed_records:
+            sample = json.loads(passed_records[0]["processed_data"])
+            return [
+                k
+                for k in sample.keys()
+                if not target_column_types or k in target_column_types
+            ]
+        target_cols = list(column_mapping.keys()) if column_mapping else []
+        if target_column_types:
+            target_cols = [c for c in target_cols if c in target_column_types]
+        if not target_cols and column_mapping:
+            target_cols = list(column_mapping.keys())
+        return target_cols
+
     if direct_load and target_schema and target_table:
-        # Modo ultra-rápido: pasa a prod directo
-        if passed_records:
-            target_cols = [c for c in column_mapping.keys() if c in target_column_types]
+        if passed_df is not None and not passed_df.is_empty():
+            target_cols = _resolve_target_cols()
+            if target_cols:
+                ingestor = DirectIngestor(conn, target_schema, target_table, target_cols)
+                for row in passed_df.select(target_cols).to_dicts():
+                    ingestor.add_records(
+                        [
+                            {
+                                "validation_status": "PASSED",
+                                "processed_data": json.dumps(row, default=str),
+                            }
+                        ]
+                    )
+                ingestor.flush()
+                db_inserted = passed_df.height
+        elif passed_records:
+            target_cols = [c for c in column_mapping.keys() if c in (target_column_types or {})]
             if target_cols:
                 ingestor = DirectIngestor(conn, target_schema, target_table, target_cols)
                 ingestor.add_records(passed_records)
                 ingestor.flush()
                 db_inserted = len(passed_records)
     elif valid_temp_file:
-        # Modo estándar: escribir PASSED a Parquet local
-        if passed_records:
-            if history_mode and passed_records:
-                sample = json.loads(passed_records[0]["processed_data"])
-                target_cols = [
-                    k
-                    for k in sample.keys()
-                    if not target_column_types or k in target_column_types
-                ]
-            else:
-                target_cols = list(column_mapping.keys()) if column_mapping else []
-                if target_column_types:
-                    target_cols = [c for c in target_cols if c in target_column_types]
-                if not target_cols and column_mapping:
-                    target_cols = list(column_mapping.keys())
-
-            written = append_valid_records_parquet(
-                valid_temp_file, passed_records, target_cols, writer=parquet_writer
-            )
-            db_inserted = written
+        target_cols = _resolve_target_cols()
+        with (pipeline_timer.phase("parquet_write_ms") if pipeline_timer else _null_phase()):
+            if passed_df is not None and not passed_df.is_empty():
+                start_row = (chunk_idx * CHUNK_SIZE_RECORDS) + 1
+                if parquet_writer is not None:
+                    db_inserted = parquet_writer.write_polars_chunk(
+                        passed_df,
+                        batch_id=batch_id,
+                        start_row_number=start_row,
+                        target_cols=target_cols,
+                    )
+                else:
+                    writer = ValidRecordsParquetWriter(valid_temp_file, target_cols)
+                    try:
+                        db_inserted = writer.write_polars_chunk(
+                            passed_df,
+                            batch_id=batch_id,
+                            start_row_number=start_row,
+                            target_cols=target_cols,
+                        )
+                    finally:
+                        writer.close()
+            elif passed_records:
+                written = append_valid_records_parquet(
+                    valid_temp_file, passed_records, target_cols, writer=parquet_writer
+                )
+                db_inserted = written
 
     # FALLIDOS → archivo en disco (columna A = línea+errores; resto = columnas del archivo)
     if failed_records and rejected_temp_file is not None:
@@ -1103,18 +1182,22 @@ def process_single_chunk(
         )
         db_rejected = len(failed_records)
 
-    # Calcular stats reales basados en validación
+    valid_count = db_inserted if passed_df is not None else len(passed_records)
     invalid_count = len(failed_records)
-    valid_count = len(passed_records)
-    
-    # Calcular score promedio
-    chunk_quality = np.mean([r["data_quality_score"] for r in processed_records]) if processed_records else 0
-    
+
     return {
         "inserted": valid_count,
         "rejected": invalid_count,
-        "avg_quality": chunk_quality
+        "avg_quality": chunk_quality,
     }
+
+
+class _null_phase:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
 
 
 def _resolve_row_column(row: Dict[str, Any], col: str) -> Optional[str]:
@@ -1180,6 +1263,7 @@ def validate_and_prepare_chunk(
     progress_rejected_before: int = 0,
     progress_chunks_processed: int = 0,
     progress_chunks_total: int = 1,
+    pipeline_timer: Optional[PipelineTimer] = None,
 ) -> List[Dict[str, Any]]:
     """
     Valida y prepara registros de un chunk.
@@ -1265,25 +1349,27 @@ def validate_and_prepare_chunk(
 
     if catalog_table:
         mapped_cols = frozenset(column_mapping.keys()) if column_mapping else None
-        chunk_df = apply_catalog_transforms_polars(
-            chunk_df, catalog_table, mapped_columns=mapped_cols
-        )
+        with (pipeline_timer.phase("transform_ms") if pipeline_timer else _null_phase()):
+            chunk_df = apply_catalog_transforms_polars(
+                chunk_df, catalog_table, mapped_columns=mapped_cols
+            )
 
     if history_mode and organization_id:
         from data_staging.services.history.history_transforms import apply_history_transforms_polars
 
-        chunk_df = apply_history_transforms_polars(
-            chunk_df,
-            organization_id=organization_id,
-            process_type=process_type,
-            source_extension=source_extension,
-            sku_resolver=sku_resolver,
-            resolve_sku_id=resolve_sku_id,
-        )
+        with (pipeline_timer.phase("transform_ms") if pipeline_timer else _null_phase()):
+            chunk_df = apply_history_transforms_polars(
+                chunk_df,
+                organization_id=organization_id,
+                process_type=process_type,
+                source_extension=source_extension,
+                sku_resolver=sku_resolver,
+                resolve_sku_id=resolve_sku_id,
+            )
 
     from data_staging.utils.vectorized_validation import use_vectorized_validation
 
-    if use_vectorized_validation() and history_mode:
+    if use_vectorized_validation():
         from data_staging.utils.vectorized_validation import validate_chunk_vectorized
 
         return validate_chunk_vectorized(
@@ -1297,6 +1383,9 @@ def validate_and_prepare_chunk(
             foreign_keys_data=foreign_keys_data,
             history_mode=history_mode,
             original_rows=original_rows,
+            catalog_table=catalog_table,
+            composite_unique_keys=composite_unique_keys,
+            seen_composite_keys=seen_composite_keys,
         )
     
     # 3. Preparar registros
@@ -1319,8 +1408,8 @@ def validate_and_prepare_chunk(
     start_row_num = (chunk_idx * CHUNK_SIZE_RECORDS) + 1
     
     # DEBUG: Log available columns vs target schema
-    logger.info(f"Chunk columns: {chunk_df.columns}")
-    logger.info(f"Target schema keys: {list(target_column_types.keys())}")
+    logger.debug(f"Chunk columns: {chunk_df.columns}")
+    logger.debug(f"Target schema keys: {list((target_column_types or {}).keys())}")
 
     if progress_conn and progress_total_rows > 0:
         report_processing_progress(

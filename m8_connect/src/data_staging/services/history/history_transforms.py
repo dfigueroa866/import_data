@@ -49,6 +49,44 @@ def build_sales_history_id(
     return str(uuid.UUID(digest))
 
 
+def _is_empty_expr(col: str) -> pl.Expr:
+    c = pl.col(col)
+    return c.is_null() | (c.cast(pl.Utf8, strict=False).str.strip_chars() == "")
+
+
+def _normalize_period_start_expr(col: str = "period_start") -> pl.Expr:
+    return (
+        pl.col(col)
+        .map_elements(_normalize_period_start, return_dtype=pl.Utf8)
+        .alias(col)
+    )
+
+
+def _build_id_from_fields(
+    org_id: Any,
+    location_code: Any,
+    sku: Any,
+    sku_code: Any,
+    period_start: Any,
+    granularity: Any,
+    existing_id: Any,
+    fallback_org: str,
+) -> Optional[str]:
+    if not is_empty_value(existing_id):
+        return str(existing_id)
+
+    sku_key = str(sku or sku_code or "")
+    location_key = str(location_code or "")
+    org = str(org_id or fallback_org or "")
+    period_str = _normalize_period_start(period_start)
+    period_dt = parse_flexible_datetime(period_str) if period_str else None
+    gran = str(granularity or "")
+
+    if not period_dt or not sku_key or not location_key or not gran:
+        return None
+    return build_sales_history_id(org, location_key, sku_key, period_dt, gran)
+
+
 class SkuCodeResolver:
     """Cache organization_id + código SKU → identificador en public.skus (PK dinámica)."""
 
@@ -80,7 +118,6 @@ class SkuCodeResolver:
         if cache_key in self._cache:
             return self._cache[cache_key]
 
-        # Identificadores SQL validados por introspección (no input de usuario)
         query = (
             f'SELECT "{self._pk_column}"::text FROM "{self._schema}"."{self._table}" '
             f'WHERE organization_id = %s AND LOWER("{self._code_column}") = LOWER(%s) '
@@ -126,7 +163,6 @@ def _resolve_sku_id_from_row(
             if resolved:
                 return resolved
 
-    # Mapeo a columna «sku» en sales_history pero tabla con sku_id: resolver vía catálogo
     if sku_resolver and not is_empty_value(record.get("sku")):
         resolved = sku_resolver.resolve(record.get("sku"))
         if resolved:
@@ -145,65 +181,87 @@ def apply_history_transforms_polars(
     resolve_sku_id: bool = False,
 ) -> pl.DataFrame:
     """
-    Enriquece filas mapeadas: conserva columnas mapeadas y rellena id, granularity,
-    source, organization_id cuando aplica. No escribe sku_id (columna retirada).
+    Enriquece filas mapeadas con expresiones Polars (sin bucle pandas).
     """
     if df.is_empty():
         return df
 
-    pdf = df.to_pandas()
-    rows_out: List[Dict[str, Any]] = []
     default_granularity = (
         granularity_for_process_type(process_type) if process_type else None
     )
     default_source = (source_extension or "").strip().lower() or None
+    out = df
 
-    for row in pdf.to_dict(orient="records"):
-        record = dict(row)
-
-        # Normalizar sku_code lógico → columna sku si aplica
-        if is_empty_value(record.get("sku")) and not is_empty_value(record.get("sku_code")):
-            record["sku"] = record.get("sku_code")
-
-        period_str = _normalize_period_start(record.get("period_start"))
-        record["period_start"] = period_str
-        period_dt = parse_flexible_datetime(period_str) if period_str else None
-
-        if default_granularity:
-            record["granularity"] = default_granularity
-
-        org_id = record.get("organization_id") or organization_id
-        if org_id:
-            record["organization_id"] = str(org_id)
-
-        if default_source:
-            record["source"] = default_source
-
-        # sales_channel fijo SELL_IN (validar antes si venía mapeado desde archivo)
-        if "sales_channel" in record and not is_empty_value(record.get("sales_channel")):
-            if not is_valid_sales_channel(record.get("sales_channel")):
-                record["_sales_channel_invalid"] = record.get("sales_channel")
-        record["sales_channel"] = HISTORY_SALES_CHANNEL_VALUE
-
-        sku_key = str(record.get("sku") or record.get("sku_code") or "")
-        location_key = str(record.get("location_code") or "")
-        if (
-            is_empty_value(record.get("id"))
-            and period_dt
-            and sku_key
-            and location_key
-            and record.get("granularity")
-        ):
-            record["id"] = build_sales_history_id(
-                str(org_id or organization_id),
-                location_key,
-                sku_key,
-                period_dt,
-                str(record["granularity"]),
+    if "sku_code" in out.columns:
+        if "sku" in out.columns:
+            out = out.with_columns(
+                pl.when(_is_empty_expr("sku"))
+                .then(pl.col("sku_code"))
+                .otherwise(pl.col("sku"))
+                .alias("sku")
             )
+        else:
+            out = out.with_columns(pl.col("sku_code").alias("sku"))
 
-        rows_out.append(record)
+    if "period_start" in out.columns:
+        out = out.with_columns(_normalize_period_start_expr("period_start"))
 
-    import pandas as pd
+    if default_granularity:
+        out = out.with_columns(pl.lit(default_granularity).alias("granularity"))
 
-    return pl.from_pandas(pd.DataFrame(rows_out))
+    if organization_id:
+        if "organization_id" in out.columns:
+            out = out.with_columns(
+                pl.when(_is_empty_expr("organization_id"))
+                .then(pl.lit(str(organization_id)))
+                .otherwise(pl.col("organization_id").cast(pl.Utf8))
+                .alias("organization_id")
+            )
+        else:
+            out = out.with_columns(pl.lit(str(organization_id)).alias("organization_id"))
+
+    if default_source:
+        out = out.with_columns(pl.lit(default_source).alias("source"))
+
+    if "sales_channel" in out.columns:
+        out = out.with_columns(
+            pl.when(
+                ~_is_empty_expr("sales_channel")
+                & ~pl.col("sales_channel").map_elements(
+                    is_valid_sales_channel, return_dtype=pl.Boolean
+                )
+            )
+            .then(pl.col("sales_channel"))
+            .otherwise(None)
+            .alias("_sales_channel_invalid")
+        )
+    out = out.with_columns(pl.lit(HISTORY_SALES_CHANNEL_VALUE).alias("sales_channel"))
+
+    id_cols = ["organization_id", "location_code", "sku", "sku_code", "period_start", "granularity", "id"]
+    present = [c for c in id_cols if c in out.columns]
+    if len(present) >= 4:
+        out = out.with_columns(
+            pl.struct(present).map_elements(
+                lambda row: _build_id_from_fields(
+                    row.get("organization_id"),
+                    row.get("location_code"),
+                    row.get("sku"),
+                    row.get("sku_code"),
+                    row.get("period_start"),
+                    row.get("granularity"),
+                    row.get("id"),
+                    organization_id,
+                ),
+                return_dtype=pl.Utf8,
+            ).alias("id")
+        )
+
+    if resolve_sku_id and sku_resolver:
+        rows = out.to_dicts()
+        sku_ids = [
+            _resolve_sku_id_from_row(row, sku_resolver, resolve_sku_id=resolve_sku_id)
+            for row in rows
+        ]
+        out = out.with_columns(pl.Series("sku_id", sku_ids))
+
+    return out

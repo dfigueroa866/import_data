@@ -112,6 +112,19 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
         return cellVal !== null && cellVal !== undefined ? String(cellVal) : '';
     };
 
+    const formatMetric = (value) => {
+        if (value === null || value === undefined || Number.isNaN(Number(value))) {
+            return '0';
+        }
+        return Number(value).toLocaleString('es-MX');
+    };
+
+    const rowsSaved = Math.max(0, (val.total_rows || 0) - (val.grouped_rows || 0));
+    const qtyIntegrityOk = (val.diff_qty || 0) === 0;
+    const totalIntegrityOk = Math.abs(val.diff_total || 0) <= 0.001;
+    const locIntegrityOk = (val.loc_diff_count || 0) === 0;
+    const skuIntegrityOk = (val.dmd_unit_diff_count || 0) === 0;
+
     const targetTableName =
         previewData?.target_table ||
         wizardData?.selectedTable ||
@@ -168,11 +181,11 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
 
     return (
         <div className="step3-preview">
-            <h2>{isCatalog ? 'Paso 3: Vista previa del mapeo' : 'Step 3: Preview & Validate'}</h2>
+            <h2>{isCatalog ? 'Paso 3: Vista previa del mapeo' : 'Paso 3: Vista previa y validación'}</h2>
             <p className="step-description">
                 {isCatalog
                     ? 'Revisa cómo quedarán los datos tras el mapeo. La validación contra la tabla destino se hará en el siguiente paso, antes de promover a producción.'
-                    : 'Review transformed data and validation results before continuing.'}
+                    : 'Revisa la agregación, integridad de cantidades y una muestra de filas antes de procesar.'}
             </p>
 
             {isCatalog ? (
@@ -197,111 +210,174 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                             ⚠ Error de Validación: {val.error_detail}
                         </div>
                     )}
-                    <div className="preview-summary validation-grid">
-                        <div className="summary-card stat-pair">
-                            <div className="card-label">Filas</div>
-                            <div className="stat-compare">
-                                <div className="stat-box">
-                                    <span className="value">{val.total_rows?.toLocaleString() || 0}</span>
-                                    <span className="label">Originales</span>
-                                </div>
-                                <span className="arrow">→</span>
-                                <div className="stat-box">
-                                    <span className="value">{val.grouped_rows?.toLocaleString() || 0}</span>
-                                    <span className="label">Agrupadas</span>
-                                </div>
+                    <div className="history-metrics-panel">
+                        <div className="history-metrics-panel__header">
+                            <h3 className="history-metrics-panel__title">Resumen de agregación</h3>
+                            <div className="history-metrics-panel__badges">
+                                {val.compression_factor > 1 && (
+                                    <span className="metric-chip metric-chip--info">
+                                        Compresión {val.compression_factor}x
+                                    </span>
+                                )}
+                                <span
+                                    className={`metric-chip ${
+                                        qtyIntegrityOk && totalIntegrityOk
+                                            ? 'metric-chip--success'
+                                            : 'metric-chip--danger'
+                                    }`}
+                                >
+                                    {qtyIntegrityOk && totalIntegrityOk
+                                        ? 'Integridad OK'
+                                        : 'Revisar integridad'}
+                                </span>
                             </div>
                         </div>
 
-                        <div className={`summary-card stat-pair ${val.diff_qty !== 0 ? 'error-state' : ''}`}>
-                            <div className="card-label">Cantidades (QTY)</div>
-                            <div className="stat-compare">
-                                <div className="stat-box">
-                                    <span className="value">{val.orig_qty?.toLocaleString() || 0}</span>
-                                    <span className="label">Original</span>
+                        <div className="history-kpi-grid">
+                            <article className="history-kpi">
+                                <span className="history-kpi__label">Filas</span>
+                                <div className="history-kpi__flow">
+                                    <div className="history-kpi__value-block">
+                                        <strong>{formatMetric(val.total_rows)}</strong>
+                                        <small>originales</small>
+                                    </div>
+                                    <span className="history-kpi__arrow" aria-hidden="true">→</span>
+                                    <div className="history-kpi__value-block history-kpi__value-block--accent">
+                                        <strong>{formatMetric(val.grouped_rows)}</strong>
+                                        <small>agrupadas</small>
+                                    </div>
                                 </div>
-                                <span className="arrow">→</span>
-                                <div className="stat-box">
-                                    <span className="value">{val.agg_qty?.toLocaleString() || 0}</span>
-                                    <span className="label">Agrupado</span>
+                                {rowsSaved > 0 && (
+                                    <span className="history-kpi__delta">
+                                        −{formatMetric(rowsSaved)} filas consolidadas
+                                    </span>
+                                )}
+                            </article>
+
+                            <article className={`history-kpi ${!qtyIntegrityOk ? 'history-kpi--warn' : ''}`}>
+                                <span className="history-kpi__label">Cantidad (QTY)</span>
+                                <div className="history-kpi__flow">
+                                    <div className="history-kpi__value-block">
+                                        <strong>{formatMetric(val.orig_qty)}</strong>
+                                        <small>original</small>
+                                    </div>
+                                    <span className="history-kpi__arrow" aria-hidden="true">→</span>
+                                    <div className="history-kpi__value-block">
+                                        <strong>{formatMetric(val.agg_qty)}</strong>
+                                        <small>agrupado</small>
+                                    </div>
                                 </div>
-                            </div>
-                            {val.diff_qty !== 0 && (
-                                <div className="diff-alert">
-                                    Diferencia: {val.diff_qty}
-                                </div>
+                                {!qtyIntegrityOk && (
+                                    <span className="history-kpi__delta history-kpi__delta--danger">
+                                        Δ {formatMetric(val.diff_qty)}
+                                    </span>
+                                )}
+                            </article>
+
+                            {val.orig_total > 0 && (
+                                <article className={`history-kpi ${!totalIntegrityOk ? 'history-kpi--warn' : ''}`}>
+                                    <span className="history-kpi__label">Monto total</span>
+                                    <div className="history-kpi__flow">
+                                        <div className="history-kpi__value-block">
+                                            <strong>${formatMetric(val.orig_total)}</strong>
+                                            <small>original</small>
+                                        </div>
+                                        <span className="history-kpi__arrow" aria-hidden="true">→</span>
+                                        <div className="history-kpi__value-block">
+                                            <strong>${formatMetric(val.agg_total)}</strong>
+                                            <small>agrupado</small>
+                                        </div>
+                                    </div>
+                                    {!totalIntegrityOk && (
+                                        <span className="history-kpi__delta history-kpi__delta--danger">
+                                            Δ ${formatMetric(val.diff_total)}
+                                        </span>
+                                    )}
+                                </article>
                             )}
                         </div>
-
-                        {val.orig_total > 0 && (
-                            <div className={`summary-card stat-pair ${Math.abs(val.diff_total || 0) > 0.001 ? 'error-state' : ''}`}>
-                                <div className="card-label">Montos (Total Price)</div>
-                                <div className="stat-compare">
-                                    <div className="stat-box">
-                                        <span className="value">${val.orig_total?.toLocaleString() || 0}</span>
-                                        <span className="label">Original</span>
-                                    </div>
-                                    <span className="arrow">→</span>
-                                    <div className="stat-box">
-                                        <span className="value">${val.agg_total?.toLocaleString() || 0}</span>
-                                        <span className="label">Agrupado</span>
-                                    </div>
-                                </div>
-                                {Math.abs(val.diff_total || 0) > 0.001 && (
-                                    <div className="diff-alert">
-                                        Diferencia: ${val.diff_total}
-                                    </div>
-                                )}
-                            </div>
-                        )}
                     </div>
 
-                    {/* Detailed Validation Report */}
-                    <div className="validation-report">
-                        <h4 className="report-title">Reporte de Agregación y Validaciones (Basado en weekly.py)</h4>
-                        <div className="report-grid">
-                            <div className="report-item">
-                                <span className="report-label">Filas Originales Previas a Limpieza (Drop NA):</span>
-                                <span className="report-value">{val.df_before_dropna?.toLocaleString() || val.total_rows?.toLocaleString() || 0}</span>
-                            </div>
-                            <div className="report-item text-danger">
-                                <span className="report-label">Filas Eliminadas por Nulos en Columnas Requeridas:</span>
-                                <span className="report-value">- {val.dropped_rows?.toLocaleString() || 0}</span>
-                            </div>
-                            <div className="report-item">
-                                <span className="report-label">Filas Limpias Efectivas previas al agrupamiento:</span>
-                                <span className="report-value">{val.df_after_dropna?.toLocaleString() || val.total_rows?.toLocaleString() || 0}</span>
-                            </div>
+                    <div className="validation-report validation-report--compact">
+                        <div className="validation-report__header">
+                            <h4 className="validation-report__title">Detalle de validaciones</h4>
+                            <span className="validation-report__subtitle">
+                                Pipeline weekly · {processType || 'Weekly'}
+                            </span>
+                        </div>
 
-                            <hr className="report-divider" />
+                        <div className="validation-report__sections">
+                            <section className="report-section">
+                                <h5 className="report-section__title">Limpieza</h5>
+                                <dl className="report-dl">
+                                    <div className="report-dl__row">
+                                        <dt>Filas antes de drop NA</dt>
+                                        <dd>{formatMetric(val.df_before_dropna ?? val.total_rows)}</dd>
+                                    </div>
+                                    <div className="report-dl__row report-dl__row--muted">
+                                        <dt>Eliminadas por nulos</dt>
+                                        <dd>−{formatMetric(val.dropped_rows)}</dd>
+                                    </div>
+                                    <div className="report-dl__row">
+                                        <dt>Filas limpias</dt>
+                                        <dd>{formatMetric(val.df_after_dropna ?? val.total_rows)}</dd>
+                                    </div>
+                                </dl>
+                            </section>
 
-                            <div className="report-item">
-                                <span className="report-label">Total de Filas Consolidadas post-agrupamiento:</span>
-                                <span className="report-value">{val.grouped_rows?.toLocaleString() || 0}</span>
-                            </div>
-                            <div className="report-item text-success">
-                                <span className="report-label">Ahorro de Filas (Filas Comprimidas):</span>
-                                <span className="report-value">- {val.consolidated_rows?.toLocaleString() || 0}</span>
-                            </div>
-                            <div className="report-item text-info">
-                                <span className="report-label">Factor métrico de compresión:</span>
-                                <span className="report-value badge">{val.compression_factor || 1}x</span>
-                            </div>
+                            <section className="report-section">
+                                <h5 className="report-section__title">Agregación</h5>
+                                <dl className="report-dl">
+                                    <div className="report-dl__row">
+                                        <dt>Filas consolidadas</dt>
+                                        <dd>{formatMetric(val.grouped_rows)}</dd>
+                                    </div>
+                                    <div className="report-dl__row report-dl__row--success">
+                                        <dt>Filas comprimidas</dt>
+                                        <dd>−{formatMetric(val.consolidated_rows)}</dd>
+                                    </div>
+                                    <div className="report-dl__row">
+                                        <dt>Factor de compresión</dt>
+                                        <dd>
+                                            <span className="report-pill">{val.compression_factor || 1}x</span>
+                                        </dd>
+                                    </div>
+                                </dl>
+                            </section>
 
-                            <hr className="report-divider" />
-
-                            <div className="report-item">
-                                <span className="report-label">Validación de Integridad de Sumatorias por Location (Loc):</span>
-                                <span className={`report-status ${val.loc_diff_count === 0 ? 'success' : 'error'}`}>
-                                    {val.loc_diff_count === 0 ? 'OK ✓ No hay diferencias' : `${val.loc_diff_count} anomalías detectadas ⚠`}
-                                </span>
-                            </div>
-                            <div className="report-item">
-                                <span className="report-label">Validación de Integridad de Sumatorias por Producto (dmd_unit):</span>
-                                <span className={`report-status ${val.dmd_unit_diff_count === 0 ? 'success' : 'error'}`}>
-                                    {val.dmd_unit_diff_count === 0 ? 'OK ✓ No hay diferencias' : `${val.dmd_unit_diff_count} anomalías detectadas ⚠`}
-                                </span>
-                            </div>
+                            <section className="report-section">
+                                <h5 className="report-section__title">Integridad</h5>
+                                <dl className="report-dl">
+                                    <div className="report-dl__row">
+                                        <dt>Sumatorias por locación</dt>
+                                        <dd>
+                                            <span
+                                                className={`report-status ${
+                                                    locIntegrityOk ? 'success' : 'error'
+                                                }`}
+                                            >
+                                                {locIntegrityOk
+                                                    ? 'Sin diferencias'
+                                                    : `${val.loc_diff_count} anomalías`}
+                                            </span>
+                                        </dd>
+                                    </div>
+                                    <div className="report-dl__row">
+                                        <dt>Sumatorias por producto</dt>
+                                        <dd>
+                                            <span
+                                                className={`report-status ${
+                                                    skuIntegrityOk ? 'success' : 'error'
+                                                }`}
+                                            >
+                                                {skuIntegrityOk
+                                                    ? 'Sin diferencias'
+                                                    : `${val.dmd_unit_diff_count} anomalías`}
+                                            </span>
+                                        </dd>
+                                    </div>
+                                </dl>
+                            </section>
                         </div>
                     </div>
                 </>

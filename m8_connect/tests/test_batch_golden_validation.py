@@ -4,7 +4,18 @@ from __future__ import annotations
 
 import polars as pl
 
+from data_staging.utils.vectorized_validation import ChunkValidationResult
 from data_staging.workers.file_processor import validate_and_prepare_chunk
+
+
+def _count_validation_results(records) -> tuple[int, int]:
+    if isinstance(records, ChunkValidationResult):
+        passed = records.passed_df.height
+        failed = len(records.failed_records)
+        return passed, failed
+    passed = sum(1 for r in records if r["validation_status"] == "PASSED")
+    failed = sum(1 for r in records if r["validation_status"] == "FAILED")
+    return passed, failed
 
 
 def test_golden_validation_passed_count(
@@ -48,8 +59,7 @@ def test_golden_validation_passed_count(
         organization_id=org_id,
     )
 
-    passed = sum(1 for r in records if r["validation_status"] == "PASSED")
-    failed = sum(1 for r in records if r["validation_status"] == "FAILED")
+    passed, failed = _count_validation_results(records)
     expected_passed = golden_expected["processing_stats"]["total_inserted"]
     expected_failed = golden_expected["processing_stats"]["total_rejected"] or 0
 

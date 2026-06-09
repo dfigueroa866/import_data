@@ -114,6 +114,31 @@ class ValidRecordsParquetWriter:
         frame = df.to_pandas()
         return self.write_dataframe(frame)
 
+    def write_polars_chunk(
+        self,
+        df: pl.DataFrame,
+        *,
+        batch_id: str,
+        start_row_number: int,
+        target_cols: Optional[List[str]] = None,
+    ) -> int:
+        """Write validated Polars rows directly (no JSON roundtrip)."""
+        import polars as pl
+
+        if df.is_empty():
+            return 0
+        cols = target_cols or self.target_cols
+        if not cols:
+            cols = [c for c in df.columns if not str(c).startswith("_")]
+        export = df.select([c for c in cols if c in df.columns])
+        export = export.with_columns(
+            pl.lit(batch_id).alias("_batch_id_"),
+            pl.arange(start_row_number, start_row_number + export.height).alias(
+                "_source_row_number_"
+            ),
+        )
+        return self.write_polars(export)
+
     def write_passed_records(
         self,
         passed_records: List[Dict[str, Any]],

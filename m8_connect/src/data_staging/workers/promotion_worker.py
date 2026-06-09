@@ -16,13 +16,24 @@ from data_staging.utils.batch_staging_files import (
     is_parquet_valid_file,
     metadata_merge_expr,
 )
+from data_staging.utils.pipeline_timing import PipelineTimer, persist_timing_metadata
+from data_staging.utils.promotion_bulk import (
+    build_upsert_from_staging_sql,
+    build_values_upsert_sql,
+    copy_frame_to_staging,
+    ensure_staging_table,
+    frame_to_tuples,
+)
 from data_staging.workers.file_processor import report_processing_progress
 
 logger = logging.getLogger(__name__)
 
-PROMOTION_BATCH_SIZE = 50000
+PROMOTION_BATCH_SIZE = int(getattr(settings, "PROMOTION_BATCH_SIZE", 100_000))
 PROMOTION_PROGRESS_EVERY_CHUNKS = int(
     getattr(settings, "PROMOTION_PROGRESS_EVERY_CHUNKS", 3)
+)
+PROMOTION_METADATA_EVERY_CHUNKS = int(
+    getattr(settings, "PROMOTION_METADATA_EVERY_CHUNKS", 3)
 )
 
 
@@ -244,7 +255,7 @@ def _build_insert_context(
     metadata: Dict[str, Any],
     target_schema: str,
     target_table: str,
-) -> Tuple[List[str], Dict[str, str], Dict[str, str]]:
+) -> Tuple[List[str], Dict[str, str], Dict[str, str], Dict[str, str], List[List[str]]]:
     wizard_mappings = metadata.get("column_mappings", {})
     target_columns: List[str] = []
     for _file_col, config in wizard_mappings.items():
@@ -279,13 +290,19 @@ def _build_insert_context(
 
     cursor.execute(
         """
-        SELECT column_name, data_type
+        SELECT column_name, data_type, udt_name
         FROM information_schema.columns
         WHERE LOWER(table_schema) = LOWER(%s) AND LOWER(table_name) = LOWER(%s)
         """,
         (target_schema, target_table),
     )
-    db_columns = {row[0]: row[1] for row in cursor.fetchall()}
+    db_columns: Dict[str, str] = {}
+    db_udt_names: Dict[str, str] = {}
+    for row in cursor.fetchall():
+        col_name, data_type, udt_name = row[0], row[1], row[2]
+        db_columns[col_name] = data_type
+        if udt_name:
+            db_udt_names[col_name] = udt_name
     db_columns_lower = {k.lower(): k for k in db_columns.keys()}
 
     valid_db_target_cols: List[str] = []
@@ -312,7 +329,7 @@ def _build_insert_context(
     from data_staging.services.history.history_schema import discover_unique_indexes
 
     unique_indexes = discover_unique_indexes(cursor, target_schema, target_table)
-    return valid_db_target_cols, db_columns, db_columns_lower, unique_indexes
+    return valid_db_target_cols, db_columns, db_columns_lower, db_udt_names, unique_indexes
 
 
 def _prepare_insert_query(
@@ -378,6 +395,14 @@ def _uses_upsert_update(conflict_clause: str) -> bool:
     return "DO UPDATE" in (conflict_clause or "").upper()
 
 
+def _fetch_upsert_counts(cursor) -> Tuple[int, int, int]:
+    row = cursor.fetchone()
+    if not row:
+        return 0, 0, 0
+    affected, inserted, updated = int(row[0]), int(row[1]), int(row[2])
+    return affected, inserted, updated
+
+
 def _execute_promotion_batch(
     cursor,
     insert_query: str,
@@ -387,45 +412,89 @@ def _execute_promotion_batch(
 ) -> Tuple[int, int, int]:
     """
     Ejecuta un lote de INSERT/UPSERT y devuelve (filas_afectadas, insertadas, actualizadas).
+    Usa CTE agregado para contadores exactos sin transferir una fila por registro a Python.
     """
     if not chunk_data:
         return 0, 0, 0
 
-    if _uses_upsert_update(conflict_clause):
-        sql = insert_query.rstrip() + "\nRETURNING (xmax = 0) AS is_insert"
-        rows = psycopg2.extras.execute_values(
-            cursor,
-            sql,
-            chunk_data,
-            template=template_values,
-            page_size=10000,
-            fetch=True,
-        )
-        inserted = sum(1 for row in rows if row[0])
-        updated = len(rows) - inserted
-        return len(rows), inserted, updated
-
-    if conflict_clause and "DO NOTHING" in conflict_clause.upper():
-        sql = insert_query.rstrip() + "\nRETURNING true AS is_insert"
-        rows = psycopg2.extras.execute_values(
-            cursor,
-            sql,
-            chunk_data,
-            template=template_values,
-            page_size=10000,
-            fetch=True,
-        )
-        return len(chunk_data), len(rows), 0
-
+    sql = build_values_upsert_sql(insert_query, conflict_clause)
     psycopg2.extras.execute_values(
         cursor,
-        insert_query,
+        sql,
         chunk_data,
         template=template_values,
         page_size=10000,
     )
-    n = len(chunk_data)
-    return n, n, 0
+    return _fetch_upsert_counts(cursor)
+
+
+def _execute_staging_promotion_batch(
+    cursor,
+    target_schema: str,
+    target_table: str,
+    insert_cols: List[str],
+    staging_cols: List[str],
+    conflict_clause: str,
+    frame: pd.DataFrame,
+    data_cols: List[str],
+    *,
+    include_imported_at: bool,
+    db_columns: Optional[Dict[str, str]] = None,
+    db_udt_names: Optional[Dict[str, str]] = None,
+) -> Tuple[int, int, int]:
+    """COPY chunk to temp table, then UPSERT with aggregated RETURNING counts."""
+    ensure_staging_table(cursor, staging_cols)
+    copied = copy_frame_to_staging(cursor, frame, data_cols, staging_cols)
+    if copied == 0:
+        return 0, 0, 0
+    sql = build_upsert_from_staging_sql(
+        target_schema,
+        target_table,
+        insert_cols,
+        staging_cols,
+        conflict_clause,
+        include_imported_at=include_imported_at,
+        db_columns=db_columns,
+        db_udt_names=db_udt_names,
+    )
+    cursor.execute(sql)
+    return _fetch_upsert_counts(cursor)
+
+
+def _persist_promotion_chunk_metadata(
+    conn,
+    cursor,
+    batch_id: str,
+    metadata: Dict[str, Any],
+    *,
+    chunks_processed: int,
+    force: bool = False,
+) -> None:
+    if (
+        not force
+        and PROMOTION_METADATA_EVERY_CHUNKS > 1
+        and chunks_processed % PROMOTION_METADATA_EVERY_CHUNKS != 0
+    ):
+        return
+    cursor.execute(
+        f"""
+        UPDATE staging_meta.batch_control
+        SET metadata = {metadata_merge_expr("%s::jsonb")},
+            updated_at = CURRENT_TIMESTAMP
+        WHERE batch_id = %s
+        """,
+        (json.dumps(metadata), batch_id),
+    )
+    conn.commit()
+
+
+def _apply_promotion_session_tuning(cursor) -> None:
+    cursor.execute("SET statement_timeout = 0;")
+    work_mem = getattr(settings, "PROMOTION_WORK_MEM", "256MB")
+    if work_mem:
+        cursor.execute(f"SET work_mem = '{work_mem}';")
+    if not getattr(settings, "PROMOTION_SYNCHRONOUS_COMMIT", False):
+        cursor.execute("SET synchronous_commit = off;")
 
 
 def _merge_promotion_metadata(
@@ -519,17 +588,14 @@ def _promote_from_tsv(
                     promoted_inserted=promoted_inserted,
                     promoted_updated=promoted_updated,
                 )
-                cursor.execute(
-                    f"""
-                    UPDATE staging_meta.batch_control
-                    SET metadata = {metadata_merge_expr("%s::jsonb")},
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE batch_id = %s
-                    """,
-                    (json.dumps(metadata), batch_id),
-                )
-                conn.commit()
                 chunks_processed += 1
+                _persist_promotion_chunk_metadata(
+                    conn,
+                    cursor,
+                    batch_id,
+                    metadata,
+                    chunks_processed=chunks_processed,
+                )
                 report_promotion_progress(
                     conn,
                     batch_id,
@@ -553,17 +619,15 @@ def _promote_from_tsv(
                 promoted_inserted=promoted_inserted,
                 promoted_updated=promoted_updated,
             )
-            cursor.execute(
-                f"""
-                UPDATE staging_meta.batch_control
-                SET metadata = {metadata_merge_expr("%s::jsonb")},
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE batch_id = %s
-                """,
-                (json.dumps(metadata), batch_id),
-            )
-            conn.commit()
             chunks_processed += 1
+            _persist_promotion_chunk_metadata(
+                conn,
+                cursor,
+                batch_id,
+                metadata,
+                chunks_processed=chunks_processed,
+                force=True,
+            )
             report_promotion_progress(
                 conn,
                 batch_id,
@@ -591,6 +655,8 @@ def _promote_from_parquet(
     promote_total: int,
     catalog_slug: Optional[str] = None,
     unique_indexes: Optional[List[List[str]]] = None,
+    db_udt_names: Optional[Dict[str, str]] = None,
+    timer: Optional[PipelineTimer] = None,
 ) -> Tuple[int, int, int]:
     """Returns (rows_processed, inserted, updated)."""
     promoted_inserted = int(metadata.get("promoted_inserted") or 0)
@@ -598,8 +664,6 @@ def _promote_from_parquet(
     chunks_processed = total_inserted // PROMOTION_BATCH_SIZE if total_inserted else 0
 
     import pyarrow.parquet as pq
-
-    from data_staging.services.catalog.catalog_transforms import coalesce_empty_to_none
 
     pf = pq.ParquetFile(valid_path)
     total_frame_rows = pf.metadata.num_rows
@@ -611,13 +675,14 @@ def _promote_from_parquet(
     skip = total_inserted
     is_history = _is_history_promotion(metadata, target_schema, target_table, load_type)
     effective_load_type = "history" if is_history else load_type
-    insert_query = None
-    template_values = None
-    conflict_clause = None
-    data_cols: List[str] = []
+    insert_cols: List[str] = []
+    staging_cols: List[str] = []
+    conflict_clause = ""
+    include_imported_at = False
 
     for batch in pf.iter_batches(batch_size=PROMOTION_BATCH_SIZE):
-        frame = batch.to_pandas()
+        with (timer.phase("parquet_read_ms") if timer else _noop_phase()):
+            frame = batch.to_pandas()
         if skip >= len(frame):
             skip -= len(frame)
             continue
@@ -636,9 +701,9 @@ def _promote_from_parquet(
         if not data_cols:
             raise ValueError("No promotable columns found in Parquet file.")
 
-        if insert_query is None:
+        if not insert_cols:
             logger.info("Promotion columns from file: %s", ", ".join(data_cols))
-            insert_query, template_values, _file_col_indices, _insert_cols, conflict_clause = (
+            _insert_query, _template_values, _file_col_indices, insert_cols, conflict_clause = (
                 _prepare_insert_query(
                     valid_db_target_cols,
                     db_columns,
@@ -652,17 +717,25 @@ def _promote_from_parquet(
                     unique_indexes=unique_indexes,
                 )
             )
+            staging_cols = [c.strip('"') for c in insert_cols if c.strip('"') != "imported_at"]
+            include_imported_at = "imported_at" in db_columns
 
-        chunk_data: List[tuple] = []
-        for _, row in frame.iterrows():
-            chunk_data.append(
-                tuple(coalesce_empty_to_none(row[col]) for col in data_cols)
+        with (timer.phase("upsert_ms") if timer else _noop_phase()):
+            _aff, ins, upd = _execute_staging_promotion_batch(
+                cursor,
+                target_schema,
+                target_table,
+                insert_cols,
+                staging_cols,
+                conflict_clause,
+                frame,
+                data_cols,
+                include_imported_at=include_imported_at,
+                db_columns=db_columns,
+                db_udt_names=db_udt_names,
             )
-
-        _aff, ins, upd = _execute_promotion_batch(
-            cursor, insert_query, template_values, chunk_data, conflict_clause
-        )
-        total_inserted += len(chunk_data)
+        chunk_len = len(frame)
+        total_inserted += chunk_len
         promoted_inserted += ins
         promoted_updated += upd
         conn.commit()
@@ -672,16 +745,15 @@ def _promote_from_parquet(
             promoted_inserted=promoted_inserted,
             promoted_updated=promoted_updated,
         )
-        cursor.execute(
-            f"""
-            UPDATE staging_meta.batch_control
-            SET metadata = {metadata_merge_expr("%s::jsonb")}
-            WHERE batch_id = %s
-            """,
-            (json.dumps(metadata), batch_id),
-        )
-        conn.commit()
         chunks_processed += 1
+        with (timer.phase("metadata_commit_ms") if timer else _noop_phase()):
+            _persist_promotion_chunk_metadata(
+                conn,
+                cursor,
+                batch_id,
+                metadata,
+                chunks_processed=chunks_processed,
+            )
         report_promotion_progress(
             conn,
             batch_id,
@@ -691,6 +763,14 @@ def _promote_from_parquet(
         )
 
     return total_inserted, promoted_inserted, promoted_updated
+
+
+class _noop_phase:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
 
 
 def promote_batch_job(payload: Dict[str, Any]):
@@ -711,10 +791,11 @@ def promote_batch_job(payload: Dict[str, Any]):
     )
     conn.autocommit = False
     valid_path: Optional[Path] = None
+    promo_timer = PipelineTimer("promotion")
 
     try:
         cursor = conn.cursor()
-        cursor.execute("SET statement_timeout = 0;")
+        _apply_promotion_session_tuning(cursor)
 
         cursor.execute(
             "SELECT metadata, source_name, records_count FROM staging_meta.batch_control WHERE batch_id = %s",
@@ -777,7 +858,7 @@ def promote_batch_job(payload: Dict[str, Any]):
         elif not valid_path.is_file():
             logger.warning(f"Valid records file missing on disk: {valid_path}")
 
-        valid_db_target_cols, db_columns, db_columns_lower, unique_indexes = (
+        valid_db_target_cols, db_columns, db_columns_lower, db_udt_names, unique_indexes = (
             _build_insert_context(cursor, metadata, target_schema, target_table)
         )
 
@@ -822,6 +903,8 @@ def promote_batch_job(payload: Dict[str, Any]):
                         promote_total,
                         catalog_slug=upsert_catalog,
                         unique_indexes=unique_indexes,
+                        db_udt_names=db_udt_names,
+                        timer=promo_timer,
                     )
                 else:
                     total_inserted, promoted_inserted, promoted_updated = _promote_from_tsv(
@@ -901,6 +984,7 @@ def promote_batch_job(payload: Dict[str, Any]):
             promoted_updated=promoted_updated,
         )
         promotion_payload["promoted_at"] = "NOW()"
+        promotion_payload.update(promo_timer.snapshot())
 
         cursor.execute(
             f"""
@@ -915,7 +999,7 @@ def promote_batch_job(payload: Dict[str, Any]):
             (json.dumps(promotion_payload), batch_id),
         )
         conn.commit()
-        logger.info("Promotion complete.")
+        persist_timing_metadata(conn, batch_id, promo_timer.snapshot())
 
         try:
             os.remove(valid_path)

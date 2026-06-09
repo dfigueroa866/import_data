@@ -130,6 +130,10 @@ def capture(batch_id: str, out_dir: Optional[Path] = None) -> Path:
             "total_rejected": processing_stats.get("total_rejected"),
         },
         "promotion_stats": promotion,
+        "process_timing_ms": meta.get("process_timing_ms"),
+        "process_timing_total_ms": meta.get("process_timing_total_ms"),
+        "promotion_timing_ms": meta.get("promotion_timing_ms"),
+        "promotion_timing_total_ms": meta.get("promotion_timing_total_ms"),
         "valid_parquet_schema": list(agg_df.columns) if agg_df is not None else [],
         "column_mappings": meta.get("column_mappings"),
     }
