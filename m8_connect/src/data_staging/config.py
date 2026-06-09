@@ -80,13 +80,13 @@ class Settings(BaseSettings):
         description="Validación vectorizada Polars (paridad con legacy vía tests)",
     )
     PROMOTION_BATCH_SIZE: int = Field(
-        100_000, description="Filas por chunk en PROMOTE_BATCH"
+        250_000, description="Filas por chunk en PROMOTE_BATCH"
     )
     PROMOTION_METADATA_EVERY_CHUNKS: int = Field(
         3, description="Persistir metadata promoted_rows cada N chunks UPSERT"
     )
     PROMOTION_WORK_MEM: str = Field(
-        "256MB", description="work_mem de sesión durante promoción masiva"
+        "512MB", description="work_mem de sesión durante promoción masiva"
     )
     PROMOTION_SYNCHRONOUS_COMMIT: bool = Field(
         False,
@@ -98,6 +98,18 @@ class Settings(BaseSettings):
     )
     VALIDATION_WORKER_PROCESSES: int = Field(
         2, description="Procesos para validación paralela opcional"
+    )
+    PARALLEL_VALIDATION_MIN_ROWS: int = Field(
+        500_000,
+        description="Mínimo de filas para activar validación multiproceso",
+    )
+    ARROW_COPY_MIN_ROWS: int = Field(
+        10_000,
+        description="Usar COPY PyArrow solo desde este número de filas por chunk",
+    )
+    VECTORIZED_ID_MIN_ROWS: int = Field(
+        10_000,
+        description="Generación vectorizada de id solo en chunks >= este tamaño",
     )
     
     # === CONFIGURACIÓN DE ETL ===

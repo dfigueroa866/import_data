@@ -19,7 +19,6 @@ from data_staging.services.history.history_config import (
     HISTORY_SALES_CHANNEL_VALUE,
     HISTORY_SKU_MAPPING_TARGETS,
     granularity_for_process_type,
-    is_valid_sales_channel,
     source_from_filename,
 )
 
@@ -55,11 +54,62 @@ def _is_empty_expr(col: str) -> pl.Expr:
 
 
 def _normalize_period_start_expr(col: str = "period_start") -> pl.Expr:
+    raw = pl.col(col).cast(pl.Utf8, strict=False).str.strip_chars()
+    parsed = raw.str.to_datetime(strict=False, time_unit="us")
     return (
-        pl.col(col)
-        .map_elements(_normalize_period_start, return_dtype=pl.Utf8)
+        pl.when(raw.str.len_chars() == 0)
+        .then(raw)
+        .when(parsed.is_not_null())
+        .then(parsed.dt.strftime("%Y-%m-%d"))
+        .otherwise(raw)
         .alias(col)
     )
+
+
+def _hash_id_batch(batch: pl.Series) -> pl.Series:
+    out: List[Optional[str]] = []
+    for item in batch.to_list():
+        if is_empty_value(item):
+            out.append(None)
+            continue
+        digest = hashlib.sha256(str(item).encode("utf-8")).hexdigest()[:32]
+        out.append(str(uuid.UUID(digest)))
+    return pl.Series(out, dtype=pl.Utf8)
+
+
+def _build_id_raw_expr(
+    organization_id: str,
+    *,
+    has_sku_code: bool,
+) -> pl.Expr:
+    org_expr = (
+        pl.when(_is_empty_expr("organization_id"))
+        .then(pl.lit(str(organization_id)))
+        .otherwise(pl.col("organization_id").cast(pl.Utf8))
+    )
+    if has_sku_code:
+        sku_expr = (
+            pl.when(_is_empty_expr("sku"))
+            .then(pl.col("sku_code").cast(pl.Utf8, strict=False))
+            .otherwise(pl.col("sku").cast(pl.Utf8, strict=False))
+        )
+    else:
+        sku_expr = pl.col("sku").cast(pl.Utf8, strict=False)
+    period_expr = pl.col("period_start").cast(pl.Utf8, strict=False)
+    parsed_period = period_expr.str.to_datetime(strict=False, time_unit="us")
+    period_key = (
+        pl.when(parsed_period.is_not_null())
+        .then(parsed_period.dt.strftime("%Y-%m-%dT%H:%M:%S"))
+        .otherwise(period_expr)
+    )
+    parts = [
+        org_expr,
+        pl.col("location_code").cast(pl.Utf8, strict=False),
+        sku_expr,
+        period_key,
+        pl.col("granularity").cast(pl.Utf8, strict=False),
+    ]
+    return pl.concat_str(parts, separator="|")
 
 
 def _build_id_from_fields(
@@ -224,13 +274,15 @@ def apply_history_transforms_polars(
         out = out.with_columns(pl.lit(default_source).alias("source"))
 
     if "sales_channel" in out.columns:
+        normalized_channel = (
+            pl.col("sales_channel")
+            .cast(pl.Utf8, strict=False)
+            .str.strip_chars()
+            .str.to_uppercase()
+            .str.replace_all("-", "_")
+        )
         out = out.with_columns(
-            pl.when(
-                ~_is_empty_expr("sales_channel")
-                & ~pl.col("sales_channel").map_elements(
-                    is_valid_sales_channel, return_dtype=pl.Boolean
-                )
-            )
+            pl.when(~_is_empty_expr("sales_channel") & (normalized_channel != "SELL_IN"))
             .then(pl.col("sales_channel"))
             .otherwise(None)
             .alias("_sales_channel_invalid")
@@ -240,21 +292,40 @@ def apply_history_transforms_polars(
     id_cols = ["organization_id", "location_code", "sku", "sku_code", "period_start", "granularity", "id"]
     present = [c for c in id_cols if c in out.columns]
     if len(present) >= 4:
-        out = out.with_columns(
-            pl.struct(present).map_elements(
-                lambda row: _build_id_from_fields(
-                    row.get("organization_id"),
-                    row.get("location_code"),
-                    row.get("sku"),
-                    row.get("sku_code"),
-                    row.get("period_start"),
-                    row.get("granularity"),
-                    row.get("id"),
-                    organization_id,
-                ),
-                return_dtype=pl.Utf8,
-            ).alias("id")
-        )
+        from data_staging.config import settings
+
+        vectorized_id_min = int(getattr(settings, "VECTORIZED_ID_MIN_ROWS", 10_000))
+        has_existing_id = "id" in out.columns
+        if out.height >= vectorized_id_min:
+            id_raw = _build_id_raw_expr(organization_id, has_sku_code="sku_code" in out.columns)
+            out = out.with_columns(id_raw.alias("_id_raw"))
+            generated_id = pl.col("_id_raw").map_batches(_hash_id_batch, return_dtype=pl.Utf8)
+            if has_existing_id:
+                out = out.with_columns(
+                    pl.when(_is_empty_expr("id"))
+                    .then(generated_id)
+                    .otherwise(pl.col("id").cast(pl.Utf8))
+                    .alias("id")
+                )
+            else:
+                out = out.with_columns(generated_id.alias("id"))
+            out = out.drop("_id_raw")
+        else:
+            out = out.with_columns(
+                pl.struct(present).map_elements(
+                    lambda row: _build_id_from_fields(
+                        row.get("organization_id"),
+                        row.get("location_code"),
+                        row.get("sku"),
+                        row.get("sku_code"),
+                        row.get("period_start"),
+                        row.get("granularity"),
+                        row.get("id"),
+                        organization_id,
+                    ),
+                    return_dtype=pl.Utf8,
+                ).alias("id")
+            )
 
     if resolve_sku_id and sku_resolver:
         rows = out.to_dicts()

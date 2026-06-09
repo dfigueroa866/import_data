@@ -1591,7 +1591,7 @@ def _format_promotion_summary(inserted: int, updated: int) -> str:
     )
 
 
-_PROMOTION_BATCH_SIZE = 50000
+_PROMOTION_BATCH_SIZE = int(getattr(settings, "PROMOTION_BATCH_SIZE", 250_000))
 
 
 def _promotion_chunks_total(total_rows: int) -> int:

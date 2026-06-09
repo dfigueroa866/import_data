@@ -107,12 +107,15 @@ class ValidRecordsParquetWriter:
         return count
 
     def write_polars(self, df) -> int:
-        import polars as pl
-
         if df.is_empty():
             return 0
-        frame = df.to_pandas()
-        return self.write_dataframe(frame)
+        table = df.to_arrow()
+        self._ensure_writer(table)
+        assert self._writer is not None
+        self._writer.write_table(table)
+        count = table.num_rows
+        self.rows_written += count
+        return count
 
     def write_polars_chunk(
         self,

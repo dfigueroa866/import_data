@@ -28,6 +28,24 @@ def should_use_parallel_validation(composite_unique_keys: Optional[List[str]]) -
     return int(getattr(settings, "VALIDATION_WORKER_PROCESSES", 2) or 0) > 1
 
 
+def validation_worker_entry(payload: tuple) -> tuple:
+    """Picklable worker: validate one chunk without DB progress side effects."""
+    chunk_idx, chunk_df, kwargs = payload
+    configure_polars_threads()
+    from data_staging.workers.file_processor import validate_and_prepare_chunk
+
+    return (
+        chunk_idx,
+        validate_and_prepare_chunk(
+            chunk_df,
+            chunk_idx=chunk_idx,
+            progress_conn=None,
+            pipeline_timer=None,
+            **kwargs,
+        ),
+    )
+
+
 def parallel_map_chunks(
     chunks: Iterator[pl.DataFrame],
     worker_fn: Callable[[pl.DataFrame, int], T],

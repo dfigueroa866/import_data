@@ -20,6 +20,7 @@ from data_staging.utils.pipeline_timing import PipelineTimer, persist_timing_met
 from data_staging.utils.promotion_bulk import (
     build_upsert_from_staging_sql,
     build_values_upsert_sql,
+    copy_arrow_batch_to_staging,
     copy_frame_to_staging,
     ensure_staging_table,
     frame_to_tuples,
@@ -435,16 +436,28 @@ def _execute_staging_promotion_batch(
     insert_cols: List[str],
     staging_cols: List[str],
     conflict_clause: str,
-    frame: pd.DataFrame,
     data_cols: List[str],
     *,
     include_imported_at: bool,
     db_columns: Optional[Dict[str, str]] = None,
     db_udt_names: Optional[Dict[str, str]] = None,
+    frame: Optional[pd.DataFrame] = None,
+    arrow_batch=None,
 ) -> Tuple[int, int, int]:
     """COPY chunk to temp table, then UPSERT with aggregated RETURNING counts."""
     ensure_staging_table(cursor, staging_cols)
-    copied = copy_frame_to_staging(cursor, frame, data_cols, staging_cols)
+    arrow_min_rows = int(getattr(settings, "ARROW_COPY_MIN_ROWS", 10_000))
+    if arrow_batch is not None and arrow_batch.num_rows >= arrow_min_rows:
+        copied = copy_arrow_batch_to_staging(cursor, arrow_batch, data_cols, staging_cols)
+    elif frame is not None and not frame.empty:
+        copied = copy_frame_to_staging(cursor, frame, data_cols, staging_cols)
+    elif arrow_batch is not None and arrow_batch.num_rows > 0:
+        import pyarrow as pa
+
+        frame = arrow_batch.to_pandas()
+        copied = copy_frame_to_staging(cursor, frame, data_cols, staging_cols)
+    else:
+        return 0, 0, 0
     if copied == 0:
         return 0, 0, 0
     sql = build_upsert_from_staging_sql(
@@ -680,24 +693,34 @@ def _promote_from_parquet(
     conflict_clause = ""
     include_imported_at = False
 
+    use_arrow_copy = not (load_type == "catalog" and catalog_slug)
+
     for batch in pf.iter_batches(batch_size=PROMOTION_BATCH_SIZE):
         with (timer.phase("parquet_read_ms") if timer else _noop_phase()):
-            frame = batch.to_pandas()
-        if skip >= len(frame):
-            skip -= len(frame)
+            arrow_batch = batch
+        batch_rows = arrow_batch.num_rows
+        if skip >= batch_rows:
+            skip -= batch_rows
             continue
         if skip > 0:
-            frame = frame.iloc[skip:].reset_index(drop=True)
+            arrow_batch = arrow_batch.slice(skip, batch_rows - skip)
+            batch_rows = arrow_batch.num_rows
             skip = 0
-        if frame.empty:
+        if batch_rows == 0:
             continue
 
+        frame: Optional[pd.DataFrame] = None
         if load_type == "catalog" and catalog_slug:
             from data_staging.services.catalog.catalog_transforms import normalize_catalog_enum_columns
 
+            frame = arrow_batch.to_pandas()
             frame = normalize_catalog_enum_columns(frame, catalog_slug)
+            batch_columns = list(frame.columns)
+            use_arrow_copy = False
+        else:
+            batch_columns = list(arrow_batch.schema.names)
 
-        data_cols = _parquet_promotion_columns(list(frame.columns), valid_db_target_cols)
+        data_cols = _parquet_promotion_columns(batch_columns, valid_db_target_cols)
         if not data_cols:
             raise ValueError("No promotable columns found in Parquet file.")
 
@@ -728,13 +751,14 @@ def _promote_from_parquet(
                 insert_cols,
                 staging_cols,
                 conflict_clause,
-                frame,
                 data_cols,
                 include_imported_at=include_imported_at,
                 db_columns=db_columns,
                 db_udt_names=db_udt_names,
+                frame=frame,
+                arrow_batch=arrow_batch if use_arrow_copy else None,
             )
-        chunk_len = len(frame)
+        chunk_len = batch_rows if use_arrow_copy else len(frame or [])
         total_inserted += chunk_len
         promoted_inserted += ins
         promoted_updated += upd

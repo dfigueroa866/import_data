@@ -8,6 +8,11 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 import pandas as pd
 import psycopg2.extensions
 
+try:
+    import pyarrow as pa
+except ImportError:  # pragma: no cover
+    pa = None  # type: ignore[assignment]
+
 from data_staging.services.catalog.catalog_transforms import coalesce_empty_to_none, is_empty_value
 
 _STAGING_TABLE = "batch_promo_staging"
@@ -71,20 +76,13 @@ def _pg_text_value(val: Any) -> str:
     return s
 
 
-def copy_frame_to_staging(
+def _write_copy_buffer(
     cursor: psycopg2.extensions.cursor,
-    frame: pd.DataFrame,
-    data_cols: Sequence[str],
+    buffer: io.StringIO,
     staging_cols: Sequence[str],
 ) -> int:
-    """COPY chunk rows into the temp staging table."""
-    buffer = io.StringIO()
-    count = 0
-    for row in frame[list(data_cols)].itertuples(index=False, name=None):
-        cells = [_pg_text_value(v) for v in row]
-        buffer.write("\t".join(cells) + "\n")
-        count += 1
-    if count == 0:
+    payload = buffer.getvalue()
+    if not payload:
         return 0
     buffer.seek(0)
     cols_str = ", ".join(f'"{c}"' for c in staging_cols)
@@ -92,7 +90,49 @@ def copy_frame_to_staging(
         f'COPY {_STAGING_TABLE} ({cols_str}) FROM STDIN WITH (FORMAT text, NULL \'\\N\')',
         buffer,
     )
-    return count
+    return payload.count("\n")
+
+
+def copy_arrow_batch_to_staging(
+    cursor: psycopg2.extensions.cursor,
+    batch: "pa.RecordBatch",
+    data_cols: Sequence[str],
+    staging_cols: Sequence[str],
+) -> int:
+    """COPY PyArrow RecordBatch rows into the temp staging table (no pandas)."""
+    if pa is None or batch is None or batch.num_rows == 0:
+        return 0
+
+    col_lists: List[List[Any]] = []
+    for col_name in data_cols:
+        col_idx = batch.schema.get_field_index(col_name)
+        if col_idx < 0:
+            raise ValueError(f"Column '{col_name}' not found in Parquet batch")
+        col_lists.append(batch.column(col_idx).to_pylist())
+
+    buffer = io.StringIO()
+    row_count = batch.num_rows
+    for row_idx in range(row_count):
+        cells = [_pg_text_value(col_lists[col_i][row_idx]) for col_i in range(len(data_cols))]
+        buffer.write("\t".join(cells) + "\n")
+
+    return _write_copy_buffer(cursor, buffer, staging_cols)
+
+
+def copy_frame_to_staging(
+    cursor: psycopg2.extensions.cursor,
+    frame: pd.DataFrame,
+    data_cols: Sequence[str],
+    staging_cols: Sequence[str],
+) -> int:
+    """COPY pandas chunk rows into the temp staging table."""
+    if frame.empty:
+        return 0
+    buffer = io.StringIO()
+    for row in frame[list(data_cols)].itertuples(index=False, name=None):
+        cells = [_pg_text_value(v) for v in row]
+        buffer.write("\t".join(cells) + "\n")
+    return _write_copy_buffer(cursor, buffer, staging_cols)
 
 
 def ensure_staging_table(

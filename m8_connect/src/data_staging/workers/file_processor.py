@@ -734,6 +734,24 @@ def process_file_job(payload: Dict[str, Any]):
             conn.close()
 
 
+def _can_parallelize_chunk_validation(
+    *,
+    composite_unique_keys: Optional[List[str]],
+    resolve_sku_id: bool,
+    sku_resolver,
+    direct_load: bool,
+    total_rows: int = 0,
+) -> bool:
+    min_rows = int(getattr(settings, "PARALLEL_VALIDATION_MIN_ROWS", 500_000))
+    return (
+        total_rows >= min_rows
+        and should_use_parallel_validation(composite_unique_keys)
+        and not resolve_sku_id
+        and sku_resolver is None
+        and not direct_load
+    )
+
+
 def process_file_in_chunks(
     conn: psycopg2.extensions.connection,
     file_path: Path,
@@ -831,13 +849,43 @@ def process_file_in_chunks(
                 force=True,
             )
             row_offset = 0
-            for chunk_df in chunk_source:
-                end_idx = min(row_offset + len(chunk_df), total_rows)
-                with (pipeline_timer.phase("read_ms") if pipeline_timer else _null_phase()):
-                    chunk_to_process = chunk_df
-                stats = process_single_chunk(
+            parallel_validation = _can_parallelize_chunk_validation(
+                composite_unique_keys=composite_unique_keys,
+                resolve_sku_id=resolve_sku_id,
+                sku_resolver=sku_resolver,
+                direct_load=direct_load,
+                total_rows=total_rows,
+            )
+            validation_workers = int(getattr(settings, "VALIDATION_WORKER_PROCESSES", 2))
+            parallel_validate_kwargs = {
+                "batch_id": batch_id,
+                "source_name": source_name,
+                "column_mapping": column_mapping,
+                "selected_columns": selected_columns,
+                "target_column_types": target_column_types,
+                "not_null_columns": not_null_columns,
+                "foreign_keys_data": foreign_keys_data,
+                "catalog_table": catalog_table,
+                "composite_unique_keys": composite_unique_keys,
+                "seen_composite_keys": seen_composite_keys,
+                "history_mode": history_mode,
+                "process_type": process_type,
+                "organization_id": organization_id,
+                "sku_resolver": None,
+                "resolve_sku_id": False,
+                "source_extension": source_extension,
+            }
+            parallel_buffer: List[tuple] = []
+
+            def _process_validated_chunk(
+                chunk_to_process: pl.DataFrame,
+                chunk_idx: int,
+                chunk_row_offset: int,
+                prevalidated: Optional[Any] = None,
+            ) -> Dict[str, Any]:
+                return process_single_chunk(
                     chunk_to_process,
-                    chunk_idx=chunks_processed,
+                    chunk_idx=chunk_idx,
                     batch_id=batch_id,
                     staging_table=staging_table,
                     source_name=source_name,
@@ -863,17 +911,69 @@ def process_file_in_chunks(
                     resolve_sku_id=resolve_sku_id,
                     source_extension=source_extension,
                     progress_total_rows=total_rows,
-                    progress_row_offset=row_offset,
+                    progress_row_offset=chunk_row_offset,
                     progress_loaded_before=total_inserted,
                     progress_rejected_before=total_rejected,
-                    progress_chunks_processed=chunks_processed,
+                    progress_chunks_processed=chunk_idx,
                     progress_chunks_total=chunks_total,
                     progress_conn=progress_conn,
                     parquet_writer=parquet_writer,
                     pipeline_timer=pipeline_timer,
+                    prevalidated=prevalidated,
+                )
+
+            def _flush_parallel_buffer() -> None:
+                nonlocal row_offset, parallel_buffer
+                if not parallel_buffer:
+                    return
+                from concurrent.futures import ProcessPoolExecutor
+                from data_staging.utils.parallel_validation import validation_worker_entry
+
+                payloads = [
+                    (chunk_idx, chunk_df, parallel_validate_kwargs)
+                    for chunk_idx, chunk_df, _offset in parallel_buffer
+                ]
+                with ProcessPoolExecutor(max_workers=validation_workers) as pool:
+                    validated = list(pool.map(validation_worker_entry, payloads))
+                validated.sort(key=lambda item: item[0])
+                validated_map = {chunk_idx: result for chunk_idx, result in validated}
+                for chunk_idx, chunk_df, chunk_row_offset in sorted(
+                    parallel_buffer, key=lambda item: item[0]
+                ):
+                    end_idx = min(chunk_row_offset + len(chunk_df), total_rows)
+                    with (pipeline_timer.phase("read_ms") if pipeline_timer else _null_phase()):
+                        pass
+                    stats = _process_validated_chunk(
+                        chunk_df,
+                        chunk_idx,
+                        chunk_row_offset,
+                        prevalidated=validated_map[chunk_idx],
+                    )
+                    _finalize_chunk(stats, end_idx)
+                    row_offset = end_idx
+                parallel_buffer.clear()
+
+            for chunk_df in chunk_source:
+                end_idx = min(row_offset + len(chunk_df), total_rows)
+                with (pipeline_timer.phase("read_ms") if pipeline_timer else _null_phase()):
+                    chunk_to_process = chunk_df
+
+                if parallel_validation and validation_workers > 1:
+                    parallel_buffer.append((chunks_processed, chunk_to_process, row_offset))
+                    if len(parallel_buffer) >= validation_workers:
+                        _flush_parallel_buffer()
+                    continue
+
+                stats = _process_validated_chunk(
+                    chunk_to_process,
+                    chunks_processed,
+                    row_offset,
                 )
                 _finalize_chunk(stats, end_idx)
                 row_offset = end_idx
+
+            if parallel_validation:
+                _flush_parallel_buffer()
 
         elif file_ext in ['.xlsx', '.xls']:
             # Excel: leer todo primero (limitación de formato)
@@ -1029,46 +1129,43 @@ def process_single_chunk(
     progress_conn: Optional[psycopg2.extensions.connection] = None,
     parquet_writer: Optional[ValidRecordsParquetWriter] = None,
     pipeline_timer: Optional[PipelineTimer] = None,
+    prevalidated: Optional[Any] = None,
 ):
     """Helper to process a single chunk dataframe."""
     from data_staging.utils.vectorized_validation import ChunkValidationResult
-    from data_staging.utils.parallel_validation import should_use_parallel_validation
 
-    if should_use_parallel_validation(composite_unique_keys):
-        logger.debug(
-            "USE_VALIDATION_MULTIPROCESSING=true: using Polars multi-threading "
-            "(set POLARS_MAX_THREADS for CPU parallelism)"
-        )
-
-    with (pipeline_timer.phase("validate_ms") if pipeline_timer else _null_phase()):
-        validation_out = validate_and_prepare_chunk(
-            chunk_df=chunk_df,
-            batch_id=batch_id,
-            chunk_idx=chunk_idx,
-            source_name=source_name,
-            column_mapping=column_mapping,
-            selected_columns=selected_columns,
-            target_column_types=target_column_types,
-            not_null_columns=not_null_columns,
-            foreign_keys_data=foreign_keys_data,
-            catalog_table=catalog_table,
-            composite_unique_keys=composite_unique_keys,
-            seen_composite_keys=seen_composite_keys,
-            history_mode=history_mode,
-            process_type=process_type,
-            organization_id=organization_id,
-            sku_resolver=sku_resolver,
-            resolve_sku_id=resolve_sku_id,
-            source_extension=source_extension,
-            progress_conn=progress_conn or conn,
-            progress_total_rows=progress_total_rows,
-            progress_row_offset=progress_row_offset,
-            progress_loaded_before=progress_loaded_before,
-            progress_rejected_before=progress_rejected_before,
-            progress_chunks_processed=progress_chunks_processed,
-            progress_chunks_total=progress_chunks_total,
-            pipeline_timer=pipeline_timer,
-        )
+    if prevalidated is not None:
+        validation_out = prevalidated
+    else:
+        with (pipeline_timer.phase("validate_ms") if pipeline_timer else _null_phase()):
+            validation_out = validate_and_prepare_chunk(
+                chunk_df=chunk_df,
+                batch_id=batch_id,
+                chunk_idx=chunk_idx,
+                source_name=source_name,
+                column_mapping=column_mapping,
+                selected_columns=selected_columns,
+                target_column_types=target_column_types,
+                not_null_columns=not_null_columns,
+                foreign_keys_data=foreign_keys_data,
+                catalog_table=catalog_table,
+                composite_unique_keys=composite_unique_keys,
+                seen_composite_keys=seen_composite_keys,
+                history_mode=history_mode,
+                process_type=process_type,
+                organization_id=organization_id,
+                sku_resolver=sku_resolver,
+                resolve_sku_id=resolve_sku_id,
+                source_extension=source_extension,
+                progress_conn=progress_conn or conn,
+                progress_total_rows=progress_total_rows,
+                progress_row_offset=progress_row_offset,
+                progress_loaded_before=progress_loaded_before,
+                progress_rejected_before=progress_rejected_before,
+                progress_chunks_processed=progress_chunks_processed,
+                progress_chunks_total=progress_chunks_total,
+                pipeline_timer=pipeline_timer,
+            )
 
     if isinstance(validation_out, ChunkValidationResult):
         passed_df = validation_out.passed_df

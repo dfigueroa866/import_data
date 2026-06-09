@@ -213,25 +213,39 @@ def validate_chunk_vectorized(
                 )
 
             elif "date" in target_type_l or "time" in target_type_l:
-                date_fail_mask: List[bool] = []
-                for val in df[col_name].to_list():
-                    if is_empty_value(val):
-                        date_fail_mask.append(False)
-                    else:
-                        date_fail_mask.append(parse_flexible_datetime(val) is None)
-                df = df.with_columns(pl.Series("_date_fail", date_fail_mask))
+                raw_date = pl.col(col_name).cast(pl.Utf8, strict=False).str.strip_chars()
+                parsed_dt = raw_date.str.to_datetime(strict=False, time_unit="us")
+                date_fail = ~empty_cond & parsed_dt.is_null()
                 df = df.with_columns(
                     _append_error(
                         pl.col("_errors"),
-                        pl.col("_date_fail"),
+                        date_fail,
                         pl.format(
                             "Invalid date format for '{}': got '{}'",
                             pl.lit(col_name),
                             pl.col(col_name),
                         ),
                     ).alias("_errors")
-                ).drop("_date_fail")
-                df = _normalize_date_column(df, col_name, target_type_l)
+                )
+                if target_type_l.strip() == "date" or (
+                    "date" in target_type_l and "timestamp" not in target_type_l
+                ):
+                    normalized = (
+                        pl.when(empty_cond)
+                        .then(pl.col(col_name))
+                        .when(parsed_dt.is_not_null())
+                        .then(parsed_dt.dt.strftime("%Y-%m-%d"))
+                        .otherwise(pl.col(col_name))
+                    )
+                else:
+                    normalized = (
+                        pl.when(empty_cond)
+                        .then(pl.col(col_name))
+                        .when(parsed_dt.is_not_null())
+                        .then(parsed_dt.dt.strftime("%Y-%m-%d %H:%M:%S"))
+                        .otherwise(pl.col(col_name))
+                    )
+                df = df.with_columns(normalized.alias(col_name))
 
             elif "char" in target_type_l or "text" in target_type_l:
                 match = re.search(r"\((\d+)\)", target_type)
@@ -403,68 +417,76 @@ def validate_chunk_vectorized(
 
     df = df.with_columns((pl.col("_errors").str.len_chars() > 0).alias("_failed"))
 
-    rows = df.to_dicts()
     failed_records: List[Dict[str, Any]] = []
-    passed_row_indices: List[int] = []
+    drop_cols = ["_vec_row_idx", "_errors", "_failed"]
+    passed_indices: Optional[List[int]] = None
 
-    for i, raw_row in enumerate(rows):
+    def _append_failed_record(
+        raw_row: Dict[str, Any],
+        vec_idx: int,
+        error_list: List[str],
+    ) -> None:
         row = sanitize_row_dict(raw_row)
         row.pop("_vec_row_idx", None)
         row.pop("_errors", None)
-        failed = bool(raw_row.get("_failed"))
-        error_text = str(raw_row.get("_errors") or "")
-        error_list = [e.strip() for e in error_text.split(";") if e.strip()] if error_text else []
-
-        if not failed and composite_unique_keys and seen_composite_keys is not None:
-            key_tuple = _resolve_composite_key(row, composite_unique_keys)
-            if key_tuple is None:
-                failed = True
-                error_list.append(
-                    f"Faltan columnas para clave única: {', '.join(composite_unique_keys)}"
-                )
-            elif key_tuple in seen_composite_keys:
-                failed = True
-                error_list.append(
-                    f"Clave duplicada en archivo ({', '.join(composite_unique_keys)})"
-                )
-            else:
-                seen_composite_keys.add(key_tuple)
-
-        if original_rows is not None and i < len(original_rows):
-            source_file_row = original_rows[i]
+        row.pop("_failed", None)
+        if "_sales_channel_invalid" in row and row.get("_sales_channel_invalid") is None:
+            row.pop("_sales_channel_invalid", None)
+        if original_rows is not None and vec_idx < len(original_rows):
+            source_file_row = original_rows[vec_idx]
         elif column_mapping:
             source_file_row = _source_row_from_mapped(row, column_mapping)
         else:
             source_file_row = {}
+        null_count = sum(1 for v in row.values() if v is None)
+        quality_score = 100.0 - (null_count * 100.0 / total_cols) if total_cols > 0 else 100.0
+        failed_records.append(
+            {
+                "batch_id": batch_id,
+                "source_row_number": start_row_num + vec_idx,
+                "source_file_data": json.dumps(source_file_row, default=str),
+                "raw_data": json.dumps(row),
+                "processed_data": json.dumps(row),
+                "validation_status": "FAILED",
+                "data_quality_score": quality_score,
+                "is_duplicate": False,
+                "error_details": json.dumps({"errors": error_list}),
+            }
+        )
 
-        if failed:
-            row.pop("_failed", None)
-            if "_sales_channel_invalid" in row and row.get("_sales_channel_invalid") is None:
-                row.pop("_sales_channel_invalid", None)
-            null_count = sum(1 for v in row.values() if v is None)
-            quality_score = 100.0 - (null_count * 100.0 / total_cols) if total_cols > 0 else 100.0
-            failed_records.append(
-                {
-                    "batch_id": batch_id,
-                    "source_row_number": start_row_num + i,
-                    "source_file_data": json.dumps(source_file_row, default=str),
-                    "raw_data": json.dumps(row),
-                    "processed_data": json.dumps(row),
-                    "validation_status": "FAILED",
-                    "data_quality_score": quality_score,
-                    "is_duplicate": False,
-                    "error_details": json.dumps({"errors": error_list}),
-                }
-            )
-        else:
-            row.pop("_failed", None)
-            if "_sales_channel_invalid" in row:
-                row.pop("_sales_channel_invalid", None)
-            passed_row_indices.append(int(raw_row.get("_vec_row_idx", i)))
+    if composite_unique_keys and seen_composite_keys is not None:
+        passed_indices = []
+        for i, raw_row in enumerate(df.filter(~pl.col("_failed")).to_dicts()):
+            row = sanitize_row_dict(raw_row)
+            vec_idx = int(raw_row.get("_vec_row_idx", i))
+            key_tuple = _resolve_composite_key(row, composite_unique_keys)
+            if key_tuple is None:
+                _append_failed_record(
+                    raw_row,
+                    vec_idx,
+                    [f"Faltan columnas para clave única: {', '.join(composite_unique_keys)}"],
+                )
+            elif key_tuple in seen_composite_keys:
+                _append_failed_record(
+                    raw_row,
+                    vec_idx,
+                    [f"Clave duplicada en archivo ({', '.join(composite_unique_keys)})"],
+                )
+            else:
+                seen_composite_keys.add(key_tuple)
+                passed_indices.append(vec_idx)
+        passed_df = df.filter(pl.col("_vec_row_idx").is_in(passed_indices))
+    else:
+        passed_df = df.filter(~pl.col("_failed"))
 
-    passed_df = df.filter(pl.col("_vec_row_idx").is_in(passed_row_indices)).drop(
-        ["_vec_row_idx", "_errors", "_failed"]
-    )
+    for i, raw_row in enumerate(df.filter(pl.col("_failed")).to_dicts()):
+        vec_idx = int(raw_row.get("_vec_row_idx", i))
+        error_text = str(raw_row.get("_errors") or "")
+        error_list = [e.strip() for e in error_text.split(";") if e.strip()] if error_text else []
+        _append_failed_record(raw_row, vec_idx, error_list)
+
+    extra_drop = [c for c in ("_sales_channel_invalid",) if c in passed_df.columns]
+    passed_df = passed_df.drop(drop_cols + extra_drop)
 
     if passed_df.height > 0:
         null_row = passed_df.null_count().row(0)
