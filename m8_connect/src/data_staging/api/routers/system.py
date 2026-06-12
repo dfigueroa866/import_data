@@ -9,7 +9,7 @@ from data_staging.schemas.system import DatabaseConfig
 from sqlalchemy.orm import Session
 
 from data_staging.config import settings
-from data_staging.database import get_database_manager, get_database_session
+from data_staging.database import get_database_manager, get_db_session
 
 router = APIRouter(
     prefix="/system",
@@ -102,7 +102,7 @@ async def update_database_config(config: DatabaseConfig):
 # ============================================================================
 
 @router.get("/schemas")
-async def get_schemas(db: Session = Depends(get_database_session)):
+async def get_schemas(db: Session = Depends(get_db_session)):
     """
     Get list of available database schemas for the upload wizard.
     Excludes system schemas (pg_*, information_schema).
@@ -133,7 +133,7 @@ async def get_schemas(db: Session = Depends(get_database_session)):
 @router.get("/tables")
 async def get_tables(
     schema: str,
-    db: Session = Depends(get_database_session)
+    db: Session = Depends(get_db_session)
 ):
     """
     Get list of tables in a specific schema for the upload wizard.
@@ -191,7 +191,7 @@ async def get_catalog_tables():
 async def get_table_columns(
     schema: str = Query(..., description="The database schema (e.g., public)"),
     table: str = Query(..., description="The table name"),
-    db: Session = Depends(get_database_session),
+    db: Session = Depends(get_db_session),
 ):
     """Get columns for a specific table in any schema."""
     try:

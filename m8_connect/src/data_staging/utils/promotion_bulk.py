@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import re
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
@@ -16,6 +17,7 @@ except ImportError:  # pragma: no cover
 from data_staging.services.catalog.catalog_transforms import coalesce_empty_to_none, is_empty_value
 
 _STAGING_TABLE = "batch_promo_staging"
+_STAGING_TABLE_PERSISTENT = "batch_promo_staging_acc"
 
 
 def staging_select_expr(
@@ -80,6 +82,8 @@ def _write_copy_buffer(
     cursor: psycopg2.extensions.cursor,
     buffer: io.StringIO,
     staging_cols: Sequence[str],
+    *,
+    table: str = _STAGING_TABLE,
 ) -> int:
     payload = buffer.getvalue()
     if not payload:
@@ -87,7 +91,7 @@ def _write_copy_buffer(
     buffer.seek(0)
     cols_str = ", ".join(f'"{c}"' for c in staging_cols)
     cursor.copy_expert(
-        f'COPY {_STAGING_TABLE} ({cols_str}) FROM STDIN WITH (FORMAT text, NULL \'\\N\')',
+        f'COPY {table} ({cols_str}) FROM STDIN WITH (FORMAT text, NULL \'\\N\')',
         buffer,
     )
     return payload.count("\n")
@@ -98,25 +102,17 @@ def copy_arrow_batch_to_staging(
     batch: "pa.RecordBatch",
     data_cols: Sequence[str],
     staging_cols: Sequence[str],
+    *,
+    table: str = _STAGING_TABLE,
 ) -> int:
-    """COPY PyArrow RecordBatch rows into the temp staging table (no pandas)."""
+    """COPY PyArrow RecordBatch rows into the temp staging table via pandas vectorized path."""
     if pa is None or batch is None or batch.num_rows == 0:
         return 0
-
-    col_lists: List[List[Any]] = []
-    for col_name in data_cols:
-        col_idx = batch.schema.get_field_index(col_name)
-        if col_idx < 0:
-            raise ValueError(f"Column '{col_name}' not found in Parquet batch")
-        col_lists.append(batch.column(col_idx).to_pylist())
-
-    buffer = io.StringIO()
-    row_count = batch.num_rows
-    for row_idx in range(row_count):
-        cells = [_pg_text_value(col_lists[col_i][row_idx]) for col_i in range(len(data_cols))]
-        buffer.write("\t".join(cells) + "\n")
-
-    return _write_copy_buffer(cursor, buffer, staging_cols)
+    cols_in_batch = [c for c in data_cols if batch.schema.get_field_index(c) >= 0]
+    if not cols_in_batch:
+        raise ValueError(f"None of {list(data_cols)} found in Parquet batch schema")
+    frame = batch.select(cols_in_batch).to_pandas()
+    return copy_frame_to_staging(cursor, frame, cols_in_batch, staging_cols, table=table)
 
 
 def copy_frame_to_staging(
@@ -124,15 +120,23 @@ def copy_frame_to_staging(
     frame: pd.DataFrame,
     data_cols: Sequence[str],
     staging_cols: Sequence[str],
+    *,
+    table: str = _STAGING_TABLE,
 ) -> int:
-    """COPY pandas chunk rows into the temp staging table."""
+    """COPY pandas chunk rows into the temp staging table (vectorized via to_csv)."""
     if frame.empty:
         return 0
+    sub = frame[list(data_cols)].copy()
+    for col in sub.select_dtypes(include="object").columns:
+        s = sub[col].replace("", None)
+        mask = s.notna()
+        s = s.where(~mask, s[mask].str.replace("\t", " ", regex=False)
+                                   .str.replace("\n", " ", regex=False)
+                                   .str.replace("\r", " ", regex=False))
+        sub[col] = s
     buffer = io.StringIO()
-    for row in frame[list(data_cols)].itertuples(index=False, name=None):
-        cells = [_pg_text_value(v) for v in row]
-        buffer.write("\t".join(cells) + "\n")
-    return _write_copy_buffer(cursor, buffer, staging_cols)
+    sub.to_csv(buffer, sep="\t", index=False, header=False, na_rep="\\N")
+    return _write_copy_buffer(cursor, buffer, staging_cols, table=table)
 
 
 def ensure_staging_table(
@@ -150,6 +154,30 @@ def ensure_staging_table(
     cursor.execute(f"TRUNCATE {_STAGING_TABLE}")
 
 
+def ensure_staging_table_persistent(
+    cursor: psycopg2.extensions.cursor,
+    staging_cols: Sequence[str],
+) -> None:
+    """Create accumulator staging table that survives commits (no ON COMMIT DELETE ROWS)."""
+    col_defs = ", ".join(f'"{c}" text' for c in staging_cols)
+    cursor.execute(
+        f"""
+        CREATE TEMP TABLE IF NOT EXISTS {_STAGING_TABLE_PERSISTENT} (
+            {col_defs}
+        )
+        """
+    )
+    cursor.execute(f"TRUNCATE {_STAGING_TABLE_PERSISTENT}")
+
+
+def parse_conflict_cols(conflict_clause: str) -> List[str]:
+    """Extract conflict column names from an ON CONFLICT (...) clause."""
+    m = re.search(r'ON\s+CONFLICT\s*\(([^)]+)\)', conflict_clause, re.IGNORECASE)
+    if not m:
+        return []
+    return [c.strip().strip('"') for c in m.group(1).split(',')]
+
+
 def build_upsert_from_staging_sql(
     target_schema: str,
     target_table: str,
@@ -160,8 +188,16 @@ def build_upsert_from_staging_sql(
     include_imported_at: bool,
     db_columns: Optional[Mapping[str, str]] = None,
     db_udt_names: Optional[Mapping[str, str]] = None,
+    staging_table: str = _STAGING_TABLE,
+    order_by_cols: Optional[List[str]] = None,
+    count_split: bool = True,
 ) -> str:
-    """INSERT ... SELECT from staging with optional UPSERT and aggregated RETURNING."""
+    """INSERT ... SELECT from staging with optional UPSERT and aggregated RETURNING.
+
+    order_by_cols: sort staging rows by these columns before insert so B-tree
+                   leaf pages are accessed sequentially (major I/O saving on large tables).
+    count_split:   when False, omit the RETURNING CTE — caller reads cursor.rowcount.
+    """
     db_columns = db_columns or {}
     db_udt_names = db_udt_names or {}
     select_parts = [
@@ -178,12 +214,21 @@ def build_upsert_from_staging_sql(
     insert_cols_str = ", ".join(insert_cols)
     select_str = ", ".join(select_parts)
 
+    # ORDER BY conflict key → sequential B-tree access instead of random lookups
+    order_clause = ""
+    if order_by_cols:
+        order_clause = "ORDER BY " + ", ".join(f's."{c}"' for c in order_by_cols)
+
     base = f"""
         INSERT INTO {target_schema}.{target_table} ({insert_cols_str})
         SELECT {select_str}
-        FROM {_STAGING_TABLE} s
+        FROM {staging_table} s
+        {order_clause}
         {conflict_clause}
     """.strip()
+
+    if not count_split:
+        return base
 
     upper = (conflict_clause or "").upper()
     if "DO UPDATE" in upper:

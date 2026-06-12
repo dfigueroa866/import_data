@@ -53,17 +53,28 @@ def _is_empty_expr(col: str) -> pl.Expr:
     return c.is_null() | (c.cast(pl.Utf8, strict=False).str.strip_chars() == "")
 
 
+def _normalize_period_start_value(value: Any) -> Optional[str]:
+    normalized = format_date_for_storage(value, date_only=True)
+    if normalized:
+        return normalized
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _period_key_for_id_value(value: Any) -> Optional[str]:
+    parsed = parse_flexible_datetime(value)
+    if parsed:
+        return parsed.strftime("%Y-%m-%dT%H:%M:%S")
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def _normalize_period_start_expr(col: str = "period_start") -> pl.Expr:
-    raw = pl.col(col).cast(pl.Utf8, strict=False).str.strip_chars()
-    parsed = raw.str.to_datetime(strict=False, time_unit="us")
-    return (
-        pl.when(raw.str.len_chars() == 0)
-        .then(raw)
-        .when(parsed.is_not_null())
-        .then(parsed.dt.strftime("%Y-%m-%d"))
-        .otherwise(raw)
-        .alias(col)
-    )
+    return pl.col(col).map_elements(_normalize_period_start_value, return_dtype=pl.Utf8).alias(col)
 
 
 def _hash_id_batch(batch: pl.Series) -> pl.Series:
@@ -95,12 +106,9 @@ def _build_id_raw_expr(
         )
     else:
         sku_expr = pl.col("sku").cast(pl.Utf8, strict=False)
-    period_expr = pl.col("period_start").cast(pl.Utf8, strict=False)
-    parsed_period = period_expr.str.to_datetime(strict=False, time_unit="us")
-    period_key = (
-        pl.when(parsed_period.is_not_null())
-        .then(parsed_period.dt.strftime("%Y-%m-%dT%H:%M:%S"))
-        .otherwise(period_expr)
+    period_key = pl.col("period_start").map_elements(
+        _period_key_for_id_value,
+        return_dtype=pl.Utf8,
     )
     parts = [
         org_expr,
@@ -157,6 +165,43 @@ class SkuCodeResolver:
         self._schema = schema
         self._table = table
         self._cache: Dict[str, Optional[str]] = {}
+        self._preloaded = False
+
+    def preload(self) -> None:
+        """Carga todos los SKUs de la organización en memoria (misma semántica que resolve())."""
+        if self._preloaded:
+            return
+        query = (
+            f'SELECT LOWER("{self._code_column}"), "{self._pk_column}"::text '
+            f'FROM "{self._schema}"."{self._table}" '
+            f"WHERE organization_id = %s"
+        )
+        try:
+            self._cursor.execute(query, (self._organization_id,))
+            for code_key, pk_val in self._cursor.fetchall():
+                if code_key is None:
+                    continue
+                normalized = str(code_key).strip().lower()
+                if normalized:
+                    self._cache[normalized] = pk_val
+        except Exception as exc:
+            logger.error(
+                "SKU preload failed on %s.%s (%s): %s",
+                self._schema,
+                self._table,
+                self._pk_column,
+                exc,
+            )
+            raise
+        self._preloaded = True
+
+    def _lookup_cached(self, sku_code: Any) -> Optional[str]:
+        if is_empty_value(sku_code):
+            return None
+        key = str(sku_code).strip()
+        if not key:
+            return None
+        return self._cache.get(key.lower())
 
     def resolve(self, sku_code: Any) -> Optional[str]:
         if is_empty_value(sku_code):
@@ -167,6 +212,10 @@ class SkuCodeResolver:
         cache_key = key.lower()
         if cache_key in self._cache:
             return self._cache[cache_key]
+
+        if self._preloaded:
+            self._cache[cache_key] = None
+            return None
 
         query = (
             f'SELECT "{self._pk_column}"::text FROM "{self._schema}"."{self._table}" '
@@ -188,6 +237,59 @@ class SkuCodeResolver:
             raise
         self._cache[cache_key] = sku_id
         return sku_id
+
+    def _lookup_batch(self, codes: pl.Series) -> pl.Series:
+        cache = self._cache
+        out: List[Optional[str]] = []
+        for item in codes.to_list():
+            if is_empty_value(item):
+                out.append(None)
+            else:
+                out.append(cache.get(str(item).strip().lower()))
+        return pl.Series(out, dtype=pl.Utf8)
+
+    def resolve_sku_id_series(
+        self,
+        df: pl.DataFrame,
+        *,
+        resolve_sku_id: bool = True,
+    ) -> pl.Series:
+        """Replica _resolve_sku_id_from_row fila a fila usando cache precargado."""
+        if not resolve_sku_id or df.is_empty():
+            return pl.Series([None] * df.height, dtype=pl.Utf8)
+
+        self.preload()
+
+        code_lookup: Optional[pl.Expr] = None
+        if "sku_code" in df.columns:
+            code_lookup = (
+                pl.when(_is_empty_expr("sku_code"))
+                .then(None)
+                .otherwise(pl.col("sku_code").map_batches(self._lookup_batch, return_dtype=pl.Utf8))
+            )
+
+        sku_lookup: Optional[pl.Expr] = None
+        if "sku" in df.columns:
+            sku_lookup = (
+                pl.when(_is_empty_expr("sku"))
+                .then(None)
+                .otherwise(pl.col("sku").map_batches(self._lookup_batch, return_dtype=pl.Utf8))
+            )
+
+        candidates = [e for e in (code_lookup, sku_lookup) if e is not None]
+        if candidates:
+            resolved = pl.coalesce(candidates)
+        else:
+            resolved = pl.lit(None).cast(pl.Utf8)
+
+        if "sku_id" in df.columns:
+            resolved = (
+                pl.when(~_is_empty_expr("sku_id"))
+                .then(pl.col("sku_id").cast(pl.Utf8, strict=False))
+                .otherwise(resolved)
+            )
+
+        return df.select(resolved.alias("_sku_id"))["_sku_id"]
 
 
 def _resolve_sku_id_from_row(
@@ -229,9 +331,11 @@ def apply_history_transforms_polars(
     source_extension: Optional[str] = None,
     sku_resolver: Optional[SkuCodeResolver] = None,
     resolve_sku_id: bool = False,
+    aggregated_mode: bool = False,
 ) -> pl.DataFrame:
     """
     Enriquece filas mapeadas con expresiones Polars (sin bucle pandas).
+    aggregated_mode: tras agregación; omite literals ya aplicados por aggregation_service.
     """
     if df.is_empty():
         return df
@@ -241,6 +345,66 @@ def apply_history_transforms_polars(
     )
     default_source = (source_extension or "").strip().lower() or None
     out = df
+
+    if aggregated_mode:
+        if "period_start" in out.columns:
+            out = out.with_columns(_normalize_period_start_expr("period_start"))
+        id_cols = [
+            "organization_id",
+            "location_code",
+            "sku",
+            "sku_code",
+            "period_start",
+            "granularity",
+            "id",
+        ]
+        present = [c for c in id_cols if c in out.columns]
+        if len(present) >= 4:
+            from data_staging.config import settings
+
+            vectorized_id_min = int(getattr(settings, "VECTORIZED_ID_MIN_ROWS", 10_000))
+            has_existing_id = "id" in out.columns
+            if out.height >= vectorized_id_min:
+                id_raw = _build_id_raw_expr(
+                    organization_id, has_sku_code="sku_code" in out.columns
+                )
+                out = out.with_columns(id_raw.alias("_id_raw"))
+                generated_id = pl.col("_id_raw").map_batches(
+                    _hash_id_batch, return_dtype=pl.Utf8
+                )
+                if has_existing_id:
+                    out = out.with_columns(
+                        pl.when(_is_empty_expr("id"))
+                        .then(generated_id)
+                        .otherwise(pl.col("id").cast(pl.Utf8))
+                        .alias("id")
+                    )
+                else:
+                    out = out.with_columns(generated_id.alias("id"))
+                out = out.drop("_id_raw")
+            else:
+                out = out.with_columns(
+                    pl.struct(present).map_elements(
+                        lambda row: _build_id_from_fields(
+                            row.get("organization_id"),
+                            row.get("location_code"),
+                            row.get("sku"),
+                            row.get("sku_code"),
+                            row.get("period_start"),
+                            row.get("granularity"),
+                            row.get("id"),
+                            organization_id,
+                        ),
+                        return_dtype=pl.Utf8,
+                    ).alias("id")
+                )
+        if resolve_sku_id and sku_resolver:
+            out = out.with_columns(
+                sku_resolver.resolve_sku_id_series(out, resolve_sku_id=resolve_sku_id).alias(
+                    "sku_id"
+                )
+            )
+        return out
 
     if "sku_code" in out.columns:
         if "sku" in out.columns:
@@ -328,11 +492,10 @@ def apply_history_transforms_polars(
             )
 
     if resolve_sku_id and sku_resolver:
-        rows = out.to_dicts()
-        sku_ids = [
-            _resolve_sku_id_from_row(row, sku_resolver, resolve_sku_id=resolve_sku_id)
-            for row in rows
-        ]
-        out = out.with_columns(pl.Series("sku_id", sku_ids))
+        out = out.with_columns(
+            sku_resolver.resolve_sku_id_series(out, resolve_sku_id=resolve_sku_id).alias(
+                "sku_id"
+            )
+        )
 
     return out

@@ -86,61 +86,105 @@
 }
 
 .drop-zone {
-    border: 3px dashed var(--color-border);
-    /* Thicker border */
-    border-radius: 12px;
-    padding: 3rem 2rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 220px;
+    padding: 2.5rem 1.5rem;
     text-align: center;
-    background: var(--color-bg-tertiary);
-    /* Distinct background (Slate 200 in light, Slate 700 in dark) */
-    transition: all 0.3s ease;
+    border: 2px dashed #94a3b8;
+    border-radius: 12px;
+    background: var(--bg-card, #ffffff);
+    box-shadow:
+        0 1px 2px 0 rgba(15, 23, 42, 0.06),
+        0 0 0 1px rgba(15, 23, 42, 0.04);
+    transition:
+        border-color 0.2s ease,
+        background-color 0.2s ease,
+        box-shadow 0.2s ease;
     cursor: pointer;
+}
+
+@media (prefers-color-scheme: dark) {
+    .drop-zone {
+        border-color: #64748b;
+        background: var(--bg-card, #1e293b);
+        box-shadow:
+            0 1px 3px 0 rgba(0, 0, 0, 0.35),
+            0 0 0 1px rgba(148, 163, 184, 0.12);
+    }
 }
 
 .drop-zone:hover,
 .drop-zone.active {
-    border-color: var(--color-primary);
-    background: rgba(13, 148, 136, 0.1);
-    /* Teal tint */
-    transform: scale(1.02);
+    border-color: #2563eb;
+    background: #eff6ff;
+    box-shadow:
+        0 1px 3px 0 rgba(37, 99, 235, 0.12),
+        0 0 0 3px rgba(37, 99, 235, 0.18);
+}
+
+@media (prefers-color-scheme: dark) {
+    .drop-zone:hover,
+    .drop-zone.active {
+        border-color: #3b82f6;
+        background: rgba(37, 99, 235, 0.14);
+        box-shadow:
+            0 1px 3px 0 rgba(0, 0, 0, 0.4),
+            0 0 0 3px rgba(59, 130, 246, 0.25);
+    }
 }
 
 .drop-zone.has-file {
-    padding: 2rem;
+    padding: 1.5rem;
+    border-style: solid;
+    border-color: #2563eb;
+    background: #f8fafc;
     cursor: default;
 }
 
+@media (prefers-color-scheme: dark) {
+    .drop-zone.has-file {
+        border-color: #3b82f6;
+        background: #0f172a;
+    }
+}
+
 .drop-icon {
-    font-size: 3rem;
-    margin-bottom: 1rem;
-    opacity: 0.5;
+    font-size: 2.75rem;
+    margin-bottom: 0.75rem;
+    line-height: 1;
+    opacity: 0.85;
 }
 
 .drop-text {
-    color: var(--text-secondary);
-    margin-bottom: 1rem;
+    color: var(--text-primary);
+    font-weight: 500;
+    margin-bottom: 0.75rem;
 }
 
 .browse-button {
     display: inline-block;
-    padding: 0.75rem 1.5rem;
-    background: var(--color-primary);
-    color: white;
+    padding: 0.625rem 1.25rem;
+    background: #2563eb;
+    color: #ffffff;
     border-radius: 8px;
+    font-size: 0.875rem;
     font-weight: 500;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, transform 0.15s ease;
 }
 
 .browse-button:hover {
-    background: var(--color-primary-hover);
+    background: #1d4ed8;
     transform: translateY(-1px);
 }
 
 .drop-hint {
-    margin-top: 1rem;
-    font-size: 0.875rem;
-    color: var(--text-tertiary);
+    margin-top: 0.75rem;
+    font-size: 0.8125rem;
+    color: var(--text-secondary);
 }
 
 /* File Info */
@@ -148,9 +192,12 @@
     display: flex;
     align-items: center;
     gap: 1rem;
-    padding: 1rem;
-    background: var(--bg-primary);
+    width: 100%;
+    padding: 1rem 1.25rem;
+    background: var(--bg-card, #ffffff);
+    border: 1px solid var(--border-color);
     border-radius: 8px;
+    box-shadow: 0 1px 2px 0 rgba(15, 23, 42, 0.05);
 }
 
 .file-icon {
@@ -198,40 +245,7 @@
     margin-bottom: 1.5rem;
 }
 
-.form-group label {
-    display: block;
-    font-weight: 500;
-    color: var(--text-primary);
-    margin-bottom: 0.5rem;
-}
-
-.form-group select {
-    width: 100%;
-    padding: 0.75rem 1rem;
-    border: 1px solid #374151;
-    border-radius: 8px;
-    background: #1f2937;
-    color: #f3f4f6;
-    font-size: 1rem;
-    transition: all 0.2s ease;
-}
-
-.form-group select option {
-    background: #1f2937;
-    color: #f3f4f6;
-    padding: 0.5rem;
-}
-
-.form-group select:focus {
-    outline: none;
-    border-color: #6366f1;
-    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
-}
-
-.form-group select:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-}
+/* FormField dentro del wizard: solo espaciado; estilos en FormField.jsx / DESIGN_STYLE */
 
 /* Info Box */
 .info-box {

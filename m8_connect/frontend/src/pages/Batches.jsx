@@ -18,14 +18,31 @@ import {
     ChevronLeft,
     ChevronRight,
 } from 'lucide-react';
-import StatusBadge from '../components/StatusBadge';
-import LoadingSpinner from '../components/LoadingSpinner';
-import Button from '../components/Button';
-import Modal from '../components/Modal';
+import {
+  Badge,
+  LoadingSpinner,
+  PageHeader,
+  Button,
+  Modal,
+  Alert,
+  Input,
+  Select,
+  DataTableShell,
+  DataTable,
+  DataTableHead,
+  DataTableBody,
+  DataTableRow,
+  DataTableTh,
+  DataTableTd,
+  DataTableRowNum,
+  DataTablePagination,
+  SummaryGrid,
+  SummaryBlock,
+} from '../components/ui';
+import { formatDate, formatNumber, formatDurationSeconds, EMPTY } from '../lib/format';
+import { cn } from '../lib/utils';
 import { uploadService } from '../services/uploadService';
 import useSessionLoadGuard from '../hooks/useSessionLoadGuard';
-import '../components/wizard/Step3Preview.css';
-import './Batches.css';
 
 const ACTIVE_STATUSES = ['PROCESSING', 'PENDING', 'PENDING_PROCESS', 'PENDING_MAPPING', 'PENDING_PREVIEW'];
 const RESUMABLE_STATUSES = ['FAILED', 'PARTIALLY_PROMOTED'];
@@ -35,19 +52,6 @@ const SUCCESS_STATUSES = ['COMPLETED', 'PROMOTED', 'PARTIALLY_PROMOTED'];
 
 const getBatchDisplayDate = (batch) =>
     batch?.display_at || batch?.created_at || batch?.started_at || batch?.completed_at || null;
-
-const formatDate = (value) => {
-    if (value == null || value === '') return '—';
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return '—';
-    return date.toLocaleString('es-MX', {
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-    });
-};
 
 const getBatchDateMs = (batch) => {
     const raw = getBatchDisplayDate(batch);
@@ -60,23 +64,12 @@ const PAGE_SIZE = 10;
 
 const SORTABLE_COLUMNS = [
     { key: 'batch_id', label: 'Batch ID', getValue: (b) => (b.batch_id || '').toLowerCase() },
-    {
-        key: 'organization_name',
-        label: 'Organización',
-        getValue: (b) => (b.organization_name || b.organization_id || '').toLowerCase(),
-    },
     { key: 'source_name', label: 'Fuente', getValue: (b) => (b.source_name || '').toLowerCase() },
     { key: 'status', label: 'Estado', getValue: (b) => (b.status || '').toLowerCase() },
     {
         key: 'records_count',
         label: 'Registros',
         getValue: (b) => Number(b.records_count) || 0,
-        numeric: true,
-    },
-    {
-        key: 'file_size',
-        label: 'Tamaño',
-        getValue: (b) => Number(b.file_size) || 0,
         numeric: true,
     },
     {
@@ -93,51 +86,31 @@ const SORTABLE_COLUMNS = [
     },
 ];
 
-const SortableTh = ({ columnKey, label, sortKey, sortDir, onSort, className = '' }) => {
+const SortableTh = ({ columnKey, label, sortKey, sortDir, onSort, numeric }) => {
     const active = sortKey === columnKey;
     const Icon = active ? (sortDir === 'asc' ? ArrowUp : ArrowDown) : ArrowUpDown;
     return (
-        <th className={className}>
+        <DataTableTh numeric={numeric}>
             <button
                 type="button"
-                className={`batches-sort-btn${active ? ' batches-sort-btn--active' : ''}`}
+                className={cn(
+                  'inline-flex items-center gap-1 font-semibold bg-transparent border-0 p-0 cursor-pointer',
+                  active ? 'text-brand-600' : 'text-inherit hover:text-brand-600',
+                  numeric && 'w-full justify-end'
+                )}
                 onClick={() => onSort(columnKey)}
                 aria-sort={active ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
             >
                 <span>{label}</span>
-                <Icon size={14} className="batches-sort-btn__icon" aria-hidden />
+                <Icon size={14} className={cn('flex-shrink-0', active ? 'opacity-100' : 'opacity-55')} aria-hidden />
             </button>
-        </th>
+        </DataTableTh>
     );
-};
-
-const formatFileSize = (bytes) => {
-    if (!bytes) return '—';
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(2)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
-};
-
-const formatDurationSeconds = (seconds) => {
-    const total = Math.max(0, Math.floor(Number(seconds) || 0));
-    if (total < 60) return `${total}s`;
-    if (total < 3600) {
-        const minutes = Math.floor(total / 60);
-        const secs = total % 60;
-        return secs ? `${minutes}m ${secs}s` : `${minutes}m`;
-    }
-    const hours = Math.floor(total / 3600);
-    const minutes = Math.floor((total % 3600) / 60);
-    const secs = total % 60;
-    const parts = [`${hours}h`];
-    if (minutes) parts.push(`${minutes}m`);
-    if (secs && hours < 2) parts.push(`${secs}s`);
-    return parts.join(' ');
 };
 
 const getBatchDurationLabel = (batch) => {
     if (batch?.duration_label) return batch.duration_label;
-    if (batch?.duration_seconds == null) return '—';
+    if (batch?.duration_seconds == null) return EMPTY;
     const label = formatDurationSeconds(batch.duration_seconds);
     return batch?.duration_in_progress ? `${label}…` : label;
 };
@@ -196,7 +169,7 @@ const BatchStatusCell = ({ status, errorMessage }) => {
                 tabIndex={showPopover ? 0 : undefined}
                 aria-describedby={open && showPopover ? 'batch-error-popover' : undefined}
             >
-                <StatusBadge status={status} />
+                <Badge status={status} />
             </div>
             {showPopover &&
                 open &&
@@ -504,88 +477,52 @@ const Batches = () => {
     };
 
     return (
-        <div className="page-container batches-page">
-            <header className="batches-header">
-                <div>
-                    <h1 className="batches-title">Batches</h1>
-                    <p className="batches-subtitle">
-                        Administra y monitorea las cargas de archivos
-                    </p>
-                </div>
-                <Button icon={RefreshCw} variant="secondary" onClick={loadBatches} loading={loading}>
-                    Actualizar
-                </Button>
-            </header>
+        <div className="flex flex-1 flex-col gap-5 overflow-y-auto p-8 max-w-6xl mx-auto w-full scrollbar-thin">
+            <PageHeader
+                icon={Layers}
+                title="Lotes"
+                subtitle="Administra y monitorea las cargas de archivos"
+                action={
+                    <Button icon={RefreshCw} variant="secondary" onClick={loadBatches} loading={loading}>
+                        Actualizar
+                    </Button>
+                }
+            />
 
             {actionMessage && (
-                <div
-                    className={`batches-action-banner batches-action-banner--${actionMessage.type}`}
-                    role="status"
-                >
+                <Alert variant={actionMessage.type === 'success' ? 'success' : 'error'} onClose={() => setActionMessage(null)}>
                     {actionMessage.text}
-                    <button
-                        type="button"
-                        className="batches-action-banner__close"
-                        onClick={() => setActionMessage(null)}
-                        aria-label="Cerrar"
-                    >
-                        ×
-                    </button>
-                </div>
+                </Alert>
             )}
 
-            <div className="catalog-dashboard batches-dashboard">
-                <div className="catalog-dashboard__file summary-block">
-                    <span className="summary-block__title">Resumen</span>
-                    <div className="catalog-file-stats">
-                        <div className="summary-card">
-                            <div className="card-label">
-                                <Layers size={14} aria-hidden />
-                                Total
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <SummaryBlock title="Resumen">
+                    <SummaryGrid columns={2} className="lg:grid-cols-4">
+                        {[
+                            { label: 'Total', value: formatNumber(stats.total), icon: Layers },
+                            { label: 'En curso', value: formatNumber(stats.active), icon: Loader2 },
+                            { label: 'Completados', value: formatNumber(stats.success), icon: CheckCircle2 },
+                            { label: 'Fallidos', value: formatNumber(stats.failed), icon: AlertTriangle, variant: stats.failed > 0 ? 'danger' : 'default' },
+                        ].map((s) => (
+                            <div key={s.label} className="text-center lg:text-left">
+                                <div className="flex items-center justify-center lg:justify-start gap-1 text-xs text-slate-500 mb-1">
+                                    <s.icon size={14} />{s.label}
+                                </div>
+                                <p className={cn('text-xl font-bold m-0', s.variant === 'danger' && 'text-red-600')}>{s.value}</p>
                             </div>
-                            <span className="value">{stats.total.toLocaleString()}</span>
-                        </div>
-                        <div className="summary-card">
-                            <div className="card-label">
-                                <Loader2 size={14} aria-hidden />
-                                En curso
-                            </div>
-                            <span className="value">{stats.active.toLocaleString()}</span>
-                        </div>
-                        <div className="summary-card">
-                            <div className="card-label">
-                                <CheckCircle2 size={14} aria-hidden />
-                                Completados
-                            </div>
-                            <span className="value">{stats.success.toLocaleString()}</span>
-                        </div>
-                        <div className={`summary-card ${stats.failed > 0 ? 'batches-stat--failed' : ''}`}>
-                            <div className="card-label">
-                                <AlertTriangle size={14} aria-hidden />
-                                Fallidos
-                            </div>
-                            <span className="value">{stats.failed.toLocaleString()}</span>
-                        </div>
-                    </div>
-                </div>
-                <div className="catalog-dashboard__target summary-block batches-filters-block">
-                    <span className="summary-block__title">Filtros</span>
-                    <div className="batches-filters">
-                        <div className="batches-search">
-                            <Search size={16} className="batches-search__icon" aria-hidden />
-                            <input
-                                type="text"
-                                className="batches-search__input"
-                                placeholder="Buscar por ID o fuente…"
-                                value={filter}
-                                onChange={(e) => setFilter(e.target.value)}
-                            />
-                        </div>
-                        <select
-                            className="batches-filter-select"
-                            value={statusFilter}
-                            onChange={(e) => setStatusFilter(e.target.value)}
-                        >
+                        ))}
+                    </SummaryGrid>
+                </SummaryBlock>
+                <SummaryBlock title="Filtros" accent>
+                    <div className="flex flex-col gap-3">
+                        <Input
+                            type="text"
+                            icon={Search}
+                            placeholder="Buscar por ID o fuente…"
+                            value={filter}
+                            onChange={(e) => setFilter(e.target.value)}
+                        />
+                        <Select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
                             <option value="">Todos los estados</option>
                             <option value="PENDING">Pending</option>
                             <option value="PENDING_PROCESS">Pending Process</option>
@@ -595,18 +532,13 @@ const Batches = () => {
                             <option value="FAILED">Failed</option>
                             <option value="CANCELLED">Cancelled</option>
                             <option value="PROMOTED">Promoted</option>
-                        </select>
+                        </Select>
                     </div>
-                    <div className="batches-filters-meta">
-                        <span>
-                            {total} batch{total !== 1 ? 'es' : ''} en total
-                            {total > 0 && ` · página ${page} de ${totalPages}`}
-                        </span>
-                        {stats.records > 0 && (
-                            <span>{stats.records.toLocaleString()} registros en esta página</span>
-                        )}
+                    <div className="flex flex-wrap gap-4 mt-3 pt-3 border-t border-dashed border-[#e2e8f0] text-xs text-slate-500">
+                        <span>{total} lote{total !== 1 ? 's' : ''} en total{total > 0 && ` · página ${page} de ${totalPages}`}</span>
+                        {stats.records > 0 && <span>{formatNumber(stats.records)} registros en esta página</span>}
                     </div>
-                </div>
+                </SummaryBlock>
             </div>
 
             {loading ? (
@@ -614,16 +546,12 @@ const Batches = () => {
                     <LoadingSpinner message="Cargando batches…" />
                 </div>
             ) : batches.length > 0 || total > 0 ? (
-                <div className="preview-table-container batches-table-panel">
-                    <div className="preview-table-header batches-table-header">
-                        <div>
-                            <h3>Listado de batches</h3>
-                            <span className="preview-table-meta">
-                                {sortedBatches.length} fila{sortedBatches.length !== 1 ? 's' : ''} ·{' '}
-                                {PAGE_SIZE} por página
-                            </span>
-                        </div>
-                        <div className="batches-bulk-actions">
+                <DataTableShell
+                    title="Listado de lotes"
+                    meta={`${sortedBatches.length} fila${sortedBatches.length !== 1 ? 's' : ''} · ${PAGE_SIZE} por página`}
+                    maxHeight="min(520px, calc(100vh - 340px))"
+                    headerActions={
+                        <>
                             <Button
                                 variant="secondary"
                                 icon={Trash2}
@@ -643,13 +571,13 @@ const Batches = () => {
                             >
                                 Eliminar todos
                             </Button>
-                        </div>
-                    </div>
-                    <div className="table-wrapper batches-table-wrapper">
-                        <table className="preview-table batches-table">
-                            <thead>
+                        </>
+                    }
+                >
+                        <DataTable>
+                            <DataTableHead>
                                 <tr>
-                                    <th className="batches-th-checkbox">
+                                    <DataTableTh className="w-10 text-center">
                                         <input
                                             type="checkbox"
                                             className="batches-checkbox"
@@ -661,8 +589,8 @@ const Batches = () => {
                                             aria-label="Seleccionar todos en esta página"
                                             disabled={deleting || pageIds.length === 0}
                                         />
-                                    </th>
-                                    <th className="preview-table__row-num">#</th>
+                                    </DataTableTh>
+                                    <DataTableTh className="w-10 text-center">#</DataTableTh>
                                     {SORTABLE_COLUMNS.map((col) => (
                                         <SortableTh
                                             key={col.key}
@@ -671,15 +599,13 @@ const Batches = () => {
                                             sortKey={sortKey}
                                             sortDir={sortDir}
                                             onSort={handleSort}
-                                            className={
-                                                col.numeric ? 'batch-numeric batches-th--numeric' : ''
-                                            }
+                                            numeric={col.numeric}
                                         />
                                     ))}
-                                    <th className="batches-table__actions-col">Acciones</th>
+                                    <DataTableTh className="whitespace-nowrap">Acciones</DataTableTh>
                                 </tr>
-                            </thead>
-                            <tbody>
+                            </DataTableHead>
+                            <DataTableBody>
                                 {sortedBatches.map((batch, index) => {
                                     const canMonitor = MONITOR_STATUSES.includes(batch.status);
                                     const canResume = RESUMABLE_STATUSES.includes(batch.status);
@@ -687,147 +613,69 @@ const Batches = () => {
                                     const rowNum = (page - 1) * PAGE_SIZE + index + 1;
 
                                     return (
-                                        <tr
-                                            key={batch.batch_id}
-                                            className={
-                                                selectedIds.has(batch.batch_id)
-                                                    ? 'batches-row--selected'
-                                                    : ''
-                                            }
-                                        >
-                                            <td className="batches-td-checkbox">
+                                        <DataTableRow key={batch.batch_id} selected={selectedIds.has(batch.batch_id)}>
+                                            <DataTableTd className="text-center">
                                                 <input
                                                     type="checkbox"
-                                                    className="batches-checkbox"
+                                                    className="accent-brand-600"
                                                     checked={selectedIds.has(batch.batch_id)}
                                                     onChange={() => toggleSelectOne(batch.batch_id)}
                                                     aria-label={`Seleccionar batch ${batch.batch_id}`}
                                                     disabled={deleting}
                                                 />
-                                            </td>
-                                            <td className="preview-table__row-num">{rowNum}</td>
-                                            <td>
-                                                <code
-                                                    className="batch-id-code"
-                                                    title={batch.batch_id}
-                                                >
-                                                    {batch.batch_id.substring(0, 8)}…
-                                                </code>
-                                            </td>
-                                            <td
-                                                className="batch-organization"
-                                                title={batch.organization_name || batch.organization_id || ''}
-                                            >
-                                                {batch.organization_name || '—'}
-                                            </td>
-                                            <td className="batch-source" title={batch.source_name}>
-                                                {batch.source_name || '—'}
-                                            </td>
-                                            <td>
-                                                <BatchStatusCell
-                                                    status={batch.status}
-                                                    errorMessage={batch.error_message}
-                                                />
-                                            </td>
-                                            <td className="batch-numeric">
-                                                {batch.records_count?.toLocaleString() ?? 0}
-                                            </td>
-                                            <td className="batch-numeric">
-                                                {formatFileSize(batch.file_size)}
-                                            </td>
-                                            <td className="batch-date" title={getBatchDisplayDate(batch) || ''}>
+                                            </DataTableTd>
+                                            <DataTableRowNum>{rowNum}</DataTableRowNum>
+                                            <DataTableTd mono className="whitespace-nowrap text-xs">
+                                                {batch.batch_id}
+                                            </DataTableTd>
+                                            <DataTableTd className="max-w-[140px] truncate font-medium" title={batch.source_name}>
+                                                {batch.source_name || EMPTY}
+                                            </DataTableTd>
+                                            <DataTableTd>
+                                                <BatchStatusCell status={batch.status} errorMessage={batch.error_message} />
+                                            </DataTableTd>
+                                            <DataTableTd numeric>{formatNumber(batch.records_count ?? 0)}</DataTableTd>
+                                            <DataTableTd className="whitespace-nowrap text-xs" title={getBatchDisplayDate(batch) || ''}>
                                                 {formatDate(getBatchDisplayDate(batch))}
-                                            </td>
-                                            <td
-                                                className={`batch-numeric batch-duration${
-                                                    batch.duration_in_progress
-                                                        ? ' batch-duration--live'
-                                                        : ''
-                                                }`}
-                                                title={getBatchDurationTitle(batch)}
-                                            >
+                                            </DataTableTd>
+                                            <DataTableTd numeric className={batch.duration_in_progress ? 'text-brand-600 font-medium' : ''} title={getBatchDurationTitle(batch)}>
                                                 {getBatchDurationLabel(batch)}
-                                            </td>
-                                            <td>
-                                                <div className="batch-actions">
+                                            </DataTableTd>
+                                            <DataTableTd>
+                                                <div className="flex items-center gap-1">
                                                     {canMonitor && (
-                                                        <button
-                                                            type="button"
-                                                            className="batch-action-btn batch-action-btn--view"
-                                                            onClick={() => handleViewProgress(batch.batch_id)}
-                                                            title="Ver progreso"
-                                                            aria-label="Ver progreso"
-                                                        >
-                                                            <Eye size={16} aria-hidden />
+                                                        <button type="button" className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-[#e2e8f0] hover:bg-blue-50 hover:text-brand-700 hover:border-blue-200" onClick={() => handleViewProgress(batch.batch_id)} title="Ver progreso" aria-label="Ver progreso">
+                                                            <Eye size={16} />
                                                         </button>
                                                     )}
                                                     {canResume && (
-                                                        <button
-                                                            type="button"
-                                                            className="batch-action-btn batch-action-btn--resume"
-                                                            onClick={() => handleResume(batch.batch_id)}
-                                                            title="Reanudar promoción"
-                                                            aria-label="Reanudar promoción"
-                                                        >
-                                                            <Play size={16} aria-hidden />
+                                                        <button type="button" className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-blue-200 text-brand-600 hover:bg-blue-50" onClick={() => handleResume(batch.batch_id)} title="Reanudar promoción" aria-label="Reanudar promoción">
+                                                            <Play size={16} />
                                                         </button>
                                                     )}
                                                     {canCancel && (
-                                                        <button
-                                                            type="button"
-                                                            className="batch-action-btn batch-action-btn--cancel"
-                                                            onClick={(e) => handleCancel(batch.batch_id, e)}
-                                                            title="Cancelar batch"
-                                                            aria-label="Cancelar batch"
-                                                            disabled={cancellingId === batch.batch_id}
-                                                        >
-                                                            {cancellingId === batch.batch_id ? (
-                                                                <Loader2 size={16} className="batch-action-btn__spin" aria-hidden />
-                                                            ) : (
-                                                                <XCircle size={16} aria-hidden />
-                                                            )}
+                                                        <button type="button" className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-[#e2e8f0] hover:bg-red-50 hover:text-red-600 hover:border-red-200 disabled:opacity-50" onClick={(e) => handleCancel(batch.batch_id, e)} title="Cancelar batch" aria-label="Cancelar batch" disabled={cancellingId === batch.batch_id}>
+                                                            {cancellingId === batch.batch_id ? <Loader2 size={16} className="animate-spin" /> : <XCircle size={16} />}
                                                         </button>
                                                     )}
-                                                    {!canMonitor && !canResume && !canCancel && (
-                                                        <span className="batch-no-actions">—</span>
-                                                    )}
+                                                    {!canMonitor && !canResume && !canCancel && <span className="text-slate-400">—</span>}
                                                 </div>
-                                            </td>
-                                        </tr>
+                                            </DataTableTd>
+                                        </DataTableRow>
                                     );
                                 })}
-                            </tbody>
-                        </table>
-                    </div>
+                            </DataTableBody>
+                        </DataTable>
                     {totalPages > 1 && (
-                        <nav className="batches-pagination" aria-label="Paginación de batches">
-                            <Button
-                                variant="secondary"
-                                icon={ChevronLeft}
-                                onClick={() => setPage((p) => Math.max(1, p - 1))}
-                                disabled={page <= 1 || loading}
-                            >
-                                Anterior
-                            </Button>
-                            <span className="batches-pagination__info">
-                                Página {page} de {totalPages}
-                            </span>
-                            <Button
-                                variant="secondary"
-                                icon={ChevronRight}
-                                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                                disabled={page >= totalPages || loading}
-                            >
-                                Siguiente
-                            </Button>
-                        </nav>
+                        <DataTablePagination>
+                            <Button variant="secondary" icon={ChevronLeft} onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading}>Anterior</Button>
+                            <span className="text-sm text-slate-500 min-w-[8rem] text-center">Página {page} de {totalPages}</span>
+                            <Button variant="secondary" icon={ChevronRight} onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading}>Siguiente</Button>
+                        </DataTablePagination>
                     )}
-                </div>
+                </DataTableShell>
             ) : (
-                <div className="preview-table-container preview-table-container--empty batches-empty">
-                    <h3>Sin batches</h3>
-                    <p>No se encontraron batches con los filtros actuales.</p>
-                </div>
+                <DataTableShell empty emptyTitle="Sin lotes" emptyDescription="No se encontraron lotes con los filtros actuales." />
             )}
 
             {/* Modal de confirmación custom del sistema */}

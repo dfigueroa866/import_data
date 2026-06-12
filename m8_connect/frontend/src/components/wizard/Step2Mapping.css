@@ -176,16 +176,6 @@
     text-decoration: line-through;
 }
 
-/* Custom Row Input */
-.custom-col-input {
-    background: var(--bg-primary);
-    border: 1px solid var(--border-color);
-    color: var(--color-warning);
-    border-radius: 4px;
-    padding: 0.25rem 0.5rem;
-    width: 60%;
-}
-
 .add-column-row {
     margin-top: 1rem;
     display: flex;
@@ -327,14 +317,6 @@ input:checked+.toggle-slider:after {
     color: var(--color-danger);
 }
 
-/* Inputs & Selects */
-.mapped-select {
-    border-color: var(--color-primary) !important;
-    background-color: rgba(99, 102, 241, 0.1) !important;
-    color: var(--color-primary-light) !important;
-    font-weight: 500;
-}
-
 .btn-icon.danger {
     color: var(--color-danger);
     background: transparent;
@@ -359,18 +341,6 @@ input:checked+.toggle-slider:after {
     color: var(--text-secondary, #64748b);
 }
 
-.mapping-target select:focus,
-.mapping-default input:focus {
-    outline: none;
-    border-color: var(--primary-color);
-    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
-}
-
-.mapping-default input::placeholder {
-    color: var(--text-tertiary);
-    font-size: 0.875rem;
-}
-
 /* Dedup Section */
 .dedup-section {
     margin-bottom: 2rem;
@@ -393,37 +363,7 @@ input:checked+.toggle-slider:after {
 }
 
 .dedup-input {
-    width: 100%;
-    padding: 0.75rem 1rem;
-    border: 2px solid #4b5563;
-    /* Brighter gray border */
-    border-radius: 8px;
-    background: #111827;
-    /* Slightly lighter dark background */
-    color: #f9fafb;
-    /* Pure white text */
-    font-size: 1rem;
-    transition: all 0.2s ease;
-}
-
-.dedup-input::placeholder {
-    color: #d1d5db;
-    /* Much brighter placeholder - almost white */
-    opacity: 1;
-    font-style: italic;
-}
-
-.dedup-input:hover {
-    border-color: #6b7280;
-    /* Lighter on hover */
-    background: #1a202c;
-}
-
-.dedup-input:focus {
-    outline: none;
-    border-color: var(--primary-color);
-    box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.2);
-    background: #0f172a;
+    @apply input-field;
 }
 
 /* Responsive */

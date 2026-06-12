@@ -1,14 +1,41 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { generatePreview } from '../../services/wizardService';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import {
+    startPreview,
+    getPreviewResult,
+    getProcessingProgress,
+    downloadRejectedRecords,
+} from '../../services/wizardService';
 import { useAuth } from '../../context/AuthContext';
 import useSessionLoadGuard from '../../hooks/useSessionLoadGuard';
-import Button from '../Button';
-import LoadingSpinner from '../LoadingSpinner';
+import {
+    POLL_INTERVAL_PREVIEW_MS,
+    POLL_INTERVAL_MAX_MS,
+    MAX_TRANSIENT_POLL_ERRORS,
+    MAX_STALE_POLLS,
+    isTransientPollError,
+    resolvePollIntervalMs,
+} from '../../constants/pollConfig';
+import { Button, LoadingSpinner, DataTableShell, DataTable, DataTableHead, DataTableBody, DataTableRow, DataTableTh, DataTableTd, DataTableRowNum, EmptyState } from '../ui';
+import { formatNumber, EMPTY } from '../../lib/format';
 import {
     enrichHistoryPreviewRows,
     getHistoryPreviewColumnKeys,
 } from '../../constants/historyConfig';
 import './Step3Preview.css';
+
+/** Evita doble init en Strict Mode (misma pestaña). */
+const previewInitInflight = new Map();
+
+const previewProgressSnapshot = (progressData) => {
+    if (!progressData) return '';
+    return [
+        progressData.phase,
+        progressData.progress_percentage,
+        progressData.current_operation,
+        progressData.chunks_processed,
+        progressData.status,
+    ].join('|');
+};
 
 const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
     const { user } = useAuth();
@@ -20,45 +47,239 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
         wizardData.organizationName ||
         '';
     const [loading, setLoading] = useState(true);
+    const [downloadingRejected, setDownloadingRejected] = useState(false);
     const [error, setError] = useState('');
+    const [previewProgress, setPreviewProgress] = useState(null);
+
+    const pollIntervalRef = useRef(null);
+    const pollDelayRef = useRef(POLL_INTERVAL_PREVIEW_MS);
+    const pollErrorCountRef = useRef(0);
+    const stalePollCountRef = useRef(0);
+    const lastProgressSnapshotRef = useRef(null);
+    const previewPollBatchRef = useRef(null);
+    const updateWizardDataRef = useRef(updateWizardData);
+    updateWizardDataRef.current = updateWizardData;
 
     useSessionLoadGuard(loading);
 
-    useEffect(() => {
-        loadPreview();
+    const stopPreviewPoll = useCallback(() => {
+        previewPollBatchRef.current = null;
+        if (pollIntervalRef.current) {
+            clearTimeout(pollIntervalRef.current);
+            pollIntervalRef.current = null;
+        }
     }, []);
 
-    const loadPreview = async () => {
-        try {
-            setLoading(true);
-            setError('');
-            const data = await generatePreview(wizardData.batchId);
-            console.log("Preview Data Loaded:", data); // Keep log for safety
-            setPreviewData(data);
+    const clearPollTimer = useCallback(() => {
+        stopPreviewPoll();
+    }, [stopPreviewPoll]);
 
-            if (updateWizardData) {
-                updateWizardData({
-                    previewData: data,
-                    validationSummary: data?.validation_summary
-                });
-            }
-        } catch (err) {
-            console.error("Preview Load Error:", err);
-            const detail = err.response?.data?.detail;
-            if (err.code === 'ECONNABORTED') {
-                setError(
-                    'La vista previa tardó demasiado (archivo muy grande). '
-                    + 'Intenta de nuevo o reduce el tamaño del archivo.'
-                );
-            } else if (detail) {
-                setError(typeof detail === 'string' ? detail : JSON.stringify(detail));
-            } else {
-                setError('No se pudo generar la vista previa. Verifica que el backend esté activo.');
-            }
-        } finally {
-            setLoading(false);
-        }
+    const isPreviewProgressComplete = (progressData) => {
+        if (!progressData) return false;
+        if (progressData.phase === 'preview_done') return true;
+        if (progressData.phase === 'preview_failed') return false;
+        return (
+            progressData.status === 'COMPLETED'
+            && Number(progressData.progress_percentage) >= 100
+            && progressData.phase === 'done'
+        );
     };
+
+    const fetchPreviewResultOnce = useCallback(async (batchId) => {
+        const data = await getPreviewResult(batchId);
+        if (!data?.validation_summary && !data?.preview_data) {
+            throw new Error('Respuesta de vista previa incompleta.');
+        }
+        return data;
+    }, []);
+
+    const applyPreviewData = useCallback((data) => {
+        setPreviewData(data);
+        updateWizardDataRef.current?.({
+            previewData: data,
+            validationSummary: data?.validation_summary,
+            validatedInPreview: Boolean(data?.validated_in_preview),
+        });
+    }, []);
+
+    const pollPreviewUntilDone = useCallback(async (batchId) => {
+        if (previewPollBatchRef.current === batchId) {
+            return;
+        }
+        stopPreviewPoll();
+        previewPollBatchRef.current = batchId;
+        pollErrorCountRef.current = 0;
+        stalePollCountRef.current = 0;
+        lastProgressSnapshotRef.current = null;
+        pollDelayRef.current = POLL_INTERVAL_PREVIEW_MS;
+
+        const runPollLoop = async () => {
+            if (previewPollBatchRef.current !== batchId) {
+                return;
+            }
+
+            try {
+                const progressData = await getProcessingProgress(batchId);
+                if (previewPollBatchRef.current !== batchId) {
+                    return;
+                }
+
+                setPreviewProgress(progressData);
+                pollErrorCountRef.current = 0;
+                pollDelayRef.current = resolvePollIntervalMs(progressData, { preview: true });
+
+                const snapshot = previewProgressSnapshot(progressData);
+                if (lastProgressSnapshotRef.current === snapshot) {
+                    stalePollCountRef.current += 1;
+                } else {
+                    stalePollCountRef.current = 0;
+                    lastProgressSnapshotRef.current = snapshot;
+                }
+
+                if (progressData?.phase === 'preview_failed') {
+                    stopPreviewPoll();
+                    setLoading(false);
+                    setError(progressData?.current_operation || 'Error al generar la vista previa.');
+                    return;
+                }
+
+                if (isPreviewProgressComplete(progressData)) {
+                    stopPreviewPoll();
+                    const data = await fetchPreviewResultOnce(batchId);
+                    applyPreviewData(data);
+                    setLoading(false);
+                    return;
+                }
+
+                if (stalePollCountRef.current >= MAX_STALE_POLLS) {
+                    stopPreviewPoll();
+                    setLoading(false);
+                    setError(
+                        'La vista previa dejó de reportar progreso. '
+                        + 'Reinicia el backend si hace falta y pulsa Reintentar.',
+                    );
+                    return;
+                }
+
+                try {
+                    const data = await fetchPreviewResultOnce(batchId);
+                    if (previewPollBatchRef.current !== batchId) {
+                        return;
+                    }
+                    stopPreviewPoll();
+                    applyPreviewData(data);
+                    setLoading(false);
+                    return;
+                } catch (resultErr) {
+                    if (resultErr.response?.status !== 409) {
+                        throw resultErr;
+                    }
+                }
+
+                pollIntervalRef.current = setTimeout(runPollLoop, pollDelayRef.current);
+            } catch (err) {
+                if (previewPollBatchRef.current !== batchId) {
+                    return;
+                }
+                console.error('Preview poll error:', err);
+                if (err.response?.status === 409) {
+                    pollIntervalRef.current = setTimeout(runPollLoop, pollDelayRef.current);
+                    return;
+                }
+                if (isTransientPollError(err)) {
+                    pollErrorCountRef.current += 1;
+                    pollDelayRef.current = Math.min(
+                        pollDelayRef.current * 1.5,
+                        POLL_INTERVAL_MAX_MS,
+                    );
+                    if (pollErrorCountRef.current <= MAX_TRANSIENT_POLL_ERRORS) {
+                        pollIntervalRef.current = setTimeout(runPollLoop, pollDelayRef.current);
+                        return;
+                    }
+                }
+                stopPreviewPoll();
+                setLoading(false);
+                const detail = err.response?.data?.detail;
+                setError(
+                    typeof detail === 'string'
+                        ? detail
+                        : 'No se pudo completar la vista previa. Verifica que el backend esté activo.',
+                );
+            }
+        };
+
+        pollIntervalRef.current = setTimeout(runPollLoop, pollDelayRef.current);
+    }, [applyPreviewData, fetchPreviewResultOnce, stopPreviewPoll]);
+
+    const loadPreview = useCallback(async (batchId, { force = false } = {}) => {
+        if (!batchId) {
+            setLoading(false);
+            setError('No hay batch activo para generar la vista previa.');
+            return;
+        }
+
+        if (!force && previewInitInflight.has(batchId)) {
+            await previewInitInflight.get(batchId);
+            return;
+        }
+
+        const runLoad = async () => {
+            try {
+                setLoading(true);
+                setError('');
+                setPreviewProgress(null);
+                stopPreviewPoll();
+
+                const { status, data } = await startPreview(batchId, { force });
+
+                if (status === 200 && data?.validation_summary) {
+                    stopPreviewPoll();
+                    applyPreviewData(data);
+                    setLoading(false);
+                    return;
+                }
+
+                await pollPreviewUntilDone(batchId);
+            } catch (err) {
+                console.error('Preview Load Error:', err);
+                stopPreviewPoll();
+                const detail = err.response?.data?.detail;
+                if (detail) {
+                    setError(typeof detail === 'string' ? detail : JSON.stringify(detail));
+                } else {
+                    setError('No se pudo generar la vista previa. Verifica que el backend esté activo.');
+                }
+                setLoading(false);
+            }
+        };
+
+        if (force) {
+            previewInitInflight.delete(batchId);
+        }
+
+        const loadPromise = runLoad();
+        previewInitInflight.set(batchId, loadPromise);
+        try {
+            await loadPromise;
+        } finally {
+            if (previewInitInflight.get(batchId) === loadPromise) {
+                previewInitInflight.delete(batchId);
+            }
+        }
+    }, [applyPreviewData, pollPreviewUntilDone, stopPreviewPoll]);
+
+    useEffect(() => {
+        const batchId = wizardData?.batchId;
+        if (!batchId) return undefined;
+
+        loadPreview(batchId);
+
+        return () => {
+            stopPreviewPoll();
+        };
+        // loadPreview/stopPreviewPoll are estabilizados con refs; solo reaccionar al batch.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [wizardData?.batchId]);
 
     const val = previewData?.validation_summary || {};
     const loadMode = previewData?.load_type || wizardData?.loadMode || 'history';
@@ -119,8 +340,28 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
         return Number(value).toLocaleString('es-MX');
     };
 
-    const rowsSaved = Math.max(0, (val.total_rows || 0) - (val.grouped_rows || 0));
-    const qtyIntegrityOk = (val.diff_qty || 0) === 0;
+    const handleDownloadRejected = async () => {
+        if (!wizardData?.batchId || downloadingRejected) {
+            return;
+        }
+        try {
+            setDownloadingRejected(true);
+            await downloadRejectedRecords(wizardData.batchId);
+        } catch (err) {
+            console.error('Download failed', err);
+            const message = err?.message || err.response?.data?.detail || 'Error desconocido';
+            alert(`No se pudo descargar rechazados: ${message}`);
+        } finally {
+            setDownloadingRejected(false);
+        }
+    };
+
+    const validRows = val.valid_rows ?? val.df_after_dropna ?? val.total_rows;
+    const rejectedRows = val.rejected_rows ?? val.dropped_rows ?? 0;
+    const productionRows = val.grouped_rows ?? validRows;
+    const canContinue = !val.has_error && (validRows > 0);
+    const rowsSaved = Math.max(0, (validRows || 0) - (val.grouped_rows || 0));
+    const qtyIntegrityOk = Math.abs(val.diff_qty || 0) <= 0.001;
     const totalIntegrityOk = Math.abs(val.diff_total || 0) <= 0.001;
     const locIntegrityOk = (val.loc_diff_count || 0) === 0;
     const skuIntegrityOk = (val.dmd_unit_diff_count || 0) === 0;
@@ -132,12 +373,31 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
         '-';
 
     if (loading) {
+        const pct = Math.min(100, Math.max(0, Number(previewProgress?.progress_percentage) || 0));
+        const operation = previewProgress?.current_operation || 'Generando vista previa del mapeo…';
+        const processed = previewProgress?.processed_rows ?? 0;
+        const total = previewProgress?.total_rows ?? 0;
+        const showRowCounts = total > 0;
+
         return (
             <div className="step3-loading">
                 <LoadingSpinner />
-                <p>Generando vista previa del mapeo…</p>
+                <p>{operation}</p>
+                <div className="step3-progress">
+                    <div className="step3-progress__bar">
+                        <div
+                            className="step3-progress__fill"
+                            style={{ width: `${pct}%` }}
+                        />
+                    </div>
+                    {showRowCounts && (
+                        <p className="step3-progress__rows">
+                            {formatNumber(processed)} de {formatNumber(total)} filas
+                        </p>
+                    )}
+                </div>
                 <p className="step3-loading__hint">
-                    Archivos grandes pueden tardar varios minutos. No cierres esta ventana.
+                    Archivos grandes pueden tardar varios minutos. Puedes dejar esta ventana abierta.
                 </p>
             </div>
         );
@@ -153,7 +413,14 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                     <Button variant="secondary" onClick={prevStep}>
                         ← Volver al mapeo
                     </Button>
-                    <Button variant="primary" onClick={loadPreview}>
+                    <Button variant="primary" onClick={() => {
+                        const batchId = wizardData?.batchId;
+                        if (batchId) {
+                            previewInitInflight.delete(batchId);
+                        }
+                        stopPreviewPoll();
+                        loadPreview(wizardData?.batchId, { force: true });
+                    }}>
                         Reintentar
                     </Button>
                 </div>
@@ -171,7 +438,14 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                     <Button variant="secondary" onClick={prevStep}>
                         ← Back to Mapping
                     </Button>
-                    <Button variant="primary" onClick={loadPreview}>
+                    <Button variant="primary" onClick={() => {
+                        const batchId = wizardData?.batchId;
+                        if (batchId) {
+                            previewInitInflight.delete(batchId);
+                        }
+                        stopPreviewPoll();
+                        loadPreview(wizardData?.batchId, { force: true });
+                    }}>
                         Try Again
                     </Button>
                 </div>
@@ -181,11 +455,11 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
 
     return (
         <div className="step3-preview">
-            <h2>{isCatalog ? 'Paso 3: Vista previa del mapeo' : 'Paso 3: Vista previa y validación'}</h2>
+            <h2>{isCatalog ? 'Paso 3: Vista previa del mapeo' : 'Paso 3: Vista previa y agregación'}</h2>
             <p className="step-description">
                 {isCatalog
                     ? 'Revisa cómo quedarán los datos tras el mapeo. La validación contra la tabla destino se hará en el siguiente paso, antes de promover a producción.'
-                    : 'Revisa la agregación, integridad de cantidades y una muestra de filas antes de procesar.'}
+                    : 'Validación completa sobre todas las filas del archivo, descarga de rechazados, agregación weekly/monthly y vista previa del resultado.'}
             </p>
 
             {isCatalog ? (
@@ -207,7 +481,7 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                 <>
                     {val.has_error && (
                         <div className="validation-alert error">
-                            ⚠ Error de Validación: {val.error_detail}
+                            ⚠ {val.error_detail}
                         </div>
                     )}
                     <div className="history-metrics-panel">
@@ -234,42 +508,27 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                         </div>
 
                         <div className="history-kpi-grid">
-                            <article className="history-kpi">
+                            <article className="history-kpi history-kpi--filas">
                                 <span className="history-kpi__label">Filas</span>
-                                <div className="history-kpi__flow">
+                                <div className="history-kpi__flow history-kpi__flow--prod">
                                     <div className="history-kpi__value-block">
                                         <strong>{formatMetric(val.total_rows)}</strong>
                                         <small>originales</small>
                                     </div>
                                     <span className="history-kpi__arrow" aria-hidden="true">→</span>
-                                    <div className="history-kpi__value-block history-kpi__value-block--accent">
-                                        <strong>{formatMetric(val.grouped_rows)}</strong>
-                                        <small>agrupadas</small>
+                                    <div className="step3-prod-summary step3-prod-summary--inline">
+                                        <p className="step3-prod-summary__hint">
+                                            Total final que se cargará a producción en el siguiente paso.
+                                        </p>
+                                        <div className="step3-prod-summary__value">
+                                            <span className="step3-prod-summary__label">A producción</span>
+                                            <strong>{formatMetric(productionRows)}</strong>
+                                        </div>
                                     </div>
                                 </div>
                                 {rowsSaved > 0 && (
                                     <span className="history-kpi__delta">
                                         −{formatMetric(rowsSaved)} filas consolidadas
-                                    </span>
-                                )}
-                            </article>
-
-                            <article className={`history-kpi ${!qtyIntegrityOk ? 'history-kpi--warn' : ''}`}>
-                                <span className="history-kpi__label">Cantidad (QTY)</span>
-                                <div className="history-kpi__flow">
-                                    <div className="history-kpi__value-block">
-                                        <strong>{formatMetric(val.orig_qty)}</strong>
-                                        <small>original</small>
-                                    </div>
-                                    <span className="history-kpi__arrow" aria-hidden="true">→</span>
-                                    <div className="history-kpi__value-block">
-                                        <strong>{formatMetric(val.agg_qty)}</strong>
-                                        <small>agrupado</small>
-                                    </div>
-                                </div>
-                                {!qtyIntegrityOk && (
-                                    <span className="history-kpi__delta history-kpi__delta--danger">
-                                        Δ {formatMetric(val.diff_qty)}
                                     </span>
                                 )}
                             </article>
@@ -300,30 +559,37 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
 
                     <div className="validation-report validation-report--compact">
                         <div className="validation-report__header">
-                            <h4 className="validation-report__title">Detalle de validaciones</h4>
+                            <h4 className="validation-report__title">Detalle de validación y agregación</h4>
                             <span className="validation-report__subtitle">
-                                Pipeline weekly · {processType || 'Weekly'}
+                                {processType === 'Monthly' ? 'Agrupación mensual' : 'Agrupación semanal'}
                             </span>
                         </div>
 
                         <div className="validation-report__sections">
-                            <section className="report-section">
-                                <h5 className="report-section__title">Limpieza</h5>
-                                <dl className="report-dl">
-                                    <div className="report-dl__row">
-                                        <dt>Filas antes de drop NA</dt>
-                                        <dd>{formatMetric(val.df_before_dropna ?? val.total_rows)}</dd>
+                            {rejectedRows > 0 && (
+                                <section className="report-section report-section--validation">
+                                    <h5 className="report-section__title">Validación</h5>
+                                    <dl className="report-dl">
+                                        <div className="report-dl__row report-dl__row--rejected">
+                                            <dt>Rechazadas</dt>
+                                            <dd>{formatMetric(rejectedRows)}</dd>
+                                        </div>
+                                    </dl>
+                                    <div className="step3-rejected-download">
+                                        <Button
+                                            variant="danger"
+                                            size="sm"
+                                            onClick={handleDownloadRejected}
+                                            disabled={downloadingRejected}
+                                            className="step3-rejected-download__btn"
+                                        >
+                                            {downloadingRejected
+                                                ? 'Preparando descarga…'
+                                                : 'Descargar rechazados (.csv)'}
+                                        </Button>
                                     </div>
-                                    <div className="report-dl__row report-dl__row--muted">
-                                        <dt>Eliminadas por nulos</dt>
-                                        <dd>−{formatMetric(val.dropped_rows)}</dd>
-                                    </div>
-                                    <div className="report-dl__row">
-                                        <dt>Filas limpias</dt>
-                                        <dd>{formatMetric(val.df_after_dropna ?? val.total_rows)}</dd>
-                                    </div>
-                                </dl>
-                            </section>
+                                </section>
+                            )}
 
                             <section className="report-section">
                                 <h5 className="report-section__title">Agregación</h5>
@@ -348,6 +614,20 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                             <section className="report-section">
                                 <h5 className="report-section__title">Integridad</h5>
                                 <dl className="report-dl">
+                                    <div className="report-dl__row">
+                                        <dt>Sumatorias totales</dt>
+                                        <dd>
+                                            <span
+                                                className={`report-status ${
+                                                    qtyIntegrityOk ? 'success' : 'error'
+                                                }`}
+                                            >
+                                                {qtyIntegrityOk
+                                                    ? 'Sin diferencias'
+                                                    : `Δ ${formatMetric(val.diff_qty)}`}
+                                            </span>
+                                        </dd>
+                                    </div>
                                     <div className="report-dl__row">
                                         <dt>Sumatorias por locación</dt>
                                         <dd>
@@ -385,57 +665,45 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
 
             {/* Preview Table */}
             {displayPreviewRows.length > 0 ? (
-                <div className="preview-table-container">
-                    <div className="preview-table-header">
-                        <h3>
-                            {isCatalog
-                                ? 'Vista previa (primeras 20 filas)'
-                                : 'Data Preview (First 20 Aggregated Rows)'}
-                        </h3>
-                        <span className="preview-table-meta">
-                            {displayPreviewRows.length} filas · {previewColumnKeys.length} columnas
-                        </span>
-                    </div>
-                    <div className="table-wrapper">
-                        <table className="preview-table">
-                            <thead>
-                                <tr>
-                                    <th className="preview-table__row-num">#</th>
-                                    {previewColumnKeys.map((key) => (
-                                        <th key={key}>{formatPreviewColumnLabel(key)}</th>
-                                    ))}
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {displayPreviewRows.map((row, index) => (
-                                    <tr key={index}>
-                                        <td className="preview-table__row-num">{index + 1}</td>
-                                        {previewColumnKeys.map((key) => {
-                                            const cellVal = row[key];
-                                            const display = formatPreviewCellValue(key, cellVal);
-                                            const isEmpty = !display;
-                                            return (
-                                                <td
-                                                    key={key}
-                                                    title={display || undefined}
-                                                    className={isEmpty ? 'preview-table__empty' : ''}
-                                                >
-                                                    {isEmpty ? '—' : display}
-                                                </td>
-                                            );
-                                        })}
-                                    </tr>
+                <DataTableShell
+                    title={isCatalog ? 'Vista previa (primeras 20 filas)' : 'Vista previa (primeras 20 filas agregadas)'}
+                    meta={`${displayPreviewRows.length} filas · ${previewColumnKeys.length} columnas`}
+                    maxHeight="400px"
+                >
+                    <DataTable>
+                        <DataTableHead>
+                            <tr>
+                                <DataTableTh className="w-10 text-center">#</DataTableTh>
+                                {previewColumnKeys.map((key) => (
+                                    <DataTableTh key={key}>{formatPreviewColumnLabel(key)}</DataTableTh>
                                 ))}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
+                            </tr>
+                        </DataTableHead>
+                        <DataTableBody>
+                            {displayPreviewRows.map((row, index) => (
+                                <DataTableRow key={index}>
+                                    <DataTableRowNum>{index + 1}</DataTableRowNum>
+                                    {previewColumnKeys.map((key) => {
+                                        const cellVal = row[key];
+                                        const display = formatPreviewCellValue(key, cellVal);
+                                        const isEmpty = !display;
+                                        return (
+                                            <DataTableTd key={key} title={display || undefined} empty={isEmpty}>
+                                                {isEmpty ? EMPTY : display}
+                                            </DataTableTd>
+                                        );
+                                    })}
+                                </DataTableRow>
+                            ))}
+                        </DataTableBody>
+                    </DataTable>
+                </DataTableShell>
             ) : (
-                <div className="preview-table-container preview-table-container--empty">
-                    <h3>Data Preview Not Available</h3>
-                    <p>Debug info: previewData.preview_data type is {typeof previewData?.preview_data}</p>
-                    <pre style={{ maxWidth: '100%', overflow: 'auto' }}>{JSON.stringify(previewData, null, 2)}</pre>
-                </div>
+                <DataTableShell
+                    empty
+                    emptyTitle="Vista previa no disponible"
+                    emptyDescription={`Tipo de preview_data: ${typeof previewData?.preview_data}`}
+                />
             )}
 
             <div className="step-actions">
@@ -445,14 +713,20 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                 <Button
                     variant="primary"
                     onClick={nextStep}
-                    disabled={catalogBlocked}
+                    disabled={catalogBlocked || (!isCatalog && !canContinue)}
                     title={
                         catalogBlocked
                             ? 'Corrige los errores de validación antes de continuar'
-                            : undefined
+                            : !canContinue
+                              ? 'No hay filas válidas para continuar'
+                              : undefined
                     }
                 >
-                    {catalogBlocked ? 'Corrija errores para continuar' : isCatalog ? 'Procesar y validar →' : 'Confirmar y procesar →'}
+                    {catalogBlocked
+                        ? 'Corrija errores para continuar'
+                        : isCatalog
+                          ? 'Procesar y validar →'
+                          : 'Cargar a producción →'}
                 </Button>
             </div>
         </div>

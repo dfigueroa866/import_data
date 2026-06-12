@@ -45,14 +45,36 @@ def rejected_records_path(batch_id: str) -> Path:
 def resolve_staging_path(stored: Optional[str]) -> Optional[Path]:
     if not stored:
         return None
-    path = Path(stored)
-    if path.is_file():
-        return path.resolve()
-    if not path.is_absolute():
-        by_name = get_temp_dir() / path.name
-        if by_name.is_file():
-            return by_name
-    return path
+    text = str(stored).strip()
+    if not text:
+        return None
+
+    candidates: List[Path] = [Path(text)]
+    if "\\" in text:
+        candidates.append(Path(text.replace("\\", "/")))
+    if "/" in text:
+        candidates.append(Path(text.replace("/", "\\")))
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+
+    by_name = get_temp_dir() / Path(text).name
+    if by_name.is_file():
+        return by_name.resolve()
+
+    return None
+
+
+def find_rejected_records_file(batch_id: str, metadata_path: Optional[str] = None) -> Optional[Path]:
+    candidates = [
+        resolve_staging_path(metadata_path),
+        rejected_records_path(batch_id),
+    ]
+    for candidate in candidates:
+        if candidate and candidate.is_file():
+            return candidate
+    return None
 
 
 def find_valid_records_file(batch_id: str, metadata_path: Optional[str] = None) -> Optional[Path]:

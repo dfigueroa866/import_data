@@ -1,8 +1,7 @@
 import React, { useState } from 'react';
 import { uploadFileTemp } from '../../services/wizardService';
 import useSessionLoadGuard from '../../hooks/useSessionLoadGuard';
-import Button from '../Button';
-import LoadingSpinner from '../LoadingSpinner';
+import { Button, LoadingSpinner, Alert, FormField, Select } from '../ui';
 import {
     HISTORY_TARGET_SCHEMA,
     HISTORY_TARGET_TABLE,
@@ -104,15 +103,6 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
 
     return (
         <div className="step1-upload">
-            <h2>Paso 1: Archivo y tipo de agregación</h2>
-            <p className="step-description">
-                Los datos se cargarán siempre en{' '}
-                <strong>
-                    {HISTORY_TARGET_SCHEMA}.{HISTORY_TARGET_TABLE}
-                </strong>
-                . Elige cómo consolidar fechas antes de mapear columnas.
-            </p>
-
             <div className="step1-content">
                 <div className="upload-section">
                     <h3>Archivo</h3>
@@ -175,9 +165,8 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
                 <div className="selection-section">
                     <h3>Configuración</h3>
 
-                    <div className="form-group">
-                        <label htmlFor="processType">Tipo de proceso *</label>
-                        <select
+                    <FormField label="Tipo de proceso" htmlFor="processType" required className="form-group">
+                        <Select
                             id="processType"
                             value={processType}
                             onChange={(e) => setProcessType(e.target.value)}
@@ -185,8 +174,8 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
                             <option value="">-- Seleccionar --</option>
                             <option value="Weekly">Weekly (agrupa por semana)</option>
                             <option value="Monthly">Monthly (agrupa por mes)</option>
-                        </select>
-                    </div>
+                        </Select>
+                    </FormField>
 
                     <div className="info-box history-target-box">
                         <div className="info-label">Tabla destino</div>
@@ -206,7 +195,7 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
                 </div>
             </div>
 
-            {error && <div className="error-message">{error}</div>}
+            {error && <Alert variant="error">{error}</Alert>}
 
             <div className="step-actions">
                 <Button
@@ -216,7 +205,7 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
                 >
                     {uploading ? (
                         <>
-                            <LoadingSpinner size="small" />
+                            <LoadingSpinner size="sm" />
                             Subiendo...
                         </>
                     ) : (

@@ -64,6 +64,22 @@ class Settings(BaseSettings):
     VALIDATION_TIMEOUT: int = Field(300, description="Timeout de validación en segundos")
     PROCESS_CHUNK_SIZE: int = Field(250_000, description="Filas por chunk en PROCESS_FILE")
     AGGREGATION_CHUNK_SIZE: int = Field(500_000, description="Filas por chunk en agregación")
+    AGG_SPILL_THRESHOLD_ROWS: int = Field(
+        5_000_000,
+        description="A partir de este volumen, agregación usa spill-to-disk en lugar de reduce solo en RAM",
+    )
+    AGG_IN_MEMORY_MAX_ROWS: int = Field(
+        10_000_000,
+        description="Máximo de filas de entrada para intentar reduce incremental solo en RAM",
+    )
+    AGG_ACC_MAX_ROWS: int = Field(
+        3_000_000,
+        description="Si el acumulador supera este tamaño durante reduce, cambiar a spill",
+    )
+    PREVIEW_JOB_TIMEOUT: int = Field(
+        0,
+        description="Timeout del job PREVIEW_BATCH en segundos (0 = sin límite)",
+    )
     PARQUET_COMPRESSION: str = Field("snappy", description="Compresión Parquet (snappy/gzip)")
     PROGRESS_COMMIT_EVERY_CHUNKS: int = Field(2, description="Actualizar progreso cada N chunks")
     PROGRESS_ROW_INTERVAL: int = Field(50000, description="Filas entre updates de progreso intra-chunk")

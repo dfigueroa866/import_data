@@ -1,12 +1,15 @@
+import glob
 import polars as pl
 from pathlib import Path
-from typing import Dict, Any, Tuple, List
+from typing import Callable, Dict, Any, Tuple, List, Optional
 import datetime
 
+from data_staging.services.catalog.catalog_transforms import coerce_period_start_to_date
 from data_staging.utils.mapping_helpers import is_virtual_mapping_key
 from data_staging.utils.encoding_utils import detect_file_encoding, encoding_for_polars
 from data_staging.config import settings
 from data_staging.utils.chunk_iterators import iter_csv_chunks, iter_parquet_chunks, count_csv_rows, count_parquet_rows
+from data_staging.utils.batch_staging_files import get_temp_dir
 
 # Tolerancia global para diferencias de flotantes (como en weekly.py)
 TOTAL_PRICE_TOL = 1e-6
@@ -53,16 +56,7 @@ def _clean_chunk_types(df: pl.DataFrame) -> pl.DataFrame:
                 df = df.with_columns(pl.col(numeric_col).cast(pl.Float64, strict=False))
 
     if DATE_COL in df.columns:
-        if df[DATE_COL].dtype == pl.Utf8:
-            try:
-                df = df.with_columns(pl.col(DATE_COL).str.to_datetime(strict=True).dt.date())
-            except Exception:
-                import pandas as pd
-
-                parsed_dates = pd.to_datetime(df[DATE_COL].to_pandas(), errors="coerce").dt.date
-                df = df.with_columns(pl.Series(DATE_COL, parsed_dates))
-        elif df[DATE_COL].dtype == pl.Datetime:
-            df = df.with_columns(pl.col(DATE_COL).dt.date())
+        df = coerce_period_start_to_date(df, DATE_COL)
     return df
 
 
@@ -83,7 +77,6 @@ def _prepare_chunk_for_agg(
     df: pl.DataFrame,
     actual_rename_mapping: Dict[str, str],
     static_mappings: Dict[str, Any],
-    required_to_drop: List[str],
 ) -> pl.DataFrame:
     df = df.rename(actual_rename_mapping)
     df = _apply_legacy_column_aliases(df)
@@ -91,32 +84,97 @@ def _prepare_chunk_for_agg(
         if target_col not in df.columns:
             df = df.with_columns(pl.lit(default_val).alias(target_col))
     df = _clean_chunk_types(df)
-    subset = [c for c in required_to_drop if c in df.columns]
-    if subset:
-        df = df.drop_nulls(subset=subset)
     return df
 
 
-def process_aggregation_streaming(
-    file_path: str,
+AggregationProgressCallback = Callable[[int, int, int, int], None]
+AggregationReduceCallback = Callable[[int, int], None]
+AggregationDfFinalizer = Callable[[pl.DataFrame], pl.DataFrame]
+
+
+def _agg_spill_threshold_rows() -> int:
+    return int(getattr(settings, "AGG_SPILL_THRESHOLD_ROWS", 5_000_000))
+
+
+def _agg_in_memory_max_rows() -> int:
+    return int(getattr(settings, "AGG_IN_MEMORY_MAX_ROWS", 10_000_000))
+
+
+def _agg_acc_max_rows() -> int:
+    return int(getattr(settings, "AGG_ACC_MAX_ROWS", 3_000_000))
+
+
+def _should_use_agg_spill(total_rows: int) -> bool:
+    return total_rows >= _agg_spill_threshold_rows()
+
+
+def _agg_partial_glob(batch_id: str) -> str:
+    return str(get_temp_dir() / f"{batch_id}_agg_partial_*.parquet")
+
+
+def _agg_partial_path(batch_id: str, index: int) -> Path:
+    return get_temp_dir() / f"{batch_id}_agg_partial_{index}.parquet"
+
+
+def cleanup_agg_partial_files(batch_id: Optional[str]) -> None:
+    if not batch_id:
+        return
+    for path in glob.glob(_agg_partial_glob(batch_id)):
+        try:
+            Path(path).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _merge_agg_partials(acc: Optional[pl.DataFrame], partial: pl.DataFrame, dims: List[str]) -> pl.DataFrame:
+    if partial.is_empty():
+        return acc if acc is not None else partial
+    if acc is None or acc.is_empty():
+        return partial
+    combined = pl.concat([acc, partial], how="diagonal_relaxed")
+    metrics = _build_agg_metrics(combined)
+    if metrics and dims:
+        return combined.group_by(dims).agg(metrics)
+    return combined
+
+
+def _finalize_agg_df_from_partials(
+    partial_paths: List[Path],
+    group_dimensions: List[str],
+    reduce_progress_callback: Optional[AggregationReduceCallback] = None,
+) -> pl.DataFrame:
+    if not partial_paths:
+        return pl.DataFrame()
+    dims = [c for c in group_dimensions if c in pl.read_parquet(partial_paths[0], n_rows=0).columns]
+    metrics_exprs = _build_agg_metrics(pl.read_parquet(partial_paths[0], n_rows=0))
+    if not metrics_exprs:
+        return pl.concat([pl.read_parquet(p) for p in partial_paths], how="diagonal_relaxed")
+
+    total_steps = len(partial_paths)
+    if total_steps == 1:
+        if reduce_progress_callback:
+            reduce_progress_callback(1, 1)
+        frame = pl.read_parquet(partial_paths[0])
+        return frame.group_by(dims).agg(metrics_exprs) if dims else frame
+
+    accumulator: Optional[pl.DataFrame] = None
+    for step_idx, partial_path in enumerate(partial_paths, start=1):
+        partial = pl.read_parquet(partial_path)
+        accumulator = _merge_agg_partials(accumulator, partial, dims)
+        if reduce_progress_callback:
+            reduce_progress_callback(step_idx, total_steps)
+    return accumulator if accumulator is not None else pl.DataFrame()
+
+
+def _discover_agg_column_mappings(
     column_mappings: Dict[str, Dict[str, Any]],
     column_toggles: Dict[str, bool],
-    process_type: str,
-    encoding: str = "utf-8",
-    delimiter: str = ",",
-) -> Tuple[Dict[str, Any], Path]:
-    """Map-reduce aggregation by chunks (memory-bounded)."""
-    path = Path(file_path)
-    chunk_size = getattr(settings, "AGGREGATION_CHUNK_SIZE", 500_000)
-    is_parquet = path.suffix.lower() == ".parquet"
-    pl_encoding = encoding_for_polars(detect_file_encoding(path))
-
-    # Reuse column discovery (wizard format: file_col -> {target: ...})
-    rename_mapping = {}
-    cols_to_keep = []
+) -> Tuple[Dict[str, str], List[str], Dict[str, Any], bool, bool]:
+    rename_mapping: Dict[str, str] = {}
+    cols_to_keep: List[str] = []
+    static_mappings: Dict[str, Any] = {}
     start_date_col = None
     qty_col = None
-    static_mappings = {}
 
     for file_col, config in column_mappings.items():
         if column_toggles.get(file_col, True):
@@ -132,7 +190,92 @@ def process_aggregation_streaming(
                 elif target in (QTY_COL, "qty"):
                     qty_col = QTY_COL
 
-    if not qty_col or not start_date_col:
+    return rename_mapping, cols_to_keep, static_mappings, bool(start_date_col), bool(qty_col)
+
+
+def _build_agg_stats_payload(
+    *,
+    total_rows_original: int,
+    rows_before_agg: int,
+    grouped_rows: int,
+    orig_qty: float,
+    agg_qty: float,
+    orig_total: float,
+    agg_total: float,
+    loc_diff_count: int = 0,
+    dmd_unit_diff_count: int = 0,
+    preview_dicts: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    diff_qty = orig_qty - agg_qty
+    diff_total = orig_total - agg_total
+    has_error = False
+    error_detail = None
+
+    if abs(diff_qty) > 0.001:
+        has_error = True
+        error_detail = f"QTY mismatch. Orig: {orig_qty}, Agg: {agg_qty}"
+
+    consolidated_rows = rows_before_agg - grouped_rows
+    compression_factor = round(rows_before_agg / grouped_rows, 2) if grouped_rows > 0 else 0.0
+
+    return {
+        "total_rows": total_rows_original,
+        "grouped_rows": grouped_rows,
+        "df_before_dropna": rows_before_agg,
+        "df_after_dropna": rows_before_agg,
+        "dropped_rows": 0,
+        "consolidated_rows": consolidated_rows,
+        "compression_factor": compression_factor,
+        "loc_diff_count": loc_diff_count,
+        "dmd_unit_diff_count": dmd_unit_diff_count,
+        "orig_qty": round(orig_qty, 2),
+        "agg_qty": round(agg_qty, 2),
+        "orig_total": round(orig_total, 2),
+        "agg_total": round(agg_total, 2),
+        "diff_qty": round(diff_qty, 2),
+        "diff_total": round(diff_total, 2),
+        "has_warnings": False,
+        "has_error": has_error,
+        "error_detail": error_detail,
+        "preview_data": preview_dicts or [],
+    }
+
+
+def _preview_dicts_from_df(agg_df: pl.DataFrame) -> List[Dict[str, Any]]:
+    preview_data = agg_df.head(20)
+    try:
+        for col in preview_data.columns:
+            if preview_data[col].dtype in [pl.Date, pl.Datetime, pl.Time]:
+                preview_data = preview_data.with_columns(pl.col(col).cast(pl.Utf8))
+        return preview_data.to_dicts() if preview_data.height else []
+    except Exception:
+        return []
+
+
+def process_aggregation_streaming(
+    file_path: str,
+    column_mappings: Dict[str, Dict[str, Any]],
+    column_toggles: Dict[str, bool],
+    process_type: str,
+    encoding: str = "utf-8",
+    delimiter: str = ",",
+    total_rows_hint: Optional[int] = None,
+    progress_callback: Optional[AggregationProgressCallback] = None,
+    reduce_progress_callback: Optional[AggregationReduceCallback] = None,
+    df_finalizer: Optional[AggregationDfFinalizer] = None,
+    batch_id: Optional[str] = None,
+) -> Tuple[Dict[str, Any], Path]:
+    """Map-reduce aggregation by chunks (memory-bounded, spill-capable)."""
+    path = Path(file_path)
+    chunk_size = getattr(settings, "AGGREGATION_CHUNK_SIZE", 500_000)
+    is_parquet = path.suffix.lower() == ".parquet"
+    pl_encoding = encoding_for_polars(detect_file_encoding(path))
+
+    rename_mapping, cols_to_keep, static_mappings, has_date, has_qty = _discover_agg_column_mappings(
+        column_mappings, column_toggles
+    )
+
+    if not has_qty or not has_date:
         return {
             "has_error": True,
             "error_detail": (
@@ -142,62 +285,109 @@ def process_aggregation_streaming(
         }, path
 
     if is_parquet:
-        total_rows_original = count_parquet_rows(path)
+        total_rows_original = (
+            int(total_rows_hint)
+            if total_rows_hint is not None and total_rows_hint > 0
+            else count_parquet_rows(path)
+        )
         chunk_iter = iter_parquet_chunks(path, chunk_size)
     else:
-        total_rows_original = count_csv_rows(path, delimiter, encoding)
+        total_rows_original = (
+            int(total_rows_hint)
+            if total_rows_hint is not None and total_rows_hint > 0
+            else count_csv_rows(path, delimiter, encoding)
+        )
         chunk_iter = iter_csv_chunks(path, chunk_size, delimiter, encoding)
 
-    required_to_drop = [DATE_COL, LOC_COL, SKU_COL, "hist_stream", QTY_COL, "dmd_group"]
     group_dimensions = ["organization_id", LOC_COL, SKU_COL, DATE_COL]
-    partials: List[pl.DataFrame] = []
-    df_before_dropna = 0
+    rows_before_agg = 0
     orig_qty = 0.0
     orig_total = 0.0
+    chunks_total = max(1, (total_rows_original + chunk_size - 1) // chunk_size)
+    chunk_idx = 0
+
+    use_spill = _should_use_agg_spill(total_rows_original) or total_rows_original > _agg_in_memory_max_rows()
+    if batch_id:
+        cleanup_agg_partial_files(batch_id)
+
+    accumulator: Optional[pl.DataFrame] = None
+    spill_paths: List[Path] = []
+    spill_index = 0
 
     for chunk in chunk_iter:
+        chunk_idx += 1
         actual_cols = [c for c in cols_to_keep if c in chunk.columns]
         if actual_cols:
             chunk = chunk.select(actual_cols)
-        chunk = _prepare_chunk_for_agg(chunk, rename_mapping, static_mappings, required_to_drop)
-        df_before_dropna += chunk.height
+        chunk = _prepare_chunk_for_agg(chunk, rename_mapping, static_mappings)
+        rows_before_agg += chunk.height
         if QTY_COL in chunk.columns:
             orig_qty += float(chunk[QTY_COL].sum())
         if "total_price" in chunk.columns:
             orig_total += float(chunk["total_price"].sum())
         if chunk.is_empty():
+            if progress_callback:
+                progress_callback(rows_before_agg, total_rows_original, chunk_idx, chunks_total)
             continue
+
         if process_type == "Weekly":
             chunk = chunk.with_columns(pl.col(DATE_COL).dt.truncate("1w"))
         else:
             chunk = chunk.with_columns(pl.col(DATE_COL).dt.truncate("1mo"))
         dims = [c for c in group_dimensions if c in chunk.columns]
         metrics = _build_agg_metrics(chunk)
-        if metrics:
-            partials.append(chunk.group_by(dims).agg(metrics))
+        if not metrics:
+            if progress_callback:
+                progress_callback(rows_before_agg, total_rows_original, chunk_idx, chunks_total)
+            continue
 
-    if not partials:
-        agg_df = pl.DataFrame()
+        partial = chunk.group_by(dims).agg(metrics)
+
+        if use_spill and batch_id:
+            spill_index += 1
+            spill_path = _agg_partial_path(batch_id, spill_index)
+            partial.write_parquet(spill_path)
+            spill_paths.append(spill_path)
+        else:
+            accumulator = _merge_agg_partials(accumulator, partial, dims)
+            if (
+                accumulator is not None
+                and accumulator.height > _agg_acc_max_rows()
+                and batch_id
+            ):
+                use_spill = True
+                spill_index += 1
+                spill_path = _agg_partial_path(batch_id, spill_index)
+                accumulator.write_parquet(spill_path)
+                spill_paths.append(spill_path)
+                accumulator = None
+
+        if progress_callback:
+            progress_callback(rows_before_agg, total_rows_original, chunk_idx, chunks_total)
+
+    if use_spill and spill_paths:
+        if accumulator is not None and not accumulator.is_empty():
+            spill_index += 1
+            tail_path = _agg_partial_path(batch_id, spill_index)
+            accumulator.write_parquet(tail_path)
+            spill_paths.append(tail_path)
+            accumulator = None
+        agg_df = _finalize_agg_df_from_partials(
+            spill_paths,
+            group_dimensions,
+            reduce_progress_callback=reduce_progress_callback,
+        )
+        cleanup_agg_partial_files(batch_id)
+    elif accumulator is not None and not accumulator.is_empty():
+        if reduce_progress_callback:
+            reduce_progress_callback(1, 1)
+        agg_df = accumulator
     else:
-        combined = pl.concat(partials, how="diagonal_relaxed")
-        dims = [c for c in group_dimensions if c in combined.columns]
-        metrics = _build_agg_metrics(combined)
-        agg_df = combined.group_by(dims).agg(metrics) if metrics else combined
+        agg_df = pl.DataFrame()
 
     grouped_rows = agg_df.height
     agg_qty = float(agg_df[QTY_COL].sum()) if QTY_COL in agg_df.columns and agg_df.height else 0.0
     agg_total = float(agg_df["total_price"].sum()) if "total_price" in agg_df.columns and agg_df.height else 0.0
-    diff_qty = orig_qty - agg_qty
-    diff_total = orig_total - agg_total
-
-    loc_diff_count = 0
-    dmd_unit_diff_count = 0
-    has_error = False
-    error_detail = None
-
-    if abs(diff_qty) > 0.001:
-        has_error = True
-        error_detail = f"QTY mismatch. Orig: {orig_qty}, Agg: {agg_qty}"
 
     stem = path.stem
     output_path = path.parent / (f"{stem}.parquet" if stem.endswith("_agglomerated") else f"{stem}_agglomerated.parquet")
@@ -212,41 +402,21 @@ def process_aggregation_streaming(
             pl.lit(original_ext).alias("source"),
             pl.lit("SELL_IN").alias("sales_channel"),
         ])
+        if df_finalizer:
+            agg_df = df_finalizer(agg_df)
         agg_df.write_parquet(output_path)
 
-    preview_data = agg_df.head(20)
-    try:
-        for col in preview_data.columns:
-            if preview_data[col].dtype in [pl.Date, pl.Datetime, pl.Time]:
-                preview_data = preview_data.with_columns(pl.col(col).cast(pl.Utf8))
-        preview_dicts = preview_data.to_dicts() if preview_data.height else []
-    except Exception:
-        preview_dicts = []
-
-    consolidated_rows = df_before_dropna - grouped_rows
-    compression_factor = round(df_before_dropna / grouped_rows, 2) if grouped_rows > 0 else 0.0
-
-    return {
-        "total_rows": total_rows_original,
-        "grouped_rows": grouped_rows,
-        "df_before_dropna": df_before_dropna,
-        "df_after_dropna": df_before_dropna,
-        "dropped_rows": total_rows_original - df_before_dropna,
-        "consolidated_rows": consolidated_rows,
-        "compression_factor": compression_factor,
-        "loc_diff_count": loc_diff_count,
-        "dmd_unit_diff_count": dmd_unit_diff_count,
-        "orig_qty": round(orig_qty, 2),
-        "agg_qty": round(agg_qty, 2),
-        "orig_total": round(orig_total, 2),
-        "agg_total": round(agg_total, 2),
-        "diff_qty": round(diff_qty, 2),
-        "diff_total": round(diff_total, 2),
-        "has_warnings": False,
-        "has_error": has_error,
-        "error_detail": error_detail,
-        "preview_data": preview_dicts,
-    }, output_path
+    stats = _build_agg_stats_payload(
+        total_rows_original=total_rows_original,
+        rows_before_agg=rows_before_agg,
+        grouped_rows=grouped_rows,
+        orig_qty=orig_qty,
+        agg_qty=agg_qty,
+        orig_total=orig_total,
+        agg_total=agg_total,
+        preview_dicts=_preview_dicts_from_df(agg_df),
+    )
+    return stats, output_path
 
 
 def process_aggregation(
@@ -255,7 +425,12 @@ def process_aggregation(
     column_toggles: Dict[str, bool],
     process_type: str,
     encoding: str = "utf-8",
-    delimiter: str = ","
+    delimiter: str = ",",
+    total_rows_hint: Optional[int] = None,
+    progress_callback: Optional[AggregationProgressCallback] = None,
+    reduce_progress_callback: Optional[AggregationReduceCallback] = None,
+    df_finalizer: Optional[AggregationDfFinalizer] = None,
+    batch_id: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], Path]:
     """
     Procesa el archivo completo agrupándolo semanal o mensualmente.
@@ -283,7 +458,17 @@ def process_aggregation(
     use_streaming = getattr(settings, "AGGREGATION_CHUNK_SIZE", 500_000) > 0
     if use_streaming:
         return process_aggregation_streaming(
-            file_path, column_mappings, column_toggles, process_type, encoding, delimiter
+            file_path,
+            column_mappings,
+            column_toggles,
+            process_type,
+            encoding,
+            delimiter,
+            total_rows_hint=total_rows_hint,
+            progress_callback=progress_callback,
+            reduce_progress_callback=reduce_progress_callback,
+            df_finalizer=df_finalizer,
+            batch_id=batch_id,
         )
 
     pl_encoding = encoding_for_polars(detect_file_encoding(path))
@@ -327,7 +512,7 @@ def process_aggregation(
                 f"'{DATE_COL}' y '{QTY_COL}'. "
                 f"Mapeadas: period_start={start_date_col}, quantity={qty_col}"
             ),
-        }
+        }, path
 
     is_parquet = path.suffix.lower() == ".parquet"
 
@@ -396,33 +581,11 @@ def process_aggregation(
                     df = df.with_columns(pl.col(numeric_col).cast(pl.Float64, strict=False))
 
         if DATE_COL in df.columns:
-            if df[DATE_COL].dtype == pl.Utf8:
-                try:
-                    df = df.with_columns(
-                        pl.col(DATE_COL).str.to_datetime(strict=True).dt.date()
-                    )
-                except Exception:
-                    import pandas as pd
-
-                    parsed_dates = pd.to_datetime(df[DATE_COL].to_pandas(), errors="coerce").dt.date
-                    df = df.with_columns(pl.Series(DATE_COL, parsed_dates))
-            elif df[DATE_COL].dtype == pl.Datetime:
-                df = df.with_columns(pl.col(DATE_COL).dt.date())
+            df = coerce_period_start_to_date(df, DATE_COL)
     except Exception as e:
         return {"has_error": True, "error_detail": f"Data type cleaning failed: {str(e)}"}, path
 
-    required_to_drop = [
-        c
-        for c in [DATE_COL, LOC_COL, SKU_COL, "hist_stream", QTY_COL, "dmd_group"]
-        if c in df.columns
-    ]
-    
-    print(f"DEBUG: Rows before drop_nulls: {df.height}")
-    df_before_dropna = df.height
-    df = df.drop_nulls(subset=required_to_drop)
-    df_after_dropna = df.height
-    dropped_rows = df_before_dropna - df_after_dropna
-    print(f"DEBUG: Rows after dropping required_to_drop {required_to_drop}: {df_after_dropna}, Dropped: {dropped_rows}")
+    rows_before_agg = df.height
 
     # Obtenemos globales previos a agrupar
     orig_qty = (
@@ -453,8 +616,6 @@ def process_aggregation(
     group_dimensions = [c for c in ["organization_id", LOC_COL, SKU_COL, DATE_COL] if c in df.columns]
 
     agg_df = df.group_by(group_dimensions).agg(metrics)
-
-    print(f"DEBUG: Original df height: {total_rows_original}. Aggregated df height: {agg_df.height}")
 
     grouped_rows = agg_df.height
     agg_qty = float(agg_df[QTY_COL].sum()) if QTY_COL in agg_df.columns else 0.0
@@ -503,8 +664,8 @@ def process_aggregation(
             print("DEBUG: bad_sku found:", bad_sku.head(20).to_dicts())
         dmd_unit_diff_count = bad_sku.height
 
-    consolidated_rows = df_after_dropna - agg_df.height
-    compression_factor = round(df_after_dropna / agg_df.height, 2) if agg_df.height > 0 else 0.0
+    consolidated_rows = rows_before_agg - agg_df.height
+    compression_factor = round(rows_before_agg / agg_df.height, 2) if agg_df.height > 0 else 0.0
 
     if loc_diff_count > 0:
         has_error = True
@@ -537,29 +698,19 @@ def process_aggregation(
         pl.lit("SELL_IN").alias("sales_channel")
     ])
 
+    if df_finalizer:
+        agg_df = df_finalizer(agg_df)
+
     agg_df.write_parquet(output_path)
 
-    preview_data = agg_df.head(20)
-
-    # Cast dates and time for JSON serialization
-    try:
-        if preview_data.height > 0:
-            for col in preview_data.columns:
-                if preview_data[col].dtype in [pl.Date, pl.Datetime, pl.Time]:
-                    preview_data = preview_data.with_columns(pl.col(col).cast(pl.Utf8))
-            preview_dicts = preview_data.to_dicts()
-        else:
-            preview_dicts = []
-    except Exception as e:
-        print(f"Error casting preview data types: {e}")
-        preview_dicts = []
+    preview_dicts = _preview_dicts_from_df(agg_df)
 
     return {
         "total_rows": total_rows_original,
         "grouped_rows": grouped_rows,
-        "df_before_dropna": df_before_dropna,
-        "df_after_dropna": df_after_dropna,
-        "dropped_rows": dropped_rows,
+        "df_before_dropna": rows_before_agg,
+        "df_after_dropna": rows_before_agg,
+        "dropped_rows": 0,
         "consolidated_rows": consolidated_rows,
         "compression_factor": compression_factor,
         "loc_diff_count": loc_diff_count,

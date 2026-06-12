@@ -3,8 +3,7 @@ import { Link } from 'react-router-dom';
 import { uploadFileTemp, getCatalogTables } from '../../services/wizardService';
 import { useAuth } from '../../context/AuthContext';
 import useSessionLoadGuard from '../../hooks/useSessionLoadGuard';
-import Button from '../Button';
-import LoadingSpinner from '../LoadingSpinner';
+import { Button, LoadingSpinner, Alert, FormField, Select } from '../ui';
 import './Step1Upload.css';
 
 const formatCatalogDestination = (catalog) => {
@@ -207,8 +206,8 @@ const Step1CatalogUpload = ({ wizardData, updateWizardData, nextStep }) => {
                                 <Link to="/catalogs">Configúralos en Catálogos</Link>.
                             </p>
                         ) : (
-                            <div className="form-group">
-                                <select
+                            <FormField label="Catálogo destino" htmlFor="catalogDefinition" required className="form-group">
+                                <Select
                                     id="catalogDefinition"
                                     value={selectedCatalog}
                                     onChange={(e) => setSelectedCatalog(e.target.value)}
@@ -220,14 +219,14 @@ const Step1CatalogUpload = ({ wizardData, updateWizardData, nextStep }) => {
                                             {c.label} → {formatCatalogDestination(c)}
                                         </option>
                                     ))}
-                                </select>
-                            </div>
+                                </Select>
+                            </FormField>
                         )}
                     </div>
                 </div>
 
                 {tableMeta && (
-                    <aside className="catalog-rules-panel glass-card">
+                    <aside className="catalog-rules-panel widget-card">
                         {organizationName && (
                             <div className="rules-block org-context">
                                 <strong>Organización</strong>
@@ -269,7 +268,7 @@ const Step1CatalogUpload = ({ wizardData, updateWizardData, nextStep }) => {
                 )}
             </div>
 
-            {error && <div className="error-message">{error}</div>}
+            {error && <Alert variant="error">{error}</Alert>}
 
             <div className="step-actions">
                 <Button
@@ -279,7 +278,7 @@ const Step1CatalogUpload = ({ wizardData, updateWizardData, nextStep }) => {
                 >
                     {uploading ? (
                         <>
-                            <LoadingSpinner size="small" />
+                            <LoadingSpinner size="sm" />
                             Subiendo...
                         </>
                     ) : (

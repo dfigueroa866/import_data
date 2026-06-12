@@ -12,6 +12,7 @@ import polars as pl
 from data_staging.services.catalog.catalog_transforms import (
     format_date_for_storage,
     is_empty_value,
+    parse_dates_polars_series,
     parse_flexible_datetime,
     sanitize_row_dict,
 )
@@ -213,8 +214,10 @@ def validate_chunk_vectorized(
                 )
 
             elif "date" in target_type_l or "time" in target_type_l:
-                raw_date = pl.col(col_name).cast(pl.Utf8, strict=False).str.strip_chars()
-                parsed_dt = raw_date.str.to_datetime(strict=False, time_unit="us")
+                parsed_col = f"__parsed_{col_name}"
+                parsed_series = parse_dates_polars_series(df.get_column(col_name))
+                df = df.with_columns(parsed_series.alias(parsed_col))
+                parsed_dt = pl.col(parsed_col)
                 date_fail = ~empty_cond & parsed_dt.is_null()
                 df = df.with_columns(
                     _append_error(
@@ -245,7 +248,7 @@ def validate_chunk_vectorized(
                         .then(parsed_dt.dt.strftime("%Y-%m-%d %H:%M:%S"))
                         .otherwise(pl.col(col_name))
                     )
-                df = df.with_columns(normalized.alias(col_name))
+                df = df.with_columns(normalized.alias(col_name)).drop(parsed_col)
 
             elif "char" in target_type_l or "text" in target_type_l:
                 match = re.search(r"\((\d+)\)", target_type)

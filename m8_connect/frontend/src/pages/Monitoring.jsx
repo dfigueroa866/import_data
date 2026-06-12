@@ -1,136 +1,103 @@
 import React, { useState, useEffect } from 'react';
 import { Activity, TrendingUp, Clock } from 'lucide-react';
-import Card from '../components/Card';
-import StatusBadge from '../components/StatusBadge';
-import LoadingSpinner from '../components/LoadingSpinner';
+import { PageHeader, Card, Badge, LoadingSpinner } from '../components/ui';
+import { formatPercent, formatTime } from '../lib/format';
 import { monitoringService } from '../services/monitoringService';
-import './Monitoring.css';
 
 const Monitoring = () => {
-    const [loading, setLoading] = useState(true);
-    const [systemStatus, setSystemStatus] = useState(null);
-    const [health, setHealth] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [systemStatus, setSystemStatus] = useState(null);
+  const [health, setHealth] = useState(null);
 
-    useEffect(() => {
-        loadMonitoringData();
-        // Refresh every 30 seconds
-        const interval = setInterval(loadMonitoringData, 30000);
-        return () => clearInterval(interval);
-    }, []);
-
-    const loadMonitoringData = async () => {
-        try {
-            setLoading(true);
-            const [statusData, healthData] = await Promise.all([
-                monitoringService.getSystemStatus(),
-                monitoringService.getHealth(),
-            ]);
-
-            setSystemStatus(statusData);
-            setHealth(healthData);
-        } catch (error) {
-            console.error('Error loading monitoring data:', error);
-        } finally {
-            setLoading(false);
-        }
+  useEffect(() => {
+    const load = async () => {
+      try {
+        setLoading(true);
+        const [statusData, healthData] = await Promise.all([
+          monitoringService.getSystemStatus(),
+          monitoringService.getHealth(),
+        ]);
+        setSystemStatus(statusData);
+        setHealth(healthData);
+      } catch (error) {
+        console.error('Error loading monitoring data:', error);
+      } finally {
+        setLoading(false);
+      }
     };
+    load();
+    const interval = setInterval(load, 30000);
+    return () => clearInterval(interval);
+  }, []);
 
-    if (loading) {
-        return (
-            <div className="page-container">
-                <LoadingSpinner size="lg" message="Loading monitoring data..." />
-            </div>
-        );
-    }
-
-    const stats = systemStatus?.batch_statistics || {};
-
+  if (loading) {
     return (
-        <div className="page-container">
-            <div className="page-header">
-                <h1 className="page-title">Monitoring</h1>
-                <p className="page-subtitle">System health and performance metrics</p>
-            </div>
-
-            {/* System Health */}
-            <Card title="System Health" className="mb-lg">
-                <div className="health-grid">
-                    <div className="health-item">
-                        <div className="health-item-header">
-                            <Activity size={20} />
-                            <span>Status</span>
-                        </div>
-                        <StatusBadge status={health?.status || 'unknown'} />
-                    </div>
-
-                    <div className="health-item">
-                        <div className="health-item-header">
-                            <Clock size={20} />
-                            <span>Last Check</span>
-                        </div>
-                        <span className="health-value">
-                            {health?.timestamp
-                                ? new Date(health.timestamp).toLocaleTimeString()
-                                : 'N/A'}
-                        </span>
-                    </div>
-
-                    <div className="health-item">
-                        <div className="health-item-header">
-                            <TrendingUp size={20} />
-                            <span>Environment</span>
-                        </div>
-                        <span className="health-value">{health?.environment || 'N/A'}</span>
-                    </div>
-                </div>
-            </Card>
-
-            {/* Batch Statistics */}
-            <div className="monitoring-grid">
-                <Card title="Batch Statistics">
-                    <div className="stats-list">
-                        <div className="stat-row">
-                            <span className="stat-row-label">Total Batches</span>
-                            <span className="stat-row-value">{stats.total_batches || 0}</span>
-                        </div>
-                        <div className="stat-row">
-                            <span className="stat-row-label">Completed</span>
-                            <span className="stat-row-value stat-row-value-success">
-                                {stats.completed_batches || 0}
-                            </span>
-                        </div>
-                        <div className="stat-row">
-                            <span className="stat-row-label">Failed</span>
-                            <span className="stat-row-value stat-row-value-error">
-                                {stats.failed_batches || 0}
-                            </span>
-                        </div>
-                        <div className="stat-row stat-row-highlight">
-                            <span className="stat-row-label">Success Rate</span>
-                            <span className="stat-row-value">
-                                {stats.success_rate?.toFixed(1) || 0}%
-                            </span>
-                        </div>
-                    </div>
-                </Card>
-
-                <Card title="Database">
-                    <div className="stats-list">
-                        <div className="stat-row">
-                            <span className="stat-row-label">Status</span>
-                            <StatusBadge
-                                status={health?.database_connected ? 'connected' : 'disconnected'}
-                            />
-                        </div>
-                        <div className="stat-row">
-                            <span className="stat-row-label">Type</span>
-                            <span className="stat-row-value">{health?.database?.type || 'Unknown'}</span>
-                        </div>
-                    </div>
-                </Card>
-            </div>
-        </div>
+      <div className="flex-1 overflow-y-auto p-8 scrollbar-thin">
+        <LoadingSpinner size="lg" message="Cargando monitoreo…" />
+      </div>
     );
+  }
+
+  const stats = systemStatus?.batch_statistics || {};
+
+  const statRows = [
+    { label: 'Total de lotes', value: stats.total_batches || 0 },
+    { label: 'Completados', value: stats.completed_batches || 0, success: true },
+    { label: 'Fallidos', value: stats.failed_batches || 0, error: true },
+  ];
+
+  return (
+    <div className="flex flex-1 flex-col gap-5 overflow-y-auto p-8 scrollbar-thin">
+      <PageHeader icon={Activity} title="Monitoreo" subtitle="Salud del sistema y métricas de rendimiento" />
+
+      <Card title="Salud del sistema" indicatorColor="#34d399">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
+          <div>
+            <div className="flex items-center gap-2 text-sm text-slate-500 mb-2"><Activity size={16} /><span>Estado</span></div>
+            <Badge status={health?.status || 'unknown'} />
+          </div>
+          <div>
+            <div className="flex items-center gap-2 text-sm text-slate-500 mb-2"><Clock size={16} /><span>Última verificación</span></div>
+            <span className="text-base font-semibold text-slate-900 dark:text-slate-100">{health?.timestamp ? formatTime(health.timestamp) : '—'}</span>
+          </div>
+          <div>
+            <div className="flex items-center gap-2 text-sm text-slate-500 mb-2"><TrendingUp size={16} /><span>Entorno</span></div>
+            <span className="text-base font-semibold text-slate-900 dark:text-slate-100">{health?.environment || '—'}</span>
+          </div>
+        </div>
+      </Card>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <Card title="Estadísticas de lotes" indicatorColor="#3b82f6">
+          <div className="flex flex-col gap-1">
+            {statRows.map((row) => (
+              <div key={row.label} className="flex justify-between py-2 border-b border-[#e2e8f0] last:border-0">
+                <span className="text-sm text-slate-500">{row.label}</span>
+                <span className={`font-semibold ${row.success ? 'text-green-700' : row.error ? 'text-red-600' : 'text-slate-900 dark:text-slate-100'}`}>{row.value}</span>
+              </div>
+            ))}
+            <div className="flex justify-between py-3 mt-2 px-3 rounded-lg bg-slate-50 dark:bg-slate-700/50">
+              <span className="text-sm font-medium text-slate-900 dark:text-slate-100">Tasa de éxito</span>
+              <span className="text-xl font-bold text-brand-700">{formatPercent(stats.success_rate ?? 0)}%</span>
+            </div>
+          </div>
+        </Card>
+
+        <Card title="Base de datos" indicatorColor="#8b5cf6">
+          <div className="flex flex-col gap-1">
+            <div className="flex justify-between py-2 border-b border-[#e2e8f0]">
+              <span className="text-sm text-slate-500">Estado</span>
+              <Badge status={health?.database_connected ? 'connected' : 'disconnected'} />
+            </div>
+            <div className="flex justify-between py-2">
+              <span className="text-sm text-slate-500">Tipo</span>
+              <span className="font-semibold text-slate-900 dark:text-slate-100">{health?.database?.type || 'Desconocido'}</span>
+            </div>
+          </div>
+        </Card>
+      </div>
+    </div>
+  );
 };
 
 export default Monitoring;

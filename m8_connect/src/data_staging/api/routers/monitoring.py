@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
-from ...database import get_database_session
+from ...database import get_db_session
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +18,7 @@ router = APIRouter(prefix="/monitoring", tags=["monitoring"])
 
 
 @router.get("/system-status")
-async def get_system_status(db: Session = Depends(get_database_session)):
+async def get_system_status(db: Session = Depends(get_db_session)):
     """Get overall system status and metrics."""
     try:
         # Check if tables exist first
@@ -71,7 +71,7 @@ async def get_system_status(db: Session = Depends(get_database_session)):
 
 
 @router.get("/metrics")
-async def get_metrics(hours: int = 24, db: Session = Depends(get_database_session)):
+async def get_metrics(hours: int = 24, db: Session = Depends(get_db_session)):
     """Get system metrics for the specified time period."""
     try:
         metrics = db.execute(text("""
@@ -106,7 +106,7 @@ async def get_metrics(hours: int = 24, db: Session = Depends(get_database_sessio
 
 
 @router.get("/health-detailed")
-async def get_detailed_health(db: Session = Depends(get_database_session)):
+async def get_detailed_health(db: Session = Depends(get_db_session)):
     """Get detailed health information."""
     try:
         # Test database connectivity

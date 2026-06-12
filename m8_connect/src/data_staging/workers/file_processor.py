@@ -1381,11 +1381,9 @@ def validate_and_prepare_chunk(
     # Regex para caracteres peligrosos o invalidos (control characters except tab/newline)
     INVALID_CHARS_REGEX = re.compile(r'[\x00-\x08\x0B\x0C\x0E-\x1F]')
     
-    is_already_mapped = False
-    if column_mapping:
-        targets_present = sum(1 for target in column_mapping.keys() if target in chunk_df.columns)
-        if targets_present >= 2:
-            is_already_mapped = True
+    from data_staging.utils.mapping_helpers import is_chunk_already_mapped
+
+    is_already_mapped = is_chunk_already_mapped(chunk_df, column_mapping)
 
     # 1. Filtrar columnas si selected_columns está presente (solo si no está pre-mapeado)
     if selected_columns and not is_already_mapped:
@@ -1404,8 +1402,7 @@ def validate_and_prepare_chunk(
     # 2. Aplicar column mapping si está presente
     if column_mapping:
         if is_already_mapped:
-            # Si ya está mapeado, solo nos aseguramos de que existan las columnas del mapping 
-            # (inyectando valores por defecto si no existen)
+            # Archivo pre-mapeado: inyectar solo columnas con default que falten
             for target_col, map_info in column_mapping.items():
                 if target_col not in chunk_df.columns:
                     default_val = map_info.get("default")
@@ -1417,32 +1414,26 @@ def validate_and_prepare_chunk(
             for target_col, map_info in column_mapping.items():
                 source_col = map_info.get("source")
                 default_val = map_info.get("default")
-                
-                # REGLA DE NEGOCIO: Si el usuario asignó un default_val explícito, 
-                # tiene prioridad absoluta y omite la información de `source_col`
+
                 if default_val is not None and str(default_val).strip() != "":
                     chunk_df = chunk_df.with_columns([
                         pl.lit(default_val).alias(target_col)
                     ])
-                # Si NO hay default_val, entonces tomamos la información de la columna original si existe
                 elif source_col and source_col in chunk_df.columns:
                     chunk_df = chunk_df.rename({source_col: target_col})
-                # Si la columna de destino ya existe en el dataframe (ej: archivo ya aglomerado), la conservamos
                 elif target_col in chunk_df.columns:
                     pass
-                # Si es una columna nueva (no mapeada) y no tiene default, la llenamos con NULL
                 else:
                     chunk_df = chunk_df.with_columns([
                         pl.lit(None).alias(target_col)
                     ])
-            
-            # Seleccionar solo columnas target
-            target_cols = list(column_mapping.keys())
-            available_targets = [c for c in target_cols if c in chunk_df.columns]
-            if available_targets:
-                chunk_df = chunk_df.select(available_targets)
-            else:
-                logger.error(f"No target columns found after mapping")
+
+        target_cols = list(column_mapping.keys())
+        available_targets = [c for c in target_cols if c in chunk_df.columns]
+        if available_targets:
+            chunk_df = chunk_df.select(available_targets)
+        else:
+            logger.error("No target columns found after mapping")
 
     if catalog_table:
         mapped_cols = frozenset(column_mapping.keys()) if column_mapping else None

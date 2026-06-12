@@ -24,7 +24,7 @@ from data_staging.schemas.auth import (
     RefreshResponse,
 )
 from data_staging.config import settings
-from data_staging.database import get_database_session
+from data_staging.database import get_db_session
 
 router = APIRouter(
     prefix="/auth",
@@ -71,7 +71,7 @@ def _build_user_response(db: Session, user_row) -> UserResponse:
 
 
 @router.post("/login", response_model=LoginResponse)
-async def login(credentials: LoginRequest, db: Session = Depends(get_database_session)):
+async def login(credentials: LoginRequest, db: Session = Depends(get_db_session)):
     """Authenticate user against public.users with bcrypt password verification."""
     try:
         result = db.execute(
@@ -137,7 +137,7 @@ async def login(credentials: LoginRequest, db: Session = Depends(get_database_se
 @router.post("/refresh", response_model=RefreshResponse)
 async def refresh_session(
     body: RefreshRequest,
-    db: Session = Depends(get_database_session),
+    db: Session = Depends(get_db_session),
 ):
     """Issue a new access token from a valid refresh token."""
     payload = decode_refresh_token(body.refresh_token)
@@ -182,7 +182,7 @@ async def refresh_session(
 @router.get("/me", response_model=UserResponse)
 async def get_me(
     current_user: TokenUser = Depends(get_current_user),
-    db: Session = Depends(get_database_session),
+    db: Session = Depends(get_db_session),
 ):
     """Return current user profile including organization display name."""
     result = db.execute(

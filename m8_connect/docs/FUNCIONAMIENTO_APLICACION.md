@@ -555,13 +555,31 @@ Checklist post-cambios (Fase 0): claves UPSERT sin `sku_id`, `quantity`/`pieces`
 
 | Setting | Default | Uso |
 |---------|---------|-----|
-| `PROCESS_CHUNK_SIZE` | 250_000 | Chunks en `PROCESS_FILE` |
-| `AGGREGATION_CHUNK_SIZE` | 500_000 | Map-reduce en paso 3 |
+| `PROCESS_CHUNK_SIZE` | 250_000 | Chunks en `PROCESS_FILE` / preview |
+| `AGGREGATION_CHUNK_SIZE` | 500_000 | Chunks en agregación paso 3 |
+| `AGG_SPILL_THRESHOLD_ROWS` | 5_000_000 | A partir de aquí, agregación usa spill-to-disk |
+| `AGG_IN_MEMORY_MAX_ROWS` | 10_000_000 | Tope para reduce solo en RAM |
+| `AGG_ACC_MAX_ROWS` | 3_000_000 | Si el acumulador crece más, forzar spill |
 | `PARQUET_COMPRESSION` | snappy | Upload / valid / agregado |
-| `USE_VECTORIZED_VALIDATION` | false | Activar validación vectorizada (experimental) |
-| `PROGRESS_COMMIT_EVERY_CHUNKS` | 1 | Throttling progreso en BD |
+| `USE_VECTORIZED_VALIDATION` | true | Validación vectorizada Polars (paridad con legacy) |
+| `PREVIEW_BATCH` | job queue | Vista previa en `run_workers.py`, no en el API |
+| `PROMOTION_BATCH_SIZE` | 250_000 | Chunks staging en promoción (auto-escala >5M / >15M) |
 
-RAM recomendada: 16 GB (20M crudo); espacio en `TEMP_PATH` ≈ 2× tamaño del archivo.
+RAM recomendada: 16 GB (20M crudo); espacio en `TEMP_PATH` ≈ 2× tamaño del archivo (con cleanup de `*_validated.parquet` tras agregar).
+
+#### Criterios de aceptación benchmark 20M
+
+Ejecutar manualmente con `transactions_dummy_20M.raw.parquet` (o equivalente) en máquina 16 GB RAM:
+
+| Criterio | Umbral |
+|----------|--------|
+| Fin sin OOM | Job `PREVIEW_BATCH` + `PROMOTE_BATCH` completan |
+| Integridad | `diff_qty` / `diff_total` dentro de tolerancia actual |
+| Disco `TEMP_PATH` | Pico ≤ 2,5× tamaño archivo fuente (con cleanup) |
+| Progreso UI | Actualización ≥ cada 60 s en validación, agregación y promoción |
+| Paridad agregación | `orig_qty == agg_qty`; tests `test_merge_agg_partials_*` y `test_streaming_aggregation_spill_path` en CI |
+
+Telemetría por fase en `batch_control.metadata.pipeline_timing` (`preview`, `promotion`).
 
 ### 7.8 Finalización
 

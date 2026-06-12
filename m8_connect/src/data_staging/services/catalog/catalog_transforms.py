@@ -103,6 +103,7 @@ _FRACTIONAL_SECONDS_SUFFIX = re.compile(r"\.\d+$")
 
 _DATE_PARSE_FORMATS = (
     "%Y-%m-%d",
+    "%Y%m%d",
     "%d/%m/%Y",
     "%m/%d/%Y",
     "%Y/%m/%d",
@@ -156,6 +157,51 @@ def format_date_for_storage(value: Any, *, date_only: bool = True) -> Optional[s
     if date_only:
         return parsed.date().isoformat()
     return parsed.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def parse_dates_polars_series(
+    series: pl.Series,
+    *,
+    prefer_us_format: bool = False,
+) -> pl.Series:
+    """Parsea fechas heterogéneas; opcionalmente prioriza M/D/Y como el fallback histórico de agregación."""
+    if series.dtype == pl.Datetime:
+        return series
+    if series.dtype == pl.Date:
+        return series.cast(pl.Datetime)
+    values = series.cast(pl.Utf8, strict=False).str.strip_chars().to_list()
+    if prefer_us_format:
+        parsed_pd = pd.to_datetime(pd.Series(values), errors="coerce")
+        for i, value in enumerate(values):
+            if pd.isna(parsed_pd.iat[i]):
+                dt = parse_flexible_datetime(value)
+                if dt is not None:
+                    parsed_pd.iat[i] = dt
+        return pl.Series(name=series.name, values=parsed_pd.to_list(), dtype=pl.Datetime)
+    parsed = [parse_flexible_datetime(v) for v in values]
+    return pl.Series(name=series.name, values=parsed, dtype=pl.Datetime)
+
+
+def coerce_period_start_to_date(df: pl.DataFrame, col: str = "period_start") -> pl.DataFrame:
+    """Convierte una columna de fechas a pl.Date sin depender de inferencia estricta de Polars."""
+    if col not in df.columns:
+        return df
+    dtype = df[col].dtype
+    if dtype == pl.Date:
+        return df
+    if dtype == pl.Datetime:
+        return df.with_columns(pl.col(col).dt.date())
+
+    raw_pd = df.get_column(col).cast(pl.Utf8, strict=False).to_pandas()
+    parsed_dates = []
+    for value in raw_pd:
+        scalar = pd.to_datetime(value, errors="coerce")
+        if pd.isna(scalar):
+            flex_dt = parse_flexible_datetime(value)
+            parsed_dates.append(flex_dt.date() if flex_dt else None)
+        else:
+            parsed_dates.append(scalar.date())
+    return df.with_columns(pl.Series(col, parsed_dates))
 
 
 def sanitize_row_dict(row: Dict[str, Any]) -> Dict[str, Any]:

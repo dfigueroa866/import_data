@@ -63,7 +63,24 @@ def test_copy_arrow_batch_to_staging_builds_rows():
     assert buffer_rows[1] == "\\N\t2"
 
 
-def test_build_upsert_from_staging_sql_casts_uuid_column():
+def test_build_upsert_from_staging_sql_split_insert_update_counts():
+    conflict = (
+        'ON CONFLICT ("organization_id", "sku", "period_start") '
+        'DO UPDATE SET "quantity" = EXCLUDED."quantity"'
+    )
+    sql = build_upsert_from_staging_sql(
+        "public",
+        "sales_history",
+        ['"organization_id"', '"sku"', '"period_start"', '"quantity"'],
+        ["organization_id", "sku", "period_start", "quantity"],
+        conflict,
+        include_imported_at=False,
+        count_split=True,
+    )
+    assert "xmax = 0" in sql
+    assert "FILTER (WHERE is_insert)" in sql
+    assert "FILTER (WHERE NOT is_insert)" in sql
+
     sql = build_upsert_from_staging_sql(
         "public",
         "sales_history",

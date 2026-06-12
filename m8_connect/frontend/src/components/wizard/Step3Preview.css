@@ -50,6 +50,34 @@
     color: var(--color-text-secondary);
 }
 
+.step3-progress {
+    width: min(100%, 28rem);
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.step3-progress__bar {
+    height: 8px;
+    border-radius: 9999px;
+    background: rgba(148, 163, 184, 0.25);
+    overflow: hidden;
+}
+
+.step3-progress__fill {
+    height: 100%;
+    border-radius: inherit;
+    background: var(--primary-color, #3b82f6);
+    transition: width 0.4s ease;
+}
+
+.step3-progress__rows {
+    margin: 0;
+    text-align: center;
+    font-size: 0.8125rem;
+    color: var(--text-secondary);
+}
+
 .error-icon {
     font-size: 4rem;
 }
@@ -214,6 +242,15 @@
     display: flex;
     align-items: center;
     gap: 0.35rem;
+}
+
+.history-kpi__flow--prod {
+    align-items: stretch;
+    gap: 0.5rem;
+}
+
+.history-kpi--filas {
+    grid-column: 1 / -1;
 }
 
 .history-kpi__value-block {
@@ -486,6 +523,76 @@
     letter-spacing: 0.05em;
     text-transform: uppercase;
     color: var(--text-primary);
+}
+
+.report-section--validation {
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+}
+
+.step3-prod-summary {
+    padding: 0.65rem 0.75rem;
+    border-radius: 8px;
+    background: rgba(37, 99, 235, 0.06);
+    border: 1px solid rgba(37, 99, 235, 0.18);
+}
+
+.step3-prod-summary--inline {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+}
+
+.step3-prod-summary__hint {
+    margin: 0 0 0.4rem;
+    font-size: 0.6875rem;
+    line-height: 1.4;
+    color: var(--text-secondary);
+}
+
+.step3-prod-summary__value {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.75rem;
+}
+
+.step3-prod-summary__label {
+    font-size: 0.6875rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-primary);
+}
+
+.step3-prod-summary__value strong {
+    font-size: clamp(1.1rem, 1.5vw, 1.375rem);
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: #2563eb;
+    line-height: 1.1;
+}
+
+.report-dl__row--rejected {
+    padding: 0.55rem 0.65rem;
+    border-radius: 8px;
+    background: rgba(220, 38, 38, 0.07);
+    border: 1px solid rgba(220, 38, 38, 0.22);
+    border-bottom: none;
+}
+
+.report-dl__row--rejected dt {
+    font-weight: 600;
+    color: #b91c1c;
+}
+
+.report-dl__row--rejected dd {
+    font-size: 1rem;
+    font-weight: 700;
+    color: #dc2626;
 }
 
 .report-dl {
@@ -768,4 +875,12 @@
 .preview-table__empty {
     color: var(--color-text-secondary, var(--text-secondary));
     font-style: italic;
+}
+
+.step3-rejected-download {
+    margin-top: 0;
+}
+
+.step3-rejected-download__btn {
+    width: 100%;
 }

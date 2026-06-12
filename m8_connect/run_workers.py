@@ -33,6 +33,7 @@ try:
     from data_staging.workers.job_queue import PostgresQueueWorker
     from data_staging.workers.file_processor import process_file_job
     from data_staging.workers.promotion_worker import promote_batch_job
+    from data_staging.workers.preview_worker import preview_batch_job
 except ImportError as e:
     logger.error(f"Error importing modules: {e}")
     sys.exit(1)
@@ -60,6 +61,7 @@ def start_workers(num_workers: int = 3):
         # Registrar handlers
         worker.register_handler("PROCESS_FILE", process_file_job)
         worker.register_handler("PROMOTE_BATCH", promote_batch_job)
+        worker.register_handler("PREVIEW_BATCH", preview_batch_job)
         
         # Iniciar en thread separado
         thread = threading.Thread(

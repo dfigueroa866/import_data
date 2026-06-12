@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from data_staging.auth.security import TokenUser, get_current_user
 from data_staging.services.catalog import catalog_store
-from data_staging.database import get_database_session
+from data_staging.database import get_db_session
 from data_staging.schemas.catalogs import CatalogDefinitionPayload
 
 logger = logging.getLogger(__name__)
@@ -34,7 +34,7 @@ async def list_catalog_definitions_admin(
 async def list_target_table_columns(
     schema: str = Query(...),
     table: str = Query(...),
-    db: Session = Depends(get_database_session),
+    db: Session = Depends(get_db_session),
     current_user: TokenUser = Depends(get_current_user),
 ):
     """Columns from information_schema to help configure a catalog."""

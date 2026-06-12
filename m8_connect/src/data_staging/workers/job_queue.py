@@ -36,24 +36,44 @@ def sync_batch_on_job_failure(
     if not batch_id:
         return
 
-    label = "Procesamiento" if job_type == "PROCESS_FILE" else "Promoción"
+    if job_type == "PREVIEW_BATCH":
+        label = "Vista previa"
+    elif job_type == "PROCESS_FILE":
+        label = "Procesamiento"
+    else:
+        label = "Promoción"
     full_error = f"{label} falló: {error_message}"[:2000]
 
     conn = psycopg2.connect(database_url)
     try:
         cursor = conn.cursor()
-        cursor.execute(
-            """
-            UPDATE staging_meta.batch_control
-            SET status = 'FAILED',
-                error_message = %s,
-                completed_at = CURRENT_TIMESTAMP,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE batch_id = %s
-              AND status NOT IN ('PROMOTED', 'PARTIALLY_PROMOTED')
-            """,
-            (full_error, batch_id),
-        )
+        if job_type == "PREVIEW_BATCH":
+            cursor.execute(
+                """
+                UPDATE staging_meta.batch_control
+                SET metadata = metadata
+                    || jsonb_build_object(
+                        'preview_in_progress', false,
+                        'preview_error', %s
+                    ),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE batch_id = %s
+                """,
+                (full_error, batch_id),
+            )
+        else:
+            cursor.execute(
+                """
+                UPDATE staging_meta.batch_control
+                SET status = 'FAILED',
+                    error_message = %s,
+                    completed_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE batch_id = %s
+                  AND status NOT IN ('PROMOTED', 'PARTIALLY_PROMOTED')
+                """,
+                (full_error, batch_id),
+            )
         conn.commit()
     finally:
         conn.close()

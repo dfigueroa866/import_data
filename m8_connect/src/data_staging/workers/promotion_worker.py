@@ -18,18 +18,21 @@ from data_staging.utils.batch_staging_files import (
 )
 from data_staging.utils.pipeline_timing import PipelineTimer, persist_timing_metadata
 from data_staging.utils.promotion_bulk import (
+    _STAGING_TABLE_PERSISTENT,
     build_upsert_from_staging_sql,
     build_values_upsert_sql,
     copy_arrow_batch_to_staging,
     copy_frame_to_staging,
     ensure_staging_table,
+    ensure_staging_table_persistent,
     frame_to_tuples,
+    parse_conflict_cols,
 )
 from data_staging.workers.file_processor import report_processing_progress
 
 logger = logging.getLogger(__name__)
 
-PROMOTION_BATCH_SIZE = int(getattr(settings, "PROMOTION_BATCH_SIZE", 100_000))
+PROMOTION_BATCH_SIZE = int(getattr(settings, "PROMOTION_BATCH_SIZE", 250_000))
 PROMOTION_PROGRESS_EVERY_CHUNKS = int(
     getattr(settings, "PROMOTION_PROGRESS_EVERY_CHUNKS", 3)
 )
@@ -38,8 +41,30 @@ PROMOTION_METADATA_EVERY_CHUNKS = int(
 )
 
 
-def _promotion_chunks_total(total_rows: int) -> int:
-    return max(1, (max(total_rows, 1) + PROMOTION_BATCH_SIZE - 1) // PROMOTION_BATCH_SIZE)
+def resolve_promotion_tuning(promote_total: int) -> Dict[str, Any]:
+    """Adaptive batch size / work_mem by load scale (5M today, 20M+ target)."""
+    if promote_total > 15_000_000:
+        return {
+            "batch_size": min(1_000_000, int(getattr(settings, "PROMOTION_BATCH_SIZE_LARGE", 1_000_000))),
+            "work_mem": getattr(settings, "PROMOTION_WORK_MEM_LARGE", "2GB"),
+            "progress_every": 1,
+        }
+    if promote_total > 5_000_000:
+        return {
+            "batch_size": min(500_000, int(getattr(settings, "PROMOTION_BATCH_SIZE_MEDIUM", 500_000))),
+            "work_mem": getattr(settings, "PROMOTION_WORK_MEM_MEDIUM", "1GB"),
+            "progress_every": 2,
+        }
+    return {
+        "batch_size": PROMOTION_BATCH_SIZE,
+        "work_mem": getattr(settings, "PROMOTION_WORK_MEM", "512MB"),
+        "progress_every": PROMOTION_PROGRESS_EVERY_CHUNKS,
+    }
+
+
+def _promotion_chunks_total(total_rows: int, batch_size: Optional[int] = None) -> int:
+    size = batch_size or PROMOTION_BATCH_SIZE
+    return max(1, (max(total_rows, 1) + size - 1) // size)
 
 
 def report_promotion_progress(
@@ -501,11 +526,18 @@ def _persist_promotion_chunk_metadata(
     conn.commit()
 
 
-def _apply_promotion_session_tuning(cursor) -> None:
+def _apply_promotion_session_tuning(cursor, *, work_mem: Optional[str] = None) -> None:
     cursor.execute("SET statement_timeout = 0;")
-    work_mem = getattr(settings, "PROMOTION_WORK_MEM", "256MB")
+    work_mem = work_mem or getattr(settings, "PROMOTION_WORK_MEM", "512MB")
     if work_mem:
         cursor.execute(f"SET work_mem = '{work_mem}';")
+    maintenance_work_mem = getattr(settings, "PROMOTION_MAINTENANCE_WORK_MEM", "1GB")
+    if maintenance_work_mem:
+        cursor.execute(f"SET maintenance_work_mem = '{maintenance_work_mem}';")
+    parallel_workers = int(getattr(settings, "PROMOTION_PARALLEL_WORKERS", 4))
+    if parallel_workers > 0:
+        cursor.execute(f"SET max_parallel_workers_per_gather = {parallel_workers};")
+        cursor.execute(f"SET max_parallel_maintenance_workers = {max(1, parallel_workers // 2)};")
     if not getattr(settings, "PROMOTION_SYNCHRONOUS_COMMIT", False):
         cursor.execute("SET synchronous_commit = off;")
 
@@ -789,6 +821,217 @@ def _promote_from_parquet(
     return total_inserted, promoted_inserted, promoted_updated
 
 
+def _promote_from_parquet_single_pass(
+    conn,
+    cursor,
+    valid_path: Path,
+    valid_db_target_cols: List[str],
+    db_columns: Dict[str, str],
+    db_columns_lower: Dict[str, str],
+    target_schema: str,
+    target_table: str,
+    load_type: str,
+    batch_id: str,
+    metadata: Dict[str, Any],
+    promote_total: int,
+    catalog_slug: Optional[str] = None,
+    unique_indexes: Optional[List[List[str]]] = None,
+    db_udt_names: Optional[Dict[str, str]] = None,
+    timer: Optional[PipelineTimer] = None,
+    promotion_batch_size: Optional[int] = None,
+    promotion_progress_every: Optional[int] = None,
+) -> Tuple[int, int, int]:
+    """
+    Single-pass promotion:
+      Phase 1 — stream Parquet → accumulate all rows in persistent staging table
+                 (commits metadata progress without losing staging data)
+      Phase 2 — one INSERT … SELECT FROM staging → target (one index scan pass)
+    Returns (total_inserted, promoted_inserted, promoted_updated).
+    """
+    import pyarrow.parquet as pq
+
+    pf = pq.ParquetFile(valid_path)
+    total_frame_rows = pf.metadata.num_rows
+    if promote_total <= 0:
+        promote_total = total_frame_rows
+    if total_frame_rows == 0:
+        return 0, 0, 0
+
+    is_history = _is_history_promotion(metadata, target_schema, target_table, load_type)
+    effective_load_type = "history" if is_history else load_type
+    use_arrow_copy = not (load_type == "catalog" and catalog_slug)
+
+    insert_cols: List[str] = []
+    staging_cols: List[str] = []
+    conflict_clause = ""
+    include_imported_at = False
+    rows_staged = 0
+    chunks_staged = 0
+    batch_size = promotion_batch_size or PROMOTION_BATCH_SIZE
+    progress_every = promotion_progress_every or PROMOTION_PROGRESS_EVERY_CHUNKS
+    chunks_total = _promotion_chunks_total(promote_total, batch_size)
+
+    # ── Phase 1: stream Parquet → persistent staging ───────────────────────────
+    for batch in pf.iter_batches(batch_size=batch_size):
+        arrow_batch = batch
+        if arrow_batch.num_rows == 0:
+            continue
+
+        frame: Optional[pd.DataFrame] = None
+        if load_type == "catalog" and catalog_slug:
+            from data_staging.services.catalog.catalog_transforms import normalize_catalog_enum_columns
+
+            frame = arrow_batch.to_pandas()
+            frame = normalize_catalog_enum_columns(frame, catalog_slug)
+            batch_columns = list(frame.columns)
+            use_arrow_copy = False
+        else:
+            batch_columns = list(arrow_batch.schema.names)
+
+        data_cols = _parquet_promotion_columns(batch_columns, valid_db_target_cols)
+        if not data_cols:
+            raise ValueError("No promotable columns found in Parquet file.")
+
+        if not insert_cols:
+            logger.info("Promotion columns from file: %s", ", ".join(data_cols))
+            _, _, _, insert_cols, conflict_clause = _prepare_insert_query(
+                valid_db_target_cols,
+                db_columns,
+                data_cols,
+                target_schema,
+                target_table,
+                effective_load_type,
+                catalog_slug=catalog_slug,
+                metadata=metadata,
+                db_columns_lower=db_columns_lower,
+                unique_indexes=unique_indexes,
+            )
+            staging_cols = [c.strip('"') for c in insert_cols if c.strip('"') != "imported_at"]
+            include_imported_at = "imported_at" in db_columns
+            ensure_staging_table_persistent(cursor, staging_cols)
+
+        with (timer.phase("parquet_read_ms") if timer else _noop_phase()):
+            if use_arrow_copy:
+                copied = copy_arrow_batch_to_staging(
+                    cursor, arrow_batch, data_cols, staging_cols,
+                    table=_STAGING_TABLE_PERSISTENT,
+                )
+            elif frame is not None and not frame.empty:
+                copied = copy_frame_to_staging(
+                    cursor, frame, data_cols, staging_cols,
+                    table=_STAGING_TABLE_PERSISTENT,
+                )
+            else:
+                copied = 0
+
+        rows_staged += copied
+        chunks_staged += 1
+
+        # Commit metadata progress — persistent table survives the commit
+        if chunks_staged % max(1, progress_every) == 0:
+            staging_pct = min(49.0, (rows_staged / max(promote_total, 1)) * 49.0)
+            report_processing_progress(
+                conn,
+                batch_id,
+                progress_percentage=staging_pct,
+                current_operation=f"Cargando a staging ({rows_staged:,} de {promote_total:,})…",
+                phase="staging",
+                total_rows=promote_total,
+                rows_processed=rows_staged,
+                loaded_rows=0,
+                rejected_rows=0,
+                chunks_processed=chunks_staged,
+                chunks_total=chunks_total,
+            )
+            conn.commit()
+
+    if not insert_cols or rows_staged == 0:
+        logger.warning("No rows staged for batch %s — skipping INSERT", batch_id)
+        return 0, 0, 0
+
+    logger.info(
+        "Single-pass promotion: %s rows in staging → INSERT into %s.%s",
+        rows_staged, target_schema, target_table,
+    )
+
+    report_processing_progress(
+        conn,
+        batch_id,
+        progress_percentage=50.0,
+        current_operation=f"Promoviendo {rows_staged:,} registros a producción…",
+        phase="promoting",
+        total_rows=promote_total,
+        rows_processed=0,
+        loaded_rows=0,
+        rejected_rows=0,
+        chunks_processed=chunks_staged,
+        chunks_total=chunks_total,
+        force=True,
+    )
+    conn.commit()
+
+    report_processing_progress(
+        conn,
+        batch_id,
+        progress_percentage=55.0,
+        current_operation=f"Ejecutando UPSERT de {rows_staged:,} registros…",
+        phase="promoting",
+        total_rows=promote_total,
+        rows_processed=0,
+        loaded_rows=0,
+        rejected_rows=0,
+        chunks_processed=chunks_staged,
+        chunks_total=chunks_total,
+        force=True,
+    )
+    conn.commit()
+
+    # ── Phase 2: single INSERT … SELECT from staging ───────────────────────────
+    # Sort by conflict key so B-tree leaf pages are accessed sequentially
+    # (avoids random I/O on the unique index — main bottleneck for large tables).
+    order_by_cols = parse_conflict_cols(conflict_clause)
+    split_counts = _uses_upsert_update(conflict_clause)
+    with (timer.phase("upsert_ms") if timer else _noop_phase()):
+        sql = build_upsert_from_staging_sql(
+            target_schema,
+            target_table,
+            insert_cols,
+            staging_cols,
+            conflict_clause,
+            include_imported_at=include_imported_at,
+            db_columns=db_columns,
+            db_udt_names=db_udt_names,
+            staging_table=_STAGING_TABLE_PERSISTENT,
+            order_by_cols=order_by_cols,
+            count_split=split_counts,
+        )
+        cursor.execute(sql)
+        if split_counts:
+            total_inserted, promoted_inserted, promoted_updated = _fetch_upsert_counts(cursor)
+        else:
+            total_inserted = cursor.rowcount if cursor.rowcount >= 0 else 0
+            promoted_inserted = total_inserted
+            promoted_updated = 0
+
+    report_processing_progress(
+        conn,
+        batch_id,
+        progress_percentage=99.0,
+        current_operation=f"UPSERT completado ({total_inserted:,} registros)…",
+        phase="promoting",
+        total_rows=promote_total,
+        rows_processed=total_inserted,
+        loaded_rows=total_inserted,
+        rejected_rows=0,
+        chunks_processed=chunks_staged,
+        chunks_total=chunks_total,
+        force=True,
+    )
+    conn.commit()
+
+    return total_inserted, promoted_inserted, promoted_updated
+
+
 class _noop_phase:
     def __enter__(self):
         return self
@@ -819,8 +1062,6 @@ def promote_batch_job(payload: Dict[str, Any]):
 
     try:
         cursor = conn.cursor()
-        _apply_promotion_session_tuning(cursor)
-
         cursor.execute(
             "SELECT metadata, source_name, records_count FROM staging_meta.batch_control WHERE batch_id = %s",
             (batch_id,),
@@ -895,6 +1136,9 @@ def promote_batch_job(payload: Dict[str, Any]):
 
             promote_total = max(promote_total, pq.ParquetFile(valid_path).metadata.num_rows)
 
+        promo_tuning = resolve_promotion_tuning(promote_total)
+        _apply_promotion_session_tuning(cursor, work_mem=promo_tuning["work_mem"])
+
         report_promotion_progress(
             conn,
             batch_id,
@@ -911,7 +1155,7 @@ def promote_batch_job(payload: Dict[str, Any]):
             try:
                 upsert_catalog = catalog_slug if load_type == "catalog" else None
                 if is_parquet_valid_file(valid_path):
-                    total_inserted, promoted_inserted, promoted_updated = _promote_from_parquet(
+                    total_inserted, promoted_inserted, promoted_updated = _promote_from_parquet_single_pass(
                         conn,
                         cursor,
                         valid_path,
@@ -923,12 +1167,13 @@ def promote_batch_job(payload: Dict[str, Any]):
                         load_type,
                         batch_id,
                         metadata,
-                        total_inserted,
                         promote_total,
                         catalog_slug=upsert_catalog,
                         unique_indexes=unique_indexes,
                         db_udt_names=db_udt_names,
                         timer=promo_timer,
+                        promotion_batch_size=promo_tuning["batch_size"],
+                        promotion_progress_every=promo_tuning["progress_every"],
                     )
                 else:
                     total_inserted, promoted_inserted, promoted_updated = _promote_from_tsv(
@@ -1024,6 +1269,22 @@ def promote_batch_job(payload: Dict[str, Any]):
         )
         conn.commit()
         persist_timing_metadata(conn, batch_id, promo_timer.snapshot())
+
+        report_processing_progress(
+            conn,
+            batch_id,
+            progress_percentage=100.0,
+            current_operation="Carga a producción completada",
+            phase="done",
+            total_rows=promote_total,
+            rows_processed=total_inserted,
+            loaded_rows=total_inserted,
+            rejected_rows=0,
+            chunks_processed=_promotion_chunks_total(promote_total, promo_tuning["batch_size"]),
+            chunks_total=_promotion_chunks_total(promote_total, promo_tuning["batch_size"]),
+            force=True,
+        )
+        conn.commit()
 
         try:
             os.remove(valid_path)

@@ -2,8 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { getTableColumns } from '../../services/systemService';
 import { saveColumnMapping } from '../../services/wizardService';
 import { useAuth } from '../../context/AuthContext';
-import Button from '../Button';
-import LoadingSpinner from '../LoadingSpinner';
+import { Button, LoadingSpinner, Alert, Input, Select, inputMappedClasses } from '../ui';
+import { cn } from '../../lib/utils';
 import {
     isExcludedMappingTarget,
     isIgnoredFileHeader,
@@ -27,7 +27,6 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
     const [productionColumns, setProductionColumns] = useState([]);
     const [columnMappings, setColumnMappings] = useState({});
     const [columnToggles, setColumnToggles] = useState({});
-    const [showProductionColumns, setShowProductionColumns] = useState(false);
     const [customColumns, setCustomColumns] = useState(wizardData.customColumns || []);
     const [loading, setLoading] = useState(false);
     const [saving, setSaving] = useState(false);
@@ -451,27 +450,13 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
         return fileMapped + customMapped + (organizationId && tableHasOrganizationId ? 1 : 0);
     };
 
-    const getActiveColumnsCount = () => {
-        return getMappedCount();
-    };
-
     const getSelectableTargetColumns = () => {
         return productionColumns
             .filter((col) => col?.name && !isSystemManagedTargetColumn(col, mappingCtx))
             .sort((a, b) => a.name.localeCompare(b.name, 'es'));
     };
 
-    const getAutoFilledTargetColumns = () => {
-        const autoNames = new Set(
-            mappingCtx.catalogMeta?.non_mappable_targets || []
-        );
-        autoNames.delete('id');
-        autoNames.delete('organization_id');
-        return productionColumns.filter((col) => col?.name && autoNames.has(col.name));
-    };
-
     const selectableTargetColumns = getSelectableTargetColumns();
-    const autoFilledTargetColumns = getAutoFilledTargetColumns();
 
     if (loading) {
         return (
@@ -484,76 +469,11 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
 
     return (
         <div className="step2-mapping">
-            <h2>Step 2: Map Columns</h2>
-            <p className="step-description">
-                {wizardData.loadMode === 'catalog'
-                    ? 'Solo se auto-mapean columnas cuyo nombre en el Excel coincide exactamente con la columna de la tabla. Si el nombre es distinto (ej. país vs country), asígnalo manualmente en el desplegable.'
-                    : wizardData.loadMode === 'history'
-                      ? 'Mapea hacia public.sales_history. Obligatorios: location_code, period_start, quantity, pieces y producto (sku / sku_code). granularity, source y sales_channel (SELL_IN) se asignan automáticamente.'
-                      : 'Map your file columns to production table columns. Toggled columns will be included in the import.'}
-            </p>
-
-            {organizationId && tableHasOrganizationId && (
-                <div className="org-fixed-banner">
-                    <span className="org-fixed-label">Organización</span>
-                    <span className="org-fixed-value">
-                        {organizationName || 'Organización asignada'}
-                    </span>
-                    <span className="org-fixed-hint">
-                        Se aplicará automáticamente a todas las filas (no editable).
-                    </span>
-                </div>
-            )}
-
-            {wizardData.loadMode === 'history' && autoFilledTargetColumns.length > 0 && (
-                <div className="org-fixed-banner history-auto-fields-banner">
-                    <span className="org-fixed-label">Campos automáticos</span>
-                    <span className="org-fixed-value">
-                        {autoFilledTargetColumns.map((c) => c.name).join(', ')}
-                    </span>
-                    <span className="org-fixed-hint">
-                        granularity según {wizardData.processType || 'Weekly/Monthly'}; source según
-                        extensión del archivo ({wizardData.fileName?.split('.').pop() || '—'});
-                        sales_channel = SELL_IN.
-                        Aparecerán en la vista previa sin mapear.
-                    </span>
-                </div>
-            )}
-
-            <div className="mapping-stats">
-                <div className="stat">
-                    <span className="stat-value">{getActiveColumnsCount()}</span>
-                    <span className="stat-label">Active Columns</span>
-                </div>
-                <div className="stat">
-                    <span className="stat-value">{getMappedCount()}</span>
-                    <span className="stat-label">Mapped</span>
-                </div>
-                <div className="stat">
-                    <span className="stat-value">{selectableTargetColumns.length}</span>
-                    <span className="stat-label">Target Columns</span>
-                </div>
-            </div>
-
-            {wizardData.loadMode === 'history' && (
-                <p className="mapping-target-hint">
-                    {selectableTargetColumns.length} columnas disponibles en{' '}
-                    <strong>public.sales_history</strong> (todas las de la tabla excepto id y
-                    organization_id).
-                </p>
-            )}
-
             <div className="mapping-container">
                 {/* File Columns (Left) */}
                 {/* Mapping (Center - Expanded) */}
                 <div className="mapping-section full-width">
                     <h3>Column Mapping</h3>
-
-                    <div className="mapping-actions">
-                        <Button variant="secondary" size="small" onClick={() => setShowProductionColumns(!showProductionColumns)}>
-                            {showProductionColumns ? 'Hide Target Columns' : 'Show Target Columns'}
-                        </Button>
-                    </div>
 
                     <div className="mappings-list">
                         {/* Headers */}
@@ -596,10 +516,10 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                                     </div>
                                     <div className="mapping-arrow">→</div>
                                     <div className="mapping-target">
-                                        <select
+                                        <Select
                                             value={mapping.target || ''}
                                             onChange={(e) => handleMappingChange(fileCol, 'target', e.target.value)}
-                                            className={mapping.target ? 'mapped-select' : ''}
+                                            className={cn(mapping.target && inputMappedClasses)}
                                             disabled={!isActive}
                                         >
                                             <option value="">-- Ignore / Select --</option>
@@ -608,10 +528,10 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                                                     {col.name} ({col.type})
                                                 </option>
                                             ))}
-                                        </select>
+                                        </Select>
                                     </div>
                                     <div className="mapping-default">
-                                        <input
+                                        <Input
                                             type="text"
                                             placeholder="Default value"
                                             value={mapping.default_value || ''}
@@ -631,20 +551,20 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                             <div key={`custom-${idx}`} className="mapping-row active-row custom-row">
                                 <div className="mapping-source">
                                     <span className="source-label">Custom:</span>
-                                    <input
+                                    <Input
                                         type="text"
                                         value={customCol.name}
                                         onChange={(e) => handleCustomColumnChange(idx, 'name', e.target.value)}
                                         placeholder="Col Name"
-                                        className="custom-col-input"
+                                        className="w-2/3"
                                     />
                                 </div>
                                 <div className="mapping-arrow">→</div>
                                 <div className="mapping-target">
-                                    <select
+                                    <Select
                                         value={customCol.target || ''}
                                         onChange={(e) => handleCustomColumnChange(idx, 'target', e.target.value)}
-                                        className="mapped-select"
+                                        className={inputMappedClasses}
                                     >
                                         <option value="">-- Select Target --</option>
                                         {selectableTargetColumns.map(col => (
@@ -652,10 +572,10 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                                                 {col.name} ({col.type})
                                             </option>
                                         ))}
-                                    </select>
+                                    </Select>
                                 </div>
                                 <div className="mapping-default">
-                                    <input
+                                    <Input
                                         type="text"
                                         placeholder="Fixed Value"
                                         value={customCol.defaultValue || ''}
@@ -676,41 +596,9 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                         </div>
                     </div>
                 </div>
-
-                {/* Production Columns (Right) - Conditionally Rendered */}
-                {showProductionColumns && (
-                    <div className="production-columns-section floating-panel">
-                        <div className="panel-header">
-                            <h3>Target Schema</h3>
-                            <button onClick={() => setShowProductionColumns(false)}>×</button>
-                        </div>
-                        <div className="columns-list">
-                            {selectableTargetColumns.map((col, idx) => {
-                                const isMapped = Object.values(columnMappings).some(m => m.target === col.name) ||
-                                    customColumns.some(c => c.target === col.name);
-                                const isRequired = isRequiredMappingTargetColumn(col, mappingCtx);
-
-                                return (
-                                    <div key={idx} className={`column-item ${isMapped ? 'mapped' : ''}`}>
-                                        <span className="column-name">
-                                            {col.name}
-                                            {isRequired && <span className="required-badge">*</span>}
-                                        </span>
-                                        <span className="column-type">{col.type}</span>
-                                        {isMapped && <span className="mapped-badge">✓</span>}
-                                    </div>
-                                );
-                            })}
-                        </div>
-                    </div>
-                )}
             </div>
 
-            {error && (
-                <div className="error-message">
-                    {error}
-                </div>
-            )}
+            {error && <Alert variant="error">{error}</Alert>}
 
             <div className="step-actions">
                 <Button variant="secondary" onClick={prevStep}>
@@ -723,7 +611,7 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                 >
                     {saving ? (
                         <>
-                            <LoadingSpinner size="small" />
+                            <LoadingSpinner size="sm" />
                             Saving...
                         </>
                     ) : (

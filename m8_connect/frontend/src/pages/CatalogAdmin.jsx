@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
-import Button from '../components/Button';
-import LoadingSpinner from '../components/LoadingSpinner';
+import { Settings2 } from 'lucide-react';
+import { Button, PageHeader, LoadingSpinner, Alert, FormField, Input, Select, Textarea, Chip } from '../components/ui';
 import {
     listCatalogDefinitions,
     getCatalogDefinition,
@@ -13,7 +13,6 @@ import {
     catalogToForm,
 } from '../services/catalogAdminService';
 import { getSchemas, getTables } from '../services/systemService';
-import './CatalogAdmin.css';
 
 const TABS = [
     { id: 'general', label: 'General' },
@@ -33,31 +32,22 @@ const ChipListEditor = ({ label, value, onChange, hint }) => {
     };
 
     return (
-        <div className="catalog-field full-width">
-            <label>{label}</label>
-            {hint && <p className="catalog-columns-hint">{hint}</p>}
-            <div style={{ display: 'flex', gap: '0.5rem' }}>
-                <input
+        <FormField label={label} hint={hint} className="col-span-full">
+            <div className="flex gap-2">
+                <Input
                     value={draft}
                     onChange={(e) => setDraft(e.target.value)}
                     onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), addChip())}
                     placeholder="Escribe y Enter"
                 />
-                <Button type="button" variant="secondary" size="small" onClick={addChip}>
-                    Añadir
-                </Button>
+                <Button type="button" variant="secondary" size="sm" onClick={addChip}>Añadir</Button>
             </div>
-            <div className="catalog-chip-input">
+            <div className="flex flex-wrap gap-1 mt-2">
                 {value.map((chip) => (
-                    <span key={chip} className="catalog-chip">
-                        {chip}
-                        <button type="button" onClick={() => onChange(value.filter((c) => c !== chip))}>
-                            ×
-                        </button>
-                    </span>
+                    <Chip key={chip} onRemove={() => onChange(value.filter((c) => c !== chip))}>{chip}</Chip>
                 ))}
             </div>
-        </div>
+        </FormField>
     );
 };
 
@@ -81,50 +71,50 @@ const ColumnListEditor = ({ label, value, onChange, schemaColumns, hint, exclude
     };
 
     return (
-        <div className="catalog-field full-width">
-            <label>{label}</label>
-            {hint && <p className="catalog-columns-hint">{hint}</p>}
+        <FormField label={label} hint={hint} className="md:col-span-2">
             {schemaColumns.length === 0 ? (
-                <p className="catalog-columns-hint">
+                <p className="text-xs text-slate-500 dark:text-slate-400">
                     Selecciona schema y tabla destino en General para listar columnas disponibles.
                 </p>
             ) : (
                 <>
-                    <div className="catalog-chip-input">
+                    <div className="flex flex-wrap gap-1.5 p-3 rounded-lg border border-[#e2e8f0] bg-white shadow-sm dark:border-[#334155] dark:bg-slate-800 min-h-[3rem]">
                         {value.length === 0 && (
-                            <span className="catalog-columns-empty">Ninguna columna seleccionada</span>
+                            <span className="text-xs text-slate-400">Ninguna columna seleccionada</span>
                         )}
                         {value.map((chip) => (
-                            <span
-                                key={chip}
-                                className={`catalog-chip${allowedNames.has(chip) ? '' : ' catalog-chip-invalid'}`}
-                                title={columnTitle(chip)}
-                            >
-                                {chip}
-                                <button type="button" onClick={() => onChange(value.filter((c) => c !== chip))}>
-                                    ×
-                                </button>
+                            <span key={chip} title={columnTitle(chip)}>
+                                <Chip
+                                    invalid={!allowedNames.has(chip)}
+                                    onRemove={() => onChange(value.filter((c) => c !== chip))}
+                                >
+                                    {chip}
+                                </Chip>
                             </span>
                         ))}
                     </div>
                     {available.length > 0 ? (
-                        <div className="catalog-schema-columns catalog-schema-columns-picker">
+                        <div className="flex flex-wrap gap-1.5 mt-2">
                             {available.map((name) => (
-                                <span
+                                <button
                                     key={name}
+                                    type="button"
                                     title={columnTitle(name)}
                                     onClick={() => addColumn(name)}
+                                    className="text-xs px-2 py-1 rounded-full border border-[#e2e8f0] bg-slate-50 text-slate-600 transition-colors hover:border-brand-500 hover:bg-blue-50 hover:text-brand-700 dark:border-[#334155] dark:bg-slate-700 dark:text-slate-300 dark:hover:bg-blue-950/30"
                                 >
                                     + {name}
-                                </span>
+                                </button>
                             ))}
                         </div>
                     ) : (
-                        <p className="catalog-columns-hint">Todas las columnas de la tabla ya están asignadas.</p>
+                        <p className="text-xs text-slate-500 dark:text-slate-400 mt-2">
+                            Todas las columnas de la tabla ya están asignadas.
+                        </p>
                     )}
                 </>
             )}
-        </div>
+        </FormField>
     );
 };
 
@@ -339,37 +329,40 @@ const CatalogAdmin = () => {
 
     if (loading && catalogs.length === 0) {
         return (
-            <div className="catalog-admin">
+            <div className="page-container">
                 <LoadingSpinner />
             </div>
         );
     }
 
     return (
-        <div className="catalog-admin">
-            <div className="catalog-admin-header">
-                <div>
-                    <h1>Configuración de catálogos</h1>
-                    <p>
+        <div className="flex flex-1 flex-col gap-5 overflow-y-auto p-8 max-w-6xl mx-auto w-full scrollbar-thin">
+            <PageHeader
+                icon={Settings2}
+                title="Configuración de catálogos"
+                subtitle={
+                    <>
                         Define tablas destino, columnas mapeables y reglas. Los catálogos activos aparecen en{' '}
                         <Link to="/upload/catalog">Carga de catálogos</Link>.
-                    </p>
-                </div>
-                <Button variant="primary" onClick={startNew}>
-                    + Nuevo catálogo
-                </Button>
-            </div>
+                    </>
+                }
+                action={
+                    <Button variant="primary" onClick={startNew}>
+                        + Nuevo catálogo
+                    </Button>
+                }
+            />
 
-            {error && <div className="error-message">{error}</div>}
+            {error && <Alert variant="error">{error}</Alert>}
 
-            <div className="catalog-admin-layout">
-                <aside className="catalog-list-panel glass-card">
-                    <h2>Catálogos ({catalogs.length})</h2>
+            <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-4 items-start">
+                <aside className="rounded-md border border-[#e2e8f0] bg-white shadow-sm dark:border-[#334155] dark:bg-slate-800 p-4">
+                    <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100 mb-3">Catálogos ({catalogs.length})</h2>
                     {catalogs.map((c) => (
                         <button
                             key={c.name}
                             type="button"
-                            className={`catalog-list-item ${selectedName === c.name ? 'active' : ''} ${!c.is_active ? 'inactive' : ''}`}
+                            className={`block w-full text-left p-2.5 mb-1 rounded-lg border transition-colors ${selectedName === c.name ? 'border-brand-500 bg-blue-50 dark:bg-blue-950/30' : 'border-[#e2e8f0] dark:border-[#334155] hover:border-brand-500'} ${!c.is_active ? 'opacity-55' : ''}`}
                             onClick={() => selectCatalog(c.name)}
                         >
                             <strong>{c.label}</strong>
@@ -381,19 +374,19 @@ const CatalogAdmin = () => {
                     ))}
                 </aside>
 
-                <section className="catalog-form-panel glass-card">
+                <section className="rounded-md border border-[#e2e8f0] bg-white shadow-sm dark:border-[#334155] dark:bg-slate-800 p-5">
                     {!selectedName && !isNew ? (
-                        <div className="catalog-empty-form">
+                        <div className="text-center py-8 text-slate-500">
                             <p>Selecciona un catálogo o crea uno nuevo.</p>
                         </div>
                     ) : (
                         <>
-                            <div className="catalog-form-tabs">
+                            <div className="flex flex-wrap gap-2 mb-4">
                                 {TABS.map((t) => (
                                     <button
                                         key={t.id}
                                         type="button"
-                                        className={tab === t.id ? 'active' : ''}
+                                        className={`px-3 py-1.5 rounded-lg border text-sm transition-colors ${tab === t.id ? 'border-brand-600 bg-blue-50 text-brand-700 dark:bg-blue-950/30' : 'border-[#e2e8f0] dark:border-[#334155] text-slate-600'}`}
                                         onClick={() => setTab(t.id)}
                                     >
                                         {t.label}
@@ -402,27 +395,24 @@ const CatalogAdmin = () => {
                             </div>
 
                             {tab === 'general' && (
-                                <div className="catalog-form-grid">
-                                    <div className="catalog-field">
-                                        <label>Nombre (slug) *</label>
-                                        <input
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <FormField label="Nombre (slug)" required>
+                                        <Input
                                             value={form.name}
                                             onChange={(e) => updateForm('name', e.target.value)}
                                             disabled={!isNew}
                                             placeholder="ej. skus"
                                         />
-                                    </div>
-                                    <div className="catalog-field">
-                                        <label>Etiqueta *</label>
-                                        <input
+                                    </FormField>
+                                    <FormField label="Etiqueta" required>
+                                        <Input
                                             value={form.label}
                                             onChange={(e) => updateForm('label', e.target.value)}
                                             placeholder="Productos (SKUs)"
                                         />
-                                    </div>
-                                    <div className="catalog-field">
-                                        <label>Schema destino</label>
-                                        <select
+                                    </FormField>
+                                    <FormField label="Schema destino">
+                                        <Select
                                             value={form.target_schema}
                                             onChange={(e) => {
                                                 const schema = e.target.value;
@@ -441,11 +431,10 @@ const CatalogAdmin = () => {
                                                     {s}
                                                 </option>
                                             ))}
-                                        </select>
-                                    </div>
-                                    <div className="catalog-field">
-                                        <label>Tabla destino</label>
-                                        <select
+                                        </Select>
+                                    </FormField>
+                                    <FormField label="Tabla destino">
+                                        <Select
                                             value={form.target_table}
                                             onChange={(e) => {
                                                 updateForm('target_table', e.target.value);
@@ -460,32 +449,32 @@ const CatalogAdmin = () => {
                                                     {t.column_count != null ? ` (${t.column_count} cols)` : ''}
                                                 </option>
                                             ))}
-                                        </select>
-                                    </div>
-                                    <div className="catalog-field">
-                                        <label>Archivo config (validación)</label>
-                                        <input
+                                        </Select>
+                                    </FormField>
+                                    <FormField label="Archivo config (validación)">
+                                        <Input
                                             value={form.config_file}
                                             onChange={(e) => updateForm('config_file', e.target.value)}
                                             placeholder="skus_config.json"
                                         />
-                                    </div>
-                                    <div className="catalog-field">
-                                        <label>
+                                    </FormField>
+                                    <FormField label="Activo en wizard de carga">
+                                        <label className="inline-flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300 cursor-pointer">
                                             <input
                                                 type="checkbox"
+                                                className="accent-brand-600 h-4 w-4"
                                                 checked={form.is_active}
                                                 onChange={(e) => updateForm('is_active', e.target.checked)}
-                                            />{' '}
-                                            Activo en wizard de carga
+                                            />
+                                            Catálogo visible en carga
                                         </label>
-                                    </div>
-                                    <div className="catalog-field full-width">
+                                    </FormField>
+                                    <div className="md:col-span-2">
                                         <Button variant="secondary" size="small" onClick={reloadSchemaColumns}>
                                             Recargar columnas desde BD
                                         </Button>
                                         {schemaColumns.length > 0 && (
-                                            <p className="catalog-columns-hint">
+                                            <p className="text-xs text-slate-500 dark:text-slate-400 mt-2">
                                                 {schemaColumns.length} columnas en {form.target_schema}.
                                                 {form.target_table} — configúralas en la pestaña Columnas.
                                             </p>
@@ -495,7 +484,7 @@ const CatalogAdmin = () => {
                             )}
 
                             {tab === 'columns' && (
-                                <div className="catalog-form-grid">
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                     <ColumnListEditor
                                         label="Columnas requeridas (datos)"
                                         value={form.required_columns}
@@ -521,7 +510,7 @@ const CatalogAdmin = () => {
                             )}
 
                             {tab === 'mapping' && (
-                                <div className="catalog-form-grid">
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                     <ChipListEditor
                                         label="Obligatorias en paso 2 (mapping)"
                                         value={form.required_mapping_columns}
@@ -544,32 +533,32 @@ const CatalogAdmin = () => {
                             )}
 
                             {tab === 'advanced' && (
-                                <div className="catalog-form-grid">
-                                    <div className="catalog-field full-width">
-                                        <label>Aliases (JSON, opcional — no usado en auto-mapeo)</label>
-                                        <textarea
+                                <div className="grid grid-cols-1 gap-4">
+                                    <FormField label="Aliases (JSON, opcional — no usado en auto-mapeo)">
+                                        <Textarea
                                             value={aliasesJson}
                                             onChange={(e) => setAliasesJson(e.target.value)}
+                                            className="min-h-[140px]"
                                         />
-                                    </div>
-                                    <div className="catalog-field full-width">
-                                        <label>Enums (JSON)</label>
-                                        <textarea
+                                    </FormField>
+                                    <FormField label="Enums (JSON)">
+                                        <Textarea
                                             value={enumsJson}
                                             onChange={(e) => setEnumsJson(e.target.value)}
+                                            className="min-h-[140px]"
                                         />
-                                    </div>
-                                    <div className="catalog-field full-width">
-                                        <label>Defaults al transformar (JSON)</label>
-                                        <textarea
+                                    </FormField>
+                                    <FormField label="Defaults al transformar (JSON)">
+                                        <Textarea
                                             value={defaultsJson}
                                             onChange={(e) => setDefaultsJson(e.target.value)}
+                                            className="min-h-[140px]"
                                         />
-                                    </div>
+                                    </FormField>
                                 </div>
                             )}
 
-                            <div className="catalog-form-actions">
+                            <div className="flex flex-wrap gap-3 mt-5">
                                 <Button variant="primary" onClick={handleSave} disabled={saving}>
                                     {saving ? 'Guardando…' : isNew ? 'Crear catálogo' : 'Guardar cambios'}
                                 </Button>

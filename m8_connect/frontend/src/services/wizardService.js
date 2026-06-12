@@ -76,8 +76,38 @@ export const saveColumnMapping = async (batchId, mappingData, processType = null
 };
 
 /**
- * Generate preview for a batch
- * Step 3 - Applies mappings and returns preview + validation
+ * Start preview generation (async). Poll /progress then GET /preview-result.
+ */
+export const startPreview = async (batchId, { force = false } = {}) => {
+    try {
+        const response = await api.post(`/api/v1/upload/batch/${batchId}/preview`, null, {
+            timeout: 30000,
+            params: force ? { force: true } : undefined,
+        });
+        return { status: response.status, data: response.data };
+    } catch (error) {
+        console.error('Error starting preview:', error);
+        throw error;
+    }
+};
+
+/**
+ * Fetch completed preview payload.
+ */
+export const getPreviewResult = async (batchId) => {
+    try {
+        const response = await api.get(`/api/v1/upload/batch/${batchId}/preview-result`, {
+            timeout: 60000,
+        });
+        return response.data;
+    } catch (error) {
+        console.error('Error fetching preview result:', error);
+        throw error;
+    }
+};
+
+/**
+ * @deprecated Use startPreview + polling + getPreviewResult
  */
 export const generatePreview = async (batchId) => {
     try {
@@ -137,26 +167,78 @@ export const promoteBatch = async (batchId) => {
  * Download rejected records CSV
  * Helper for handling rejections
  */
+const parseBlobErrorDetail = async (blob) => {
+    if (!(blob instanceof Blob)) {
+        return null;
+    }
+    try {
+        const text = await blob.text();
+        if (!text) {
+            return null;
+        }
+        try {
+            const parsed = JSON.parse(text);
+            if (typeof parsed?.detail === 'string') {
+                return parsed.detail;
+            }
+            if (Array.isArray(parsed?.detail)) {
+                return parsed.detail.map((item) => item?.msg || String(item)).join('; ');
+            }
+            return text;
+        } catch {
+            return text;
+        }
+    } catch {
+        return null;
+    }
+};
+
 const triggerBlobDownload = (blob, filename) => {
-    const url = window.URL.createObjectURL(new Blob([blob]));
+    const data = blob instanceof Blob ? blob : new Blob([blob], { type: 'text/csv;charset=utf-8' });
+    const url = window.URL.createObjectURL(data);
     const link = document.createElement('a');
     link.href = url;
-    link.setAttribute('download', filename);
+    link.download = filename;
+    link.rel = 'noopener';
+    link.style.display = 'none';
     document.body.appendChild(link);
     link.click();
-    link.remove();
-    window.URL.revokeObjectURL(url);
+    window.setTimeout(() => {
+        link.remove();
+        window.URL.revokeObjectURL(url);
+    }, 250);
 };
 
 export const downloadRejectedRecords = async (batchId) => {
+    if (!batchId) {
+        throw new Error('No hay batch activo para descargar rechazados.');
+    }
+
     try {
         const response = await api.get(`/api/v1/upload/staging/batch/${batchId}/rejected/download`, {
             responseType: 'blob',
         });
+
+        const contentType = String(response.headers?.['content-type'] || '');
+        if (contentType.includes('application/json')) {
+            const detail = await parseBlobErrorDetail(response.data);
+            throw new Error(detail || 'No se pudo descargar el archivo de rechazados.');
+        }
+
+        if (!response.data || response.data.size === 0) {
+            throw new Error('El archivo de rechazados está vacío.');
+        }
+
         triggerBlobDownload(response.data, `rejected_records_${batchId}.csv`);
         return true;
     } catch (error) {
         console.error('Error downloading rejected records:', error);
+        if (error.response?.data instanceof Blob) {
+            const detail = await parseBlobErrorDetail(error.response.data);
+            if (detail) {
+                throw new Error(detail);
+            }
+        }
         throw error;
     }
 };
