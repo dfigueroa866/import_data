@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "definition": {
+    "name": "sales_history",
+    "label": "Historial de ventas",
+    "target_schema": "public",
+    "target_table": "sales_history",
+    "unique_keys": [
+      "organization_id",
+      "location_code",
+      "sku",
+      "period_start",
+      "granularity"
+    ],
+    "required_mapping_columns": [
+      "location_code",
+      "sku",
+      "period_start",
+      "quantity",
+      "pieces"
+    ],
+    "optional_columns": [],
+    "non_mappable_targets": [
+      "organization_id",
+      "granularity",
+      "sales_channel",
+      "source"
+    ],
+    "ignored_file_headers": [
+      "id",
+      "organization_id"
+    ],
+    "sku_mapping_targets": [
+      "sku"
+    ],
+    "logical_columns": [
+      "sku_code"
+    ],
+    "sales_channel_default": "SELL_IN",
+    "process_types": [
+      {
+        "key": "Weekly",
+        "label": "Weekly (agrupa por semana)",
+        "granularity": "week",
+        "date_truncate": "1w"
+      },
+      {
+        "key": "Monthly",
+        "label": "Monthly (agrupa por mes)",
+        "granularity": "month",
+        "date_truncate": "1mo"
+      }
+    ],
+    "validation_hints": [
+      "Destino fijo: public.sales_history",
+      "Mapea location_code, sku (o sku_code lógico) y period_start, quantity, pieces",
+      "UPSERT por: organization_id + location_code + sku + period_start + granularity",
+      "sales_channel se aplica automáticamente como SELL_IN",
+      "granularity: del tipo de proceso seleccionado en el paso 1",
+      "source: extensión del archivo subido",
+      "organization_id se aplica automáticamente del usuario"
+    ]
+  }
+}

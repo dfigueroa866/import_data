@@ -5,7 +5,7 @@ from typing import Callable, Dict, Any, Tuple, List, Optional
 import datetime
 
 from data_staging.services.catalog.catalog_transforms import coerce_period_start_to_date
-from data_staging.utils.mapping_helpers import is_virtual_mapping_key
+from data_staging.utils.mapping_helpers import is_wizard_virtual_mapping
 from data_staging.utils.encoding_utils import detect_file_encoding, encoding_for_polars
 from data_staging.config import settings
 from data_staging.utils.chunk_iterators import iter_csv_chunks, iter_parquet_chunks, count_csv_rows, count_parquet_rows
@@ -187,7 +187,7 @@ def _discover_agg_column_mappings(
         if column_toggles.get(file_col, True):
             target = config.get("target")
             if target:
-                if is_virtual_mapping_key(file_col):
+                if is_wizard_virtual_mapping(file_col, config):
                     static_mappings[target] = config.get("default_value", "")
                 else:
                     cols_to_keep.append(file_col)
@@ -342,10 +342,10 @@ def process_aggregation_streaming(
                 progress_callback(rows_before_agg, total_rows_original, chunk_idx, chunks_total)
             continue
 
-        if process_type == "Weekly":
-            chunk = chunk.with_columns(pl.col(DATE_COL).dt.truncate("1w"))
-        else:
-            chunk = chunk.with_columns(pl.col(DATE_COL).dt.truncate("1mo"))
+        from data_staging.services.history.history_config import date_truncate_for_process_type
+
+        truncate_interval = date_truncate_for_process_type(process_type)
+        chunk = chunk.with_columns(pl.col(DATE_COL).dt.truncate(truncate_interval))
         dims = [c for c in group_dimensions if c in chunk.columns]
         metrics = _build_agg_metrics(chunk)
         if not metrics:
@@ -403,16 +403,24 @@ def process_aggregation_streaming(
 
     stem = path.stem
     output_path = path.parent / (f"{stem}.parquet" if stem.endswith("_agglomerated") else f"{stem}_agglomerated.parquet")
-    granularity_val = "week" if process_type == "Weekly" else "month"
-    original_ext = path.suffix.lower().lstrip(".")
-    if original_ext == "parquet":
-        original_ext = "csv"
 
     if agg_df.height:
+        from data_staging.services.history.history_config import (
+            granularity_for_process_type,
+            resolve_history_rules,
+        )
+
+        meta_dict = metadata if isinstance(metadata, dict) else {}
+        sales_channel_default = resolve_history_rules(meta_dict).get("sales_channel_default") or "SELL_IN"
+        granularity_val = granularity_for_process_type(process_type)
+        original_ext = path.suffix.lower().lstrip(".")
+        if original_ext == "parquet":
+            original_ext = "csv"
+
         agg_df = agg_df.with_columns([
             pl.lit(granularity_val).alias("granularity"),
             pl.lit(original_ext).alias("source"),
-            pl.lit("SELL_IN").alias("sales_channel"),
+            pl.lit(sales_channel_default).alias("sales_channel"),
         ])
         if df_finalizer:
             agg_df = df_finalizer(agg_df)
@@ -463,9 +471,12 @@ def process_aggregation(
     if not path.exists():
         raise AggregationError(f"File not found: {file_path}")
 
-    if process_type not in ("Weekly", "Monthly"):
+    from data_staging.services.history.history_config import is_valid_process_type, valid_process_type_keys
+
+    if not is_valid_process_type(process_type):
+        valid = ", ".join(valid_process_type_keys()) or "Weekly, Monthly"
         raise AggregationError(
-            f"process_type debe ser Weekly o Monthly (recibido: {process_type!r})"
+            f"process_type inválido: {process_type!r}. Use: {valid}"
         )
 
     use_streaming = getattr(settings, "AGGREGATION_CHUNK_SIZE", 500_000) > 0
@@ -504,7 +515,7 @@ def process_aggregation(
         if column_toggles.get(file_col, True):
             target = config.get("target")
             if target:
-                if is_virtual_mapping_key(file_col):
+                if is_wizard_virtual_mapping(file_col, config):
                     static_mappings[target] = config.get("default_value", "")
                 else:
                     cols_to_keep.append(file_col)
@@ -611,10 +622,10 @@ def process_aggregation(
 
     # 6. Agrupación (Sobrescribir start_date in situ)
     # Lunes de la semana o Día 1 del mes
-    if process_type == "Weekly":
-        df = df.with_columns(pl.col(DATE_COL).dt.truncate("1w"))
-    else:
-        df = df.with_columns(pl.col(DATE_COL).dt.truncate("1mo"))
+    from data_staging.services.history.history_config import date_truncate_for_process_type
+
+    truncate_interval = date_truncate_for_process_type(process_type)
+    df = df.with_columns(pl.col(DATE_COL).dt.truncate(truncate_interval))
 
     # 7. Agrupar y validar sumatorias
     metrics = []
@@ -701,7 +712,14 @@ def process_aggregation(
         output_path = path.parent / f"{stem}_agglomerated.parquet"
 
     # Inyectar columnas automáticas de historia para persistirlas en el archivo Parquet
-    granularity_val = "week" if process_type == "Weekly" else "month"
+    from data_staging.services.history.history_config import (
+        granularity_for_process_type,
+        resolve_history_rules,
+    )
+
+    meta_dict = metadata if isinstance(metadata, dict) else {}
+    sales_channel_default = resolve_history_rules(meta_dict).get("sales_channel_default") or "SELL_IN"
+    granularity_val = granularity_for_process_type(process_type)
     original_ext = path.suffix.lower().lstrip(".")
     if original_ext == "parquet":
         original_ext = "csv"
@@ -709,7 +727,7 @@ def process_aggregation(
     agg_df = agg_df.with_columns([
         pl.lit(granularity_val).alias("granularity"),
         pl.lit(original_ext).alias("source"),
-        pl.lit("SELL_IN").alias("sales_channel")
+        pl.lit(sales_channel_default).alias("sales_channel"),
     ])
 
     if df_finalizer:

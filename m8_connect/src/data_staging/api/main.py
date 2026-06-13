@@ -103,6 +103,13 @@ except Exception as e:
     logger.error(f"Could not import catalogs router: {e}", exc_info=True)
 
 try:
+    from data_staging.api.routers.history import router as history_router
+    app.include_router(history_router, prefix="/api/v1")
+    logger.info("History admin router included")
+except Exception as e:
+    logger.error(f"Could not import history router: {e}", exc_info=True)
+
+try:
     from data_staging.api.v1.environments import router as environments_router
     app.include_router(environments_router, prefix="/api/v1", tags=["Environments"])
     logger.info("Environments router included")

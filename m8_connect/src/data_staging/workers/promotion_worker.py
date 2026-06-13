@@ -3,7 +3,6 @@ import logging
 import json
 import psycopg2
 import psycopg2.extras
-import os
 import itertools
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Set, Tuple
@@ -246,9 +245,15 @@ def _is_history_promotion(
     return (metadata.get("target_table") or "").lower() == HISTORY_TARGET_TABLE.lower()
 
 
-def _ensure_history_promotion_batch(arrow_batch, valid_db_target_cols: List[str]):
-    """Rellena sales_channel=SELL_IN si falta o viene vacío (parquets legacy)."""
-    from data_staging.services.history.history_config import HISTORY_SALES_CHANNEL_VALUE
+def _ensure_history_promotion_batch(
+    arrow_batch,
+    valid_db_target_cols: List[str],
+    sales_channel_default: Optional[str] = None,
+):
+    """Rellena sales_channel con el default configurado si falta o viene vacío."""
+    from data_staging.services.history.history_config import get_sales_channel_default
+
+    default_val = sales_channel_default or get_sales_channel_default()
 
     if "sales_channel" not in valid_db_target_cols:
         return arrow_batch
@@ -260,13 +265,13 @@ def _ensure_history_promotion_batch(arrow_batch, valid_db_target_cols: List[str]
 
     df = arrow_batch.to_pandas()
     if "sales_channel" not in df.columns:
-        df["sales_channel"] = HISTORY_SALES_CHANNEL_VALUE
+        df["sales_channel"] = default_val
     else:
         empty = df["sales_channel"].isna() | (
             df["sales_channel"].astype(str).str.strip() == ""
         )
         if empty.any():
-            df.loc[empty, "sales_channel"] = HISTORY_SALES_CHANNEL_VALUE
+            df.loc[empty, "sales_channel"] = default_val
 
     return pa.RecordBatch.from_pandas(df, preserve_index=False)
 
@@ -275,12 +280,14 @@ def _ensure_history_valid_db_columns(
     valid_db_target_cols: List[str],
     db_columns: Dict[str, str],
     db_columns_lower: Dict[str, str],
+    auto_promotion_columns: Optional[List[str]] = None,
 ) -> List[str]:
-    from data_staging.services.history.history_config import HISTORY_AUTO_PROMOTION_COLUMNS
+    from data_staging.services.history.history_config import get_auto_promotion_columns
 
+    auto_cols = auto_promotion_columns or get_auto_promotion_columns()
     seen = set(valid_db_target_cols)
     out = list(valid_db_target_cols)
-    for col in HISTORY_AUTO_PROMOTION_COLUMNS:
+    for col in auto_cols:
         resolved = _resolve_db_column_name(col, db_columns, db_columns_lower)
         if resolved and resolved not in seen:
             out.append(resolved)
@@ -324,15 +331,16 @@ def _build_insert_context(
     history_promotion = _is_history_promotion(
         metadata, target_schema, target_table, load_type
     )
+    history_rules = None
     if history_promotion:
-        from data_staging.services.history.history_config import HISTORY_AUTO_PROMOTION_COLUMNS
+        from data_staging.services.history.history_config import resolve_history_rules
 
-        for auto_col in HISTORY_AUTO_PROMOTION_COLUMNS:
+        history_rules = resolve_history_rules(metadata)
+        for auto_col in history_rules.get("auto_promotion_columns") or []:
             if auto_col not in target_columns:
                 target_columns.append(auto_col)
     system_managed: frozenset = frozenset()
     if load_type == "catalog":
-        from data_staging.services.history.history_config import HISTORY_AUTO_PROMOTION_COLUMNS
         from data_staging.services.catalog.catalog_transforms import load_db_system_managed_columns_psycopg2
 
         system_managed = load_db_system_managed_columns_psycopg2(
@@ -373,8 +381,12 @@ def _build_insert_context(
         )
 
     if history_promotion:
+        auto_cols = (history_rules or {}).get("auto_promotion_columns")
         valid_db_target_cols = _ensure_history_valid_db_columns(
-            valid_db_target_cols, db_columns, db_columns_lower
+            valid_db_target_cols,
+            db_columns,
+            db_columns_lower,
+            auto_promotion_columns=auto_cols,
         )
 
     from data_staging.services.history.history_schema import discover_unique_indexes
@@ -745,6 +757,11 @@ def _promote_from_parquet(
     skip = total_inserted
     is_history = _is_history_promotion(metadata, target_schema, target_table, load_type)
     effective_load_type = "history" if is_history else load_type
+    history_sales_channel_default = None
+    if is_history:
+        from data_staging.services.history.history_config import resolve_history_rules
+
+        history_sales_channel_default = resolve_history_rules(metadata).get("sales_channel_default")
     insert_cols: List[str] = []
     staging_cols: List[str] = []
     conflict_clause = ""
@@ -776,7 +793,11 @@ def _promote_from_parquet(
             use_arrow_copy = False
         else:
             if is_history:
-                arrow_batch = _ensure_history_promotion_batch(arrow_batch, valid_db_target_cols)
+                arrow_batch = _ensure_history_promotion_batch(
+                    arrow_batch,
+                    valid_db_target_cols,
+                    sales_channel_default=history_sales_channel_default,
+                )
             batch_columns = list(arrow_batch.schema.names)
 
         data_cols = _parquet_promotion_columns(batch_columns, valid_db_target_cols)
@@ -886,6 +907,11 @@ def _promote_from_parquet_single_pass(
 
     is_history = _is_history_promotion(metadata, target_schema, target_table, load_type)
     effective_load_type = "history" if is_history else load_type
+    history_sales_channel_default = None
+    if is_history:
+        from data_staging.services.history.history_config import resolve_history_rules
+
+        history_sales_channel_default = resolve_history_rules(metadata).get("sales_channel_default")
     use_arrow_copy = not (load_type == "catalog" and catalog_slug)
 
     insert_cols: List[str] = []
@@ -914,7 +940,11 @@ def _promote_from_parquet_single_pass(
             use_arrow_copy = False
         else:
             if is_history:
-                arrow_batch = _ensure_history_promotion_batch(arrow_batch, valid_db_target_cols)
+                arrow_batch = _ensure_history_promotion_batch(
+                    arrow_batch,
+                    valid_db_target_cols,
+                    sales_channel_default=history_sales_channel_default,
+                )
             batch_columns = list(arrow_batch.schema.names)
 
         data_cols = _parquet_promotion_columns(batch_columns, valid_db_target_cols)
@@ -1316,12 +1346,6 @@ def promote_batch_job(payload: Dict[str, Any]):
             force=True,
         )
         conn.commit()
-
-        try:
-            os.remove(valid_path)
-            logger.info(f"Deleted temp valid file: {valid_path}")
-        except OSError as e:
-            logger.warning(f"Failed to delete temp file {valid_path}: {e}")
 
     except Exception as e:
         conn.rollback()

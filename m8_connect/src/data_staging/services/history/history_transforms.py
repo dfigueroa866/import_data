@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
-import uuid
-from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 import polars as pl
@@ -13,7 +10,6 @@ import polars as pl
 from data_staging.services.catalog.catalog_transforms import (
     format_date_for_storage,
     is_empty_value,
-    parse_flexible_datetime,
 )
 from data_staging.services.history.history_config import (
     HISTORY_SALES_CHANNEL_VALUE,
@@ -23,39 +19,23 @@ from data_staging.services.history.history_config import (
 logger = logging.getLogger(__name__)
 
 
-def _normalize_period_start(value: Any) -> Optional[str]:
-    """Devuelve period_start como YYYY-MM-DD para validación y carga."""
-    return format_date_for_storage(value, date_only=True)
-
-
-def build_sales_history_id(
-    organization_id: str,
-    location_code: str,
-    sku_key: str,
-    period_start: Any,
-    granularity: str,
-) -> str:
-    if isinstance(period_start, datetime):
-        period_key = period_start.isoformat()
-    elif isinstance(period_start, date):
-        period_key = datetime.combine(period_start, datetime.min.time()).isoformat()
-    else:
-        period_key = str(period_start)
-    raw = f"{organization_id}|{location_code}|{sku_key}|{period_key}|{granularity}"
-    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
-    return str(uuid.UUID(digest))
-
-
 def _is_empty_expr(col: str) -> pl.Expr:
     c = pl.col(col)
     return c.is_null() | (c.cast(pl.Utf8, strict=False).str.strip_chars() == "")
 
 
-def _apply_sales_channel_polars(df: pl.DataFrame, *, validate: bool = True) -> pl.DataFrame:
-    """Default SELL_IN cuando falta o viene vacío; rechaza otros valores si validate=True."""
+def _apply_sales_channel_polars(
+    df: pl.DataFrame,
+    *,
+    validate: bool = True,
+    sales_channel_default: Optional[str] = None,
+) -> pl.DataFrame:
+    """Default configurable cuando falta o viene vacío; rechaza otros valores si validate=True."""
     if df.is_empty():
         return df
 
+    default_val = (sales_channel_default or HISTORY_SALES_CHANNEL_VALUE).strip()
+    default_norm = default_val.upper().replace("-", "_")
     out = df
     if validate and "sales_channel" in out.columns:
         normalized_channel = (
@@ -66,7 +46,7 @@ def _apply_sales_channel_polars(df: pl.DataFrame, *, validate: bool = True) -> p
             .str.replace_all("-", "_")
         )
         out = out.with_columns(
-            pl.when(~_is_empty_expr("sales_channel") & (normalized_channel != "SELL_IN"))
+            pl.when(~_is_empty_expr("sales_channel") & (normalized_channel != default_norm))
             .then(pl.col("sales_channel"))
             .otherwise(None)
             .alias("_sales_channel_invalid")
@@ -75,12 +55,12 @@ def _apply_sales_channel_polars(df: pl.DataFrame, *, validate: bool = True) -> p
     if "sales_channel" in out.columns:
         out = out.with_columns(
             pl.when(_is_empty_expr("sales_channel"))
-            .then(pl.lit(HISTORY_SALES_CHANNEL_VALUE))
+            .then(pl.lit(default_val))
             .otherwise(pl.col("sales_channel").cast(pl.Utf8, strict=False))
             .alias("sales_channel")
         )
     else:
-        out = out.with_columns(pl.lit(HISTORY_SALES_CHANNEL_VALUE).alias("sales_channel"))
+        out = out.with_columns(pl.lit(default_val).alias("sales_channel"))
 
     return out
 
@@ -95,86 +75,8 @@ def _normalize_period_start_value(value: Any) -> Optional[str]:
     return text or None
 
 
-def _period_key_for_id_value(value: Any) -> Optional[str]:
-    parsed = parse_flexible_datetime(value)
-    if parsed:
-        return parsed.strftime("%Y-%m-%dT%H:%M:%S")
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
-
-
 def _normalize_period_start_expr(col: str = "period_start") -> pl.Expr:
     return pl.col(col).map_elements(_normalize_period_start_value, return_dtype=pl.Utf8).alias(col)
-
-
-def _hash_id_batch(batch: pl.Series) -> pl.Series:
-    out: List[Optional[str]] = []
-    for item in batch.to_list():
-        if is_empty_value(item):
-            out.append(None)
-            continue
-        digest = hashlib.sha256(str(item).encode("utf-8")).hexdigest()[:32]
-        out.append(str(uuid.UUID(digest)))
-    return pl.Series(out, dtype=pl.Utf8)
-
-
-def _build_id_raw_expr(
-    organization_id: str,
-    *,
-    has_sku_code: bool,
-) -> pl.Expr:
-    org_expr = (
-        pl.when(_is_empty_expr("organization_id"))
-        .then(pl.lit(str(organization_id)))
-        .otherwise(pl.col("organization_id").cast(pl.Utf8))
-    )
-    if has_sku_code:
-        sku_expr = (
-            pl.when(_is_empty_expr("sku"))
-            .then(pl.col("sku_code").cast(pl.Utf8, strict=False))
-            .otherwise(pl.col("sku").cast(pl.Utf8, strict=False))
-        )
-    else:
-        sku_expr = pl.col("sku").cast(pl.Utf8, strict=False)
-    period_key = pl.col("period_start").map_elements(
-        _period_key_for_id_value,
-        return_dtype=pl.Utf8,
-    )
-    parts = [
-        org_expr,
-        pl.col("location_code").cast(pl.Utf8, strict=False),
-        sku_expr,
-        period_key,
-        pl.col("granularity").cast(pl.Utf8, strict=False),
-    ]
-    return pl.concat_str(parts, separator="|")
-
-
-def _build_id_from_fields(
-    org_id: Any,
-    location_code: Any,
-    sku: Any,
-    sku_code: Any,
-    period_start: Any,
-    granularity: Any,
-    existing_id: Any,
-    fallback_org: str,
-) -> Optional[str]:
-    if not is_empty_value(existing_id):
-        return str(existing_id)
-
-    sku_key = str(sku or sku_code or "")
-    location_key = str(location_code or "")
-    org = str(org_id or fallback_org or "")
-    period_str = _normalize_period_start(period_start)
-    period_dt = parse_flexible_datetime(period_str) if period_str else None
-    gran = str(granularity or "")
-
-    if not period_dt or not sku_key or not location_key or not gran:
-        return None
-    return build_sales_history_id(org, location_key, sku_key, period_dt, gran)
 
 
 class SkuCodeResolver:
@@ -364,6 +266,7 @@ def apply_history_transforms_polars(
     sku_resolver: Optional[SkuCodeResolver] = None,
     resolve_sku_id: bool = False,
     aggregated_mode: bool = False,
+    history_rules: Optional[Dict[str, Any]] = None,
 ) -> pl.DataFrame:
     """
     Enriquece filas mapeadas con expresiones Polars (sin bucle pandas).
@@ -372,67 +275,25 @@ def apply_history_transforms_polars(
     if df.is_empty():
         return df
 
+    from data_staging.services.history.history_config import resolve_history_rules
+
+    rules = history_rules or resolve_history_rules()
+    sales_channel_default = rules.get("sales_channel_default") or HISTORY_SALES_CHANNEL_VALUE
+
     out = df
 
     if aggregated_mode:
         if "period_start" in out.columns:
             out = out.with_columns(_normalize_period_start_expr("period_start"))
-        id_cols = [
-            "organization_id",
-            "location_code",
-            "sku",
-            "sku_code",
-            "period_start",
-            "granularity",
-            "id",
-        ]
-        present = [c for c in id_cols if c in out.columns]
-        if len(present) >= 4:
-            from data_staging.config import settings
-
-            vectorized_id_min = int(getattr(settings, "VECTORIZED_ID_MIN_ROWS", 10_000))
-            has_existing_id = "id" in out.columns
-            if out.height >= vectorized_id_min:
-                id_raw = _build_id_raw_expr(
-                    organization_id, has_sku_code="sku_code" in out.columns
-                )
-                out = out.with_columns(id_raw.alias("_id_raw"))
-                generated_id = pl.col("_id_raw").map_batches(
-                    _hash_id_batch, return_dtype=pl.Utf8
-                )
-                if has_existing_id:
-                    out = out.with_columns(
-                        pl.when(_is_empty_expr("id"))
-                        .then(generated_id)
-                        .otherwise(pl.col("id").cast(pl.Utf8))
-                        .alias("id")
-                    )
-                else:
-                    out = out.with_columns(generated_id.alias("id"))
-                out = out.drop("_id_raw")
-            else:
-                out = out.with_columns(
-                    pl.struct(present).map_elements(
-                        lambda row: _build_id_from_fields(
-                            row.get("organization_id"),
-                            row.get("location_code"),
-                            row.get("sku"),
-                            row.get("sku_code"),
-                            row.get("period_start"),
-                            row.get("granularity"),
-                            row.get("id"),
-                            organization_id,
-                        ),
-                        return_dtype=pl.Utf8,
-                    ).alias("id")
-                )
         if resolve_sku_id and sku_resolver:
             out = out.with_columns(
                 sku_resolver.resolve_sku_id_series(out, resolve_sku_id=resolve_sku_id).alias(
                     "sku_id"
                 )
             )
-        return _apply_sales_channel_polars(out, validate=False)
+        return _apply_sales_channel_polars(
+            out, validate=False, sales_channel_default=sales_channel_default
+        )
 
     if "sku_code" in out.columns:
         if "sku" in out.columns:
@@ -490,45 +351,9 @@ def apply_history_transforms_polars(
         else:
             out = out.with_columns(pl.lit(src).alias("source"))
 
-    out = _apply_sales_channel_polars(out, validate=True)
-
-    id_cols = ["organization_id", "location_code", "sku", "sku_code", "period_start", "granularity", "id"]
-    present = [c for c in id_cols if c in out.columns]
-    if len(present) >= 4:
-        from data_staging.config import settings
-
-        vectorized_id_min = int(getattr(settings, "VECTORIZED_ID_MIN_ROWS", 10_000))
-        has_existing_id = "id" in out.columns
-        if out.height >= vectorized_id_min:
-            id_raw = _build_id_raw_expr(organization_id, has_sku_code="sku_code" in out.columns)
-            out = out.with_columns(id_raw.alias("_id_raw"))
-            generated_id = pl.col("_id_raw").map_batches(_hash_id_batch, return_dtype=pl.Utf8)
-            if has_existing_id:
-                out = out.with_columns(
-                    pl.when(_is_empty_expr("id"))
-                    .then(generated_id)
-                    .otherwise(pl.col("id").cast(pl.Utf8))
-                    .alias("id")
-                )
-            else:
-                out = out.with_columns(generated_id.alias("id"))
-            out = out.drop("_id_raw")
-        else:
-            out = out.with_columns(
-                pl.struct(present).map_elements(
-                    lambda row: _build_id_from_fields(
-                        row.get("organization_id"),
-                        row.get("location_code"),
-                        row.get("sku"),
-                        row.get("sku_code"),
-                        row.get("period_start"),
-                        row.get("granularity"),
-                        row.get("id"),
-                        organization_id,
-                    ),
-                    return_dtype=pl.Utf8,
-                ).alias("id")
-            )
+    out = _apply_sales_channel_polars(
+        out, validate=True, sales_channel_default=sales_channel_default
+    )
 
     if resolve_sku_id and sku_resolver:
         out = out.with_columns(

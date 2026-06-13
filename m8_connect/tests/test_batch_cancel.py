@@ -12,13 +12,16 @@ from data_staging.utils.batch_cancel import (
 
 
 def test_is_batch_cancelled_true():
-    conn = MagicMock()
     cursor = MagicMock()
-    conn.cursor.return_value = cursor
     cursor.fetchone.return_value = ("CANCELLED",)
 
-    assert is_batch_cancelled("batch-1", conn=conn) is True
-    cursor.execute.assert_called_once()
+    with patch("data_staging.utils.batch_cancel.psycopg2.connect") as mock_connect:
+        check_conn = MagicMock()
+        check_conn.autocommit = True
+        check_conn.cursor.return_value = cursor
+        mock_connect.return_value = check_conn
+        assert is_batch_cancelled("batch-1") is True
+        cursor.execute.assert_called_once()
 
 
 def test_is_batch_cancelled_false():
@@ -27,26 +30,51 @@ def test_is_batch_cancelled_false():
     conn.cursor.return_value = cursor
     cursor.fetchone.return_value = ("PROCESSING",)
 
-    assert is_batch_cancelled("batch-1", conn=conn) is False
+    with patch("data_staging.utils.batch_cancel.psycopg2.connect") as mock_connect:
+        check_conn = MagicMock()
+        check_conn.autocommit = True
+        check_conn.cursor.return_value = cursor
+        mock_connect.return_value = check_conn
+        assert is_batch_cancelled("batch-1", conn=conn) is False
+
+
+def test_is_batch_cancelled_when_batch_deleted():
+    cursor = MagicMock()
+    cursor.fetchone.return_value = None
+
+    with patch("data_staging.utils.batch_cancel.psycopg2.connect") as mock_connect:
+        check_conn = MagicMock()
+        check_conn.autocommit = True
+        check_conn.cursor.return_value = cursor
+        mock_connect.return_value = check_conn
+        assert is_batch_cancelled("batch-1") is True
+
+
+def test_is_batch_cancelled_ignores_stale_worker_connection():
+    stale_conn = MagicMock()
+    stale_cursor = MagicMock()
+    stale_conn.cursor.return_value = stale_cursor
+    stale_cursor.fetchone.return_value = ("PROCESSING",)
+
+    fresh_cursor = MagicMock()
+    fresh_cursor.fetchone.return_value = ("CANCELLED",)
+    fresh_conn = MagicMock()
+    fresh_conn.autocommit = True
+    fresh_conn.cursor.return_value = fresh_cursor
+
+    with patch("data_staging.utils.batch_cancel.psycopg2.connect", return_value=fresh_conn):
+        assert is_batch_cancelled("batch-1", conn=stale_conn) is True
 
 
 def test_raise_if_batch_cancelled_raises():
-    conn = MagicMock()
-    cursor = MagicMock()
-    conn.cursor.return_value = cursor
-    cursor.fetchone.return_value = ("CANCELLED",)
-
-    with pytest.raises(BatchCancelledError, match="batch-1"):
-        raise_if_batch_cancelled("batch-1", conn=conn)
+    with patch("data_staging.utils.batch_cancel.is_batch_cancelled", return_value=True):
+        with pytest.raises(BatchCancelledError, match="batch-1"):
+            raise_if_batch_cancelled("batch-1")
 
 
 def test_raise_if_batch_cancelled_ok():
-    conn = MagicMock()
-    cursor = MagicMock()
-    conn.cursor.return_value = cursor
-    cursor.fetchone.return_value = ("PENDING_PREVIEW",)
-
-    raise_if_batch_cancelled("batch-1", conn=conn)
+    with patch("data_staging.utils.batch_cancel.is_batch_cancelled", return_value=False):
+        raise_if_batch_cancelled("batch-1")
 
 
 @patch("data_staging.workers.job_queue.psycopg2.connect")

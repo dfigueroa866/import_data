@@ -30,6 +30,15 @@ export function isCatalogColumnMappable(col) {
 
 const HISTORY_AUTO_COLUMNS = new Set(['granularity', 'source', 'sales_channel']);
 
+/** Columnas que se mapean desde el archivo en el paso 2 (aunque formen parte de la clave UPSERT). */
+export const HISTORY_FILE_MAPPING_COLUMNS = new Set([
+    'location_code',
+    'sku',
+    'period_start',
+    'quantity',
+    'pieces',
+]);
+
 /**
  * @param {{ name: string, type?: string, is_primary_key?: boolean }} col
  * @returns {'organization'|'primary_key'|'audit'|'auto'|'mappable'}
@@ -37,11 +46,95 @@ const HISTORY_AUTO_COLUMNS = new Set(['granularity', 'source', 'sales_channel'])
 export function classifyHistoryColumn(col) {
     const name = col?.name || '';
     if (HISTORY_AUTO_COLUMNS.has(name)) return 'auto';
+    if (HISTORY_FILE_MAPPING_COLUMNS.has(name)) return 'mappable';
+    if (name === 'id') return 'primary_key';
     return classifyCatalogColumn(col);
 }
 
 export function isHistoryColumnMappable(col) {
     return classifyHistoryColumn(col) === 'mappable';
+}
+
+/** Columnas que siempre deben mapearse desde archivo en paso 2. */
+export const HISTORY_ALWAYS_REQUIRED_MAPPING = ['location_code'];
+
+/** Build required map for history admin (uses history column classification). */
+export function buildHistoryColumnRequiredMap(
+    schemaColumns,
+    requiredMappingColumns = [],
+    optionalColumns = []
+) {
+    const requiredSet = new Set(requiredMappingColumns || []);
+    const optionalSet = new Set(optionalColumns || []);
+    const alwaysRequired = new Set(HISTORY_ALWAYS_REQUIRED_MAPPING);
+    const map = {};
+    (schemaColumns || []).forEach((col) => {
+        if (!isHistoryColumnMappable(col)) return;
+        if (alwaysRequired.has(col.name)) {
+            map[col.name] = true;
+            return;
+        }
+        if (requiredSet.has(col.name)) {
+            map[col.name] = true;
+        } else if (optionalSet.has(col.name)) {
+            map[col.name] = false;
+        } else {
+            map[col.name] = col.nullable === false;
+        }
+    });
+    return map;
+}
+
+/**
+ * Derive persisted history mapping lists from admin column toggles.
+ */
+export function deriveHistoryMappingFields(schemaColumns, columnRequiredMap = {}) {
+    const required_mapping_columns = [];
+    const optional_columns = [];
+    const non_mappable_targets = [];
+    const ignored_file_headers = ['id'];
+
+    (schemaColumns || []).forEach((col) => {
+        const kind = classifyHistoryColumn(col);
+        const name = col.name;
+
+        if (kind === 'organization') {
+            non_mappable_targets.push(name);
+            ignored_file_headers.push(name);
+            return;
+        }
+
+        if (kind === 'auto' || kind === 'audit' || kind === 'primary_key') {
+            non_mappable_targets.push(name);
+            if (name === 'id' || kind === 'primary_key') {
+                ignored_file_headers.push(name);
+            }
+            return;
+        }
+
+        if (columnRequiredMap[name]) {
+            required_mapping_columns.push(name);
+        } else {
+            optional_columns.push(name);
+        }
+    });
+
+    HISTORY_ALWAYS_REQUIRED_MAPPING.forEach((colName) => {
+        if (!required_mapping_columns.includes(colName)) {
+            required_mapping_columns.push(colName);
+        }
+        const optIdx = optional_columns.indexOf(colName);
+        if (optIdx >= 0) {
+            optional_columns.splice(optIdx, 1);
+        }
+    });
+
+    return {
+        required_mapping_columns,
+        optional_columns,
+        non_mappable_targets: [...new Set(non_mappable_targets)],
+        ignored_file_headers: [...new Set(ignored_file_headers)],
+    };
 }
 
 /** Mappable columns with NOT NULL in DB default to required when no mapping config exists yet. */

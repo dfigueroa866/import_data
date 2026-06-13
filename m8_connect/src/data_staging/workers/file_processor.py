@@ -13,7 +13,7 @@ from pathlib import Path
 import polars as pl
 import psycopg2
 from data_staging.config import settings
-from data_staging.utils.mapping_helpers import is_virtual_mapping_key
+from data_staging.utils.mapping_helpers import is_wizard_virtual_mapping
 from data_staging.utils.batch_staging_files import (
     ValidRecordsParquetWriter,
     append_rejected_records_csv,
@@ -284,7 +284,7 @@ def process_file_job(payload: Dict[str, Any]):
             if is_enabled:
                 target = mapping_config.get("target")
                 if target and target != "__new__":
-                    if is_virtual_mapping_key(file_col):
+                    if is_wizard_virtual_mapping(file_col, mapping_config):
                         default_val = mapping_config.get("default_value", "")
                         column_mapping[target] = {
                             "source": None,
@@ -292,9 +292,11 @@ def process_file_job(payload: Dict[str, Any]):
                         }
                     else:
                         selected_columns.append(file_col)
-                        column_mapping[target] = {
-                            "source": file_col,
-                        }
+                        default_val = mapping_config.get("default_value", "")
+                        entry: Dict[str, Any] = {"source": file_col}
+                        if default_val is not None and str(default_val).strip() != "":
+                            entry["default"] = default_val
+                        column_mapping[target] = entry
     # Si viene del API directo (mapeo por columna de destino)
     elif wizard_column_mappings:
         column_mapping = wizard_column_mappings
@@ -447,6 +449,11 @@ def process_file_job(payload: Dict[str, Any]):
 
         catalog_table = None
         history_mode = metadata.get("load_type") == "history"
+        history_rules = None
+        if history_mode:
+            from data_staging.services.history.history_config import resolve_history_rules
+
+            history_rules = resolve_history_rules(metadata)
         process_type = metadata.get("process_type")
         organization_id = metadata.get("organization_id")
         source_extension = metadata.get("source_extension")
@@ -642,6 +649,7 @@ def process_file_job(payload: Dict[str, Any]):
             seen_composite_keys=seen_composite_keys,
             source_file_columns=source_file_columns,
             history_mode=history_mode,
+            history_rules=history_rules,
             process_type=process_type,
             organization_id=organization_id,
             sku_resolver=sku_resolver,
@@ -777,6 +785,7 @@ def process_file_in_chunks(
     seen_composite_keys: Optional[set] = None,
     source_file_columns: Optional[List[str]] = None,
     history_mode: bool = False,
+    history_rules: Optional[Dict[str, Any]] = None,
     process_type: Optional[str] = None,
     organization_id: Optional[str] = None,
     sku_resolver=None,
@@ -870,6 +879,7 @@ def process_file_in_chunks(
                 "composite_unique_keys": composite_unique_keys,
                 "seen_composite_keys": seen_composite_keys,
                 "history_mode": history_mode,
+                "history_rules": history_rules,
                 "process_type": process_type,
                 "organization_id": organization_id,
                 "sku_resolver": None,
@@ -905,14 +915,15 @@ def process_file_in_chunks(
                     composite_unique_keys=composite_unique_keys,
                     seen_composite_keys=seen_composite_keys,
                     source_file_columns=source_file_columns,
-                    history_mode=history_mode,
-                    process_type=process_type,
-                    organization_id=organization_id,
-                    sku_resolver=sku_resolver,
-                    resolve_sku_id=resolve_sku_id,
-                    source_extension=source_extension,
-                    progress_total_rows=total_rows,
-                    progress_row_offset=chunk_row_offset,
+                history_mode=history_mode,
+                history_rules=history_rules,
+                process_type=process_type,
+                organization_id=organization_id,
+                sku_resolver=sku_resolver,
+                resolve_sku_id=resolve_sku_id,
+                source_extension=source_extension,
+                progress_total_rows=total_rows,
+                progress_row_offset=chunk_row_offset,
                     progress_loaded_before=total_inserted,
                     progress_rejected_before=total_rejected,
                     progress_chunks_processed=chunk_idx,
@@ -927,6 +938,7 @@ def process_file_in_chunks(
                 nonlocal row_offset, parallel_buffer
                 if not parallel_buffer:
                     return
+                raise_if_batch_cancelled(batch_id, progress_conn)
                 from concurrent.futures import ProcessPoolExecutor
                 from data_staging.utils.parallel_validation import validation_worker_entry
 
@@ -936,6 +948,7 @@ def process_file_in_chunks(
                 ]
                 with ProcessPoolExecutor(max_workers=validation_workers) as pool:
                     validated = list(pool.map(validation_worker_entry, payloads))
+                raise_if_batch_cancelled(batch_id, progress_conn)
                 validated.sort(key=lambda item: item[0])
                 validated_map = {chunk_idx: result for chunk_idx, result in validated}
                 for chunk_idx, chunk_df, chunk_row_offset in sorted(
@@ -1018,6 +1031,7 @@ def process_file_in_chunks(
                     seen_composite_keys=seen_composite_keys,
                     source_file_columns=source_file_columns,
                     history_mode=history_mode,
+                    history_rules=history_rules,
                     process_type=process_type,
                     organization_id=organization_id,
                     sku_resolver=sku_resolver,
@@ -1118,6 +1132,7 @@ def process_single_chunk(
     seen_composite_keys: Optional[set] = None,
     source_file_columns: Optional[List[str]] = None,
     history_mode: bool = False,
+    history_rules: Optional[Dict[str, Any]] = None,
     process_type: Optional[str] = None,
     organization_id: Optional[str] = None,
     sku_resolver=None,
@@ -1137,6 +1152,8 @@ def process_single_chunk(
     """Helper to process a single chunk dataframe."""
     from data_staging.utils.vectorized_validation import ChunkValidationResult
 
+    raise_if_batch_cancelled(batch_id)
+
     if prevalidated is not None:
         validation_out = prevalidated
     else:
@@ -1155,6 +1172,7 @@ def process_single_chunk(
                 composite_unique_keys=composite_unique_keys,
                 seen_composite_keys=seen_composite_keys,
                 history_mode=history_mode,
+                history_rules=history_rules,
                 process_type=process_type,
                 organization_id=organization_id,
                 sku_resolver=sku_resolver,
@@ -1351,6 +1369,7 @@ def validate_and_prepare_chunk(
     composite_unique_keys: Optional[List[str]] = None,
     seen_composite_keys: Optional[set] = None,
     history_mode: bool = False,
+    history_rules: Optional[Dict[str, Any]] = None,
     process_type: Optional[str] = None,
     organization_id: Optional[str] = None,
     sku_resolver=None,
@@ -1464,6 +1483,7 @@ def validate_and_prepare_chunk(
                 source_extension=source_extension,
                 sku_resolver=sku_resolver,
                 resolve_sku_id=resolve_sku_id,
+                history_rules=history_rules,
             )
 
     from data_staging.utils.vectorized_validation import use_vectorized_validation
@@ -1481,6 +1501,7 @@ def validate_and_prepare_chunk(
             not_null_columns=not_null_columns,
             foreign_keys_data=foreign_keys_data,
             history_mode=history_mode,
+            history_rules=history_rules,
             original_rows=original_rows,
             catalog_table=catalog_table,
             composite_unique_keys=composite_unique_keys,
@@ -1636,23 +1657,28 @@ def validate_and_prepare_chunk(
         # 2. Columnas requeridas del catálogo (definición de negocio)
         if history_mode:
             from data_staging.services.history.history_config import (
-                HISTORY_REQUIRED_MAPPING_COLUMNS,
-                HISTORY_SKU_MAPPING_TARGETS,
+                resolve_history_rules,
+                sku_columns_for_validation,
             )
 
+            rules = history_rules or resolve_history_rules()
+            required_cols = list(rules.get("required_mapping_columns") or [])
+            sales_channel_default = rules.get("sales_channel_default") or "SELL_IN"
+            sku_check_cols = sku_columns_for_validation(rules)
+
             has_sku_value = any(
-                not is_empty_value(row.get(k)) for k in HISTORY_SKU_MAPPING_TARGETS
+                not is_empty_value(row.get(k)) for k in sku_check_cols
             )
             if not has_sku_value:
                 validation_status = "FAILED"
                 error_list.append(
                     "Falta código de producto (mapea sku o sku_code)"
                 )
-            elif "sku" in (target_column_types or {}):
+            elif "sku" in required_cols and "sku" in (target_column_types or {}):
                 if is_empty_value(row.get("sku")):
                     validation_status = "FAILED"
                     error_list.append("Campo obligatorio vacío: sku")
-            for req in HISTORY_REQUIRED_MAPPING_COLUMNS:
+            for req in required_cols:
                 if req in (target_column_types or {}) and is_empty_value(row.get(req)):
                     validation_status = "FAILED"
                     error_list.append(f"Campo obligatorio vacío: {req}")
@@ -1689,13 +1715,11 @@ def validate_and_prepare_chunk(
                 validation_status = "FAILED"
                 error_list.append("Campo obligatorio vacío: granularity")
 
-            from data_staging.services.history.history_config import HISTORY_SALES_CHANNEL_VALUE
-
             invalid_channel = row.pop("_sales_channel_invalid", None)
             if invalid_channel is not None:
                 validation_status = "FAILED"
                 error_list.append(
-                    f"sales_channel debe ser '{HISTORY_SALES_CHANNEL_VALUE}' "
+                    f"sales_channel debe ser '{sales_channel_default}' "
                     f"(valor en archivo: {invalid_channel!r})"
                 )
 

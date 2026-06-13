@@ -40,6 +40,8 @@ def sync_batch_on_job_failure(
 
     if job_type == "PREVIEW_BATCH":
         label = "Vista previa"
+    elif job_type == "VALIDATE_BATCH":
+        label = "Validación de mapeo"
     elif job_type == "PROCESS_FILE":
         label = "Procesamiento"
     else:
@@ -57,6 +59,20 @@ def sync_batch_on_job_failure(
                     || jsonb_build_object(
                         'preview_in_progress', false,
                         'preview_error', %s
+                    ),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE batch_id = %s
+                """,
+                (full_error, batch_id),
+            )
+        elif job_type == "VALIDATE_BATCH":
+            cursor.execute(
+                """
+                UPDATE staging_meta.batch_control
+                SET metadata = metadata
+                    || jsonb_build_object(
+                        'validation_in_progress', false,
+                        'validation_error', %s
                     ),
                     updated_at = CURRENT_TIMESTAMP
                 WHERE batch_id = %s

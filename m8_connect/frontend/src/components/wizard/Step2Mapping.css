@@ -18,6 +18,39 @@
     padding: 4rem 2rem;
 }
 
+.step2-loading__hint {
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    text-align: center;
+    max-width: 28rem;
+}
+
+.step2-progress {
+    width: 100%;
+    max-width: 420px;
+}
+
+.step2-progress__bar {
+    height: 8px;
+    border-radius: 4px;
+    background: var(--border-color, rgba(128, 128, 128, 0.25));
+    overflow: hidden;
+}
+
+.step2-progress__fill {
+    height: 100%;
+    border-radius: 4px;
+    background: var(--primary, #6366f1);
+    transition: width 0.3s ease;
+}
+
+.step2-progress__rows {
+    margin-top: 0.5rem;
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+    text-align: center;
+}
+
 .org-fixed-banner {
     display: flex;
     flex-wrap: wrap;
@@ -54,6 +87,59 @@
     color: var(--text-secondary);
     font-size: 0.9rem;
     line-height: 1.5;
+}
+
+.manual-mapping-section {
+    margin-top: 2rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--border-color);
+}
+
+.manual-mapping-section__header {
+    margin-bottom: 1rem;
+}
+
+.manual-mapping-section__header h4 {
+    margin: 0 0 0.35rem;
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.manual-mapping-section__hint {
+    margin: 0;
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+    line-height: 1.45;
+}
+
+.manual-badge {
+    background: rgba(13, 148, 136, 0.15);
+    color: var(--color-primary, #0d9488);
+}
+
+.mapping-row--manual {
+    grid-template-columns: 2fr 40px 2fr 1.5fr 40px;
+}
+
+.mapping-default {
+    min-width: 0;
+}
+
+.mapping-default input {
+    width: 100%;
+}
+
+.mapping-actions-cell {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.mapping-header-row--manual {
+    display: grid;
+    grid-template-columns: 2fr 40px 2fr 1.5fr 40px;
+    gap: 1rem;
 }
 
 /* Mapping Stats */

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from data_staging.utils.mapping_helpers import is_virtual_mapping_key
+from data_staging.utils.mapping_helpers import is_wizard_virtual_mapping
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ def convert_wizard_column_mapping(
             if not target or target == "__new__":
                 continue
             default_val = mapping_config.get("default_value", "")
-            if is_virtual_mapping_key(file_col):
+            if is_wizard_virtual_mapping(file_col, mapping_config):
                 column_mapping[target] = {"source": None, "default": default_val}
             else:
                 selected_columns.append(file_col)

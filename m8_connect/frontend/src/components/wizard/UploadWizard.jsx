@@ -28,6 +28,7 @@ const UploadWizard = () => {
     productionColumns: [],
     previewData: null,
     validationSummary: null,
+    validationComplete: false,
     processing: false,
   });
   const [processingComplete, setProcessingComplete] = useState(false);
@@ -61,6 +62,7 @@ const UploadWizard = () => {
       productionColumns: [],
       previewData: null,
       validationSummary: null,
+      validationComplete: false,
       processing: false,
     });
   };

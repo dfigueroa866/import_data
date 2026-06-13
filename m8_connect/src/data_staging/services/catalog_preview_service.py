@@ -24,7 +24,7 @@ from data_staging.services.catalog.catalog_transforms import (
 from data_staging.core.validators.data_validator import DataValidator
 from data_staging.utils.chunk_iterators import count_csv_rows, count_parquet_rows, parquet_column_names
 from data_staging.utils.json_helpers import to_json_safe
-from data_staging.utils.mapping_helpers import is_virtual_mapping_key
+from data_staging.utils.mapping_helpers import is_wizard_virtual_mapping
 
 
 class CatalogPreviewError(Exception):
@@ -46,7 +46,7 @@ def _apply_mappings(
         target = config.get("target")
         if not target:
             continue
-        if is_virtual_mapping_key(file_col):
+        if is_wizard_virtual_mapping(file_col, config):
             static_mappings[target] = config.get("default_value", "")
         else:
             if file_col in df.columns:
@@ -179,7 +179,7 @@ def _read_and_transform_catalog(
         for fc, cfg in column_mappings.items()
         if column_toggles.get(fc, True)
         and cfg.get("target")
-        and not is_virtual_mapping_key(fc)
+        and not is_wizard_virtual_mapping(fc, cfg)
     ]
 
     selected_parquet = _selected_parquet_columns(path, cols_to_read) if is_parquet else None

@@ -5,6 +5,31 @@ export const HISTORY_TARGET_SCHEMA = 'public';
 export const HISTORY_TARGET_TABLE = 'sales_history';
 export const HISTORY_SALES_CHANNEL_VALUE = 'SELL_IN';
 
+/** Tipos de proceso por defecto si el API no responde. */
+export const FALLBACK_PROCESS_TYPES = [
+    {
+        key: 'Weekly',
+        label: 'Weekly (agrupa por semana)',
+        granularity: 'week',
+        date_truncate: '1w',
+    },
+    {
+        key: 'Monthly',
+        label: 'Monthly (agrupa por mes)',
+        granularity: 'month',
+        date_truncate: '1mo',
+    },
+];
+
+export const granularityFromProcessType = (processType, processTypes = null) => {
+    const list = processTypes || FALLBACK_PROCESS_TYPES;
+    const found = list.find((pt) => pt.key === processType);
+    if (found?.granularity) return found.granularity;
+    if (processType === 'Weekly') return 'week';
+    if (processType === 'Monthly') return 'month';
+    return '';
+};
+
 /** Orden sugerido de columnas en vista previa (incluye campos automáticos). */
 export const HISTORY_PREVIEW_COLUMN_ORDER = [
     'location_code',
@@ -17,12 +42,6 @@ export const HISTORY_PREVIEW_COLUMN_ORDER = [
     'granularity',
     'source',
 ];
-
-export const granularityFromProcessType = (processType) => {
-    if (processType === 'Weekly') return 'week';
-    if (processType === 'Monthly') return 'month';
-    return '';
-};
 
 /** Extensión del archivo original (p. ej. csv, xlsx). */
 export const sourceFromFileName = (fileName) => {
@@ -57,7 +76,6 @@ export const HISTORY_TABLE_META = {
     target_schema: HISTORY_TARGET_SCHEMA,
     target_table: HISTORY_TARGET_TABLE,
     required_columns: [
-        'id',
         'organization_id',
         'location_code',
         'sku',
@@ -77,7 +95,7 @@ export const HISTORY_TABLE_META = {
         'granularity',
     ],
     ignored_file_headers: ['id'],
-    non_mappable_targets: ['id', 'granularity', 'source', 'sales_channel'],
+    non_mappable_targets: ['granularity', 'source', 'sales_channel'],
     optional_columns: ['pieces'],
     column_aliases: {
         period_start: ['period_start', 'start_date', 'fecha', 'date', 'week_monday'],
@@ -91,11 +109,12 @@ export const HISTORY_TABLE_META = {
         'Destino: public.sales_history',
         'Mapea location_code, sku (o sku_code) y period_start, quantity, pieces',
         'UPSERT: organization_id + location_code + sku + period_start + granularity',
-        'granularity se toma del tipo de proceso (Weekly/Monthly) del paso 1',
+        'granularity se toma del tipo de proceso del paso 1',
         'source se toma de la extensión del archivo subido',
         'sales_channel se aplica automáticamente como SELL_IN',
         'organization_id se aplica automáticamente del usuario',
     ],
+    process_types: FALLBACK_PROCESS_TYPES,
 };
 
 /** Columna lógica para el dropdown de mapeo (no existe en la tabla física). */

@@ -54,6 +54,20 @@ logger = logging.getLogger(__name__)
 PREVIEW_STALE_SECONDS = 600
 
 
+def _validation_job_active(db: Session, batch_id: str) -> bool:
+    row = db.execute(
+        text("""
+            SELECT 1 FROM staging_meta.job_queue
+            WHERE job_type = 'VALIDATE_BATCH'
+              AND payload->>'batch_id' = :batch_id
+              AND status IN ('PENDING', 'PROCESSING')
+            LIMIT 1
+        """),
+        {"batch_id": batch_id},
+    ).fetchone()
+    return row is not None
+
+
 def _preview_job_active(db: Session, batch_id: str) -> bool:
     row = db.execute(
         text("""
@@ -177,6 +191,8 @@ def _build_preview_response_payload(
 
 
 def _map_preview_progress_phase(metadata: Dict[str, Any], phase: str) -> str:
+    if phase in ("mapping_validating", "mapping_validation_done"):
+        return phase
     if not metadata.get("preview_in_progress"):
         return phase
     if phase in ("preview_validating", "preview_aggregating", "preview_failed"):
@@ -300,6 +316,46 @@ def _delete_batch_files(batch_id: str, row_metadata: Any, file_path_column: Opti
                 )
 
 
+def _signal_batches_cancelled(db: Session, batch_ids: List[str]) -> None:
+    """Marca batches y jobs activos como cancelados antes de borrar o detener workers."""
+    if not batch_ids:
+        return
+    db.execute(
+        text("""
+            UPDATE staging_meta.job_queue
+            SET status = 'CANCELLED',
+                error_message = COALESCE(error_message, 'Cancelled by user'),
+                completed_at = CURRENT_TIMESTAMP,
+                started_at = NULL,
+                worker_id = NULL
+            WHERE payload->>'batch_id' = ANY(:ids)
+              AND status IN ('PENDING', 'PROCESSING')
+        """),
+        {"ids": batch_ids},
+    )
+    db.execute(
+        text("""
+            UPDATE staging_meta.batch_control
+            SET status = 'CANCELLED',
+                error_message = COALESCE(error_message, 'Cancelado por el usuario'),
+                completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP),
+                metadata = metadata || jsonb_build_object(
+                    'preview_in_progress', false,
+                    'validation_in_progress', false,
+                    'processing_progress', jsonb_build_object(
+                        'phase', 'cancelled',
+                        'current_operation', 'Cancelado por el usuario',
+                        'progress_percentage', 0
+                    )
+                ),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE batch_id::text = ANY(:ids)
+              AND status NOT IN ('PROMOTED', 'PARTIALLY_PROMOTED', 'CANCELLED')
+        """),
+        {"ids": batch_ids},
+    )
+
+
 def _purge_batches_bulk(db: Session, rows: list) -> int:
     """Elimina varios batches en pocas consultas (sin timeout por fila)."""
     if not rows:
@@ -308,6 +364,8 @@ def _purge_batches_bulk(db: Session, rows: list) -> int:
     db.execute(text("SET LOCAL statement_timeout = '0'"))
 
     batch_ids = [str(r.batch_id) for r in rows]
+    _signal_batches_cancelled(db, batch_ids)
+    db.commit()
     by_table: Dict[str, List[str]] = {}
     for row in rows:
         table = staging_table_for_source(row.source_name or "")
@@ -1296,15 +1354,17 @@ async def upload_file_temp(
                 HISTORY_SOURCE_NAME,
                 HISTORY_TARGET_SCHEMA,
                 HISTORY_TARGET_TABLE,
-                HISTORY_VALID_PROCESS_TYPES,
                 get_history_table_meta,
+                is_valid_process_type,
                 source_from_filename,
+                valid_process_type_keys,
             )
 
-            if process_type not in HISTORY_VALID_PROCESS_TYPES:
+            if not is_valid_process_type(process_type):
+                valid = ", ".join(valid_process_type_keys()) or "Weekly, Monthly"
                 raise HTTPException(
                     status_code=400,
-                    detail="Selecciona tipo de proceso Weekly o Monthly.",
+                    detail=f"Selecciona un tipo de proceso válido: {valid}.",
                 )
 
             target_schema = HISTORY_TARGET_SCHEMA
@@ -1516,6 +1576,24 @@ async def save_column_mapping(
             mapping_data["target_schema"] = HISTORY_TARGET_SCHEMA
             mapping_data["target_table"] = HISTORY_TARGET_TABLE
 
+            trigger_validation = mapping_data.get("trigger_validation", True)
+            if trigger_validation:
+                for key in (
+                    "validation_complete",
+                    "validated_temp_file",
+                    "rejected_temp_file",
+                    "preview_result",
+                    "preview_generated",
+                    "aggregated_file_path",
+                    "valid_temp_file",
+                    "validation_error",
+                    "preview_error",
+                ):
+                    metadata.pop(key, None)
+                metadata["validation_in_progress"] = True
+                metadata["preview_in_progress"] = False
+                metadata["validated_in_preview"] = False
+
         # 4. Update source_name if target_table changed
         target_table = mapping_data.get("target_table")
         if load_type == "history":
@@ -1568,6 +1646,17 @@ async def save_column_mapping(
             })
         
         db.commit()
+
+        trigger_validation = mapping_data.get("trigger_validation", True)
+        if load_type == "history" and trigger_validation:
+            from data_staging.workers.job_queue import create_job as enqueue_job
+
+            enqueue_job(
+                str(settings.DATABASE_URL),
+                "VALIDATE_BATCH",
+                {"batch_id": batch_id, "organization_id": org_id},
+            )
+            logger.info("Validation job queued for batch %s (initial mapping)", batch_id)
         
         logger.info(f"Mappings saved for batch {batch_id}")
         
@@ -1575,7 +1664,8 @@ async def save_column_mapping(
             "status": "success",
             "batch_id": batch_id,
             "message": "Column mappings saved successfully",
-            "next_step": "preview"
+            "next_step": "preview",
+            "validation_started": load_type == "history" and trigger_validation,
         }
         
     except HTTPException:
@@ -1660,11 +1750,40 @@ async def generate_preview(
 
         load_type = metadata.get("load_type", "history")
         process_type = metadata.get("process_type")
-        if load_type == "history" and process_type not in ("Weekly", "Monthly"):
-            raise HTTPException(
-                status_code=400,
-                detail="Tipo de proceso inválido. Debe ser Weekly o Monthly.",
+        if load_type == "history":
+            from data_staging.services.history.history_config import (
+                is_valid_process_type,
+                valid_process_type_keys,
             )
+
+            if not is_valid_process_type(process_type):
+                valid = ", ".join(valid_process_type_keys()) or "Weekly, Monthly"
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Tipo de proceso inválido. Debe ser uno de: {valid}.",
+                )
+
+            if metadata.get("validation_error"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=str(metadata["validation_error"]),
+                )
+
+            if metadata.get("validation_in_progress") or _validation_job_active(db, batch_id):
+                return JSONResponse(
+                    status_code=202,
+                    content={
+                        "status": "validating",
+                        "batch_id": batch_id,
+                        "message": "Validación de mapeo en curso (paso 2).",
+                    },
+                )
+
+            if not metadata.get("validation_complete"):
+                logger.warning(
+                    "Preview requested for batch %s without step-2 validation; running legacy pipeline",
+                    batch_id,
+                )
 
         if load_type == "catalog":
             if metadata.get("preview_result") and metadata.get("preview_generated") and not force:
@@ -2042,10 +2161,28 @@ async def get_processing_progress(
         preview_in_progress = bool(metadata.get("preview_in_progress")) or (
             _preview_job_active(db, batch_id)
         )
+        validation_in_progress = bool(metadata.get("validation_in_progress")) or (
+            _validation_job_active(db, batch_id)
+        )
         preview_error = metadata.get("preview_error")
         preview_result = metadata.get("preview_result")
+        validation_error = metadata.get("validation_error")
 
-        if preview_in_progress:
+        if validation_in_progress:
+            progress_percentage = float(live_progress.get("progress_percentage") or 5.0)
+            current_operation = live_progress.get("current_operation") or "Validando mapeo…"
+            phase = live_progress.get("phase") or "mapping_validating"
+            total_rows = int(live_progress.get("total_rows") or total_rows)
+            processed_rows = int(live_progress.get("rows_processed") or 0)
+            loaded_rows = int(live_progress.get("loaded_rows") or 0)
+            rejected_count = int(live_progress.get("rejected_rows") or 0)
+            chunks_processed = int(live_progress.get("chunks_processed") or chunks_processed)
+            chunks_total = int(live_progress.get("chunks_total") or chunks_total)
+        elif validation_error and not metadata.get("validation_complete"):
+            progress_percentage = 0.0
+            current_operation = f"Error en validación: {validation_error}"
+            phase = "mapping_validation_failed"
+        elif preview_in_progress:
             progress_percentage = float(live_progress.get("progress_percentage") or 5.0)
             current_operation = live_progress.get("current_operation") or "Generando vista previa…"
             phase = _map_preview_progress_phase(
@@ -2211,6 +2348,8 @@ async def get_processing_progress(
             "direct_load": metadata.get("direct_load", False),
             "auto_production": metadata.get("auto_production", False),
             "progress_updated_at": live_progress.get("updated_at"),
+            "validation_complete": bool(metadata.get("validation_complete")),
+            "validation_in_progress": validation_in_progress,
         }
         
     except HTTPException:
@@ -2431,39 +2570,7 @@ async def cancel_batch(
                 detail=f"No se puede cancelar un batch en estado '{batch.status}'",
             )
 
-        db.execute(
-            text("""
-                UPDATE staging_meta.job_queue
-                SET status = 'CANCELLED',
-                    error_message = 'Cancelled by user',
-                    completed_at = CURRENT_TIMESTAMP,
-                    started_at = NULL,
-                    worker_id = NULL
-                WHERE payload->>'batch_id' = :batch_id
-                  AND status IN ('PENDING', 'PROCESSING')
-            """),
-            {"batch_id": batch_id},
-        )
-
-        db.execute(
-            text("""
-                UPDATE staging_meta.batch_control
-                SET status = 'CANCELLED',
-                    error_message = COALESCE(error_message, 'Cancelado por el usuario'),
-                    completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP),
-                    metadata = metadata || jsonb_build_object(
-                        'preview_in_progress', false,
-                        'processing_progress', jsonb_build_object(
-                            'phase', 'cancelled',
-                            'current_operation', 'Cancelado por el usuario',
-                            'progress_percentage', 0
-                        )
-                    ),
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE batch_id = :batch_id
-            """),
-            {"batch_id": batch_id},
-        )
+        _signal_batches_cancelled(db, [batch_id])
         db.commit()
 
         return {"message": "Batch cancelled", "batch_id": batch_id, "status": "CANCELLED"}

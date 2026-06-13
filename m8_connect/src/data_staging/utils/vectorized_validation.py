@@ -127,6 +127,7 @@ def validate_chunk_vectorized(
     not_null_columns: Optional[Dict[str, bool]] = None,
     foreign_keys_data: Optional[Dict[str, set]] = None,
     history_mode: bool = False,
+    history_rules: Optional[Dict[str, Any]] = None,
     original_rows: Optional[List[Dict[str, Any]]] = None,
     catalog_table: Optional[str] = None,
     composite_unique_keys: Optional[List[str]] = None,
@@ -136,7 +137,9 @@ def validate_chunk_vectorized(
     if chunk_df.is_empty():
         return ChunkValidationResult(pl.DataFrame(), [], 0.0)
 
-    df = chunk_df
+    from data_staging.utils.mapping_helpers import apply_worker_mapping_defaults
+
+    df = apply_worker_mapping_defaults(chunk_df, column_mapping)
     total_cols = len(df.columns)
     start_row_num = (chunk_idx * chunk_size) + 1
     fk_data = foreign_keys_data or {}
@@ -272,12 +275,16 @@ def validate_chunk_vectorized(
 
     if history_mode:
         from data_staging.services.history.history_config import (
-            HISTORY_REQUIRED_MAPPING_COLUMNS,
-            HISTORY_SKU_MAPPING_TARGETS,
-            HISTORY_SALES_CHANNEL_VALUE,
+            resolve_history_rules,
+            sku_columns_for_validation,
         )
 
-        sku_present = [k for k in HISTORY_SKU_MAPPING_TARGETS if k in df.columns]
+        rules = history_rules or resolve_history_rules()
+        required_cols = list(rules.get("required_mapping_columns") or [])
+        sales_channel_default = rules.get("sales_channel_default") or "SELL_IN"
+        sku_check_cols = sku_columns_for_validation(rules)
+
+        sku_present = [k for k in sku_check_cols if k in df.columns]
         if sku_present:
             has_sku = pl.any_horizontal([~_is_empty_expr(k) for k in sku_present])
             df = df.with_columns(
@@ -288,7 +295,7 @@ def validate_chunk_vectorized(
                 ).alias("_errors")
             )
 
-        if "sku" in (target_column_types or {}) and "sku" in df.columns:
+        if "sku" in required_cols and "sku" in (target_column_types or {}) and "sku" in df.columns:
             df = df.with_columns(
                 _append_error(
                     pl.col("_errors"),
@@ -297,7 +304,7 @@ def validate_chunk_vectorized(
                 ).alias("_errors")
             )
 
-        for req in HISTORY_REQUIRED_MAPPING_COLUMNS:
+        for req in required_cols:
             if req in (target_column_types or {}) and req in df.columns:
                 df = df.with_columns(
                     _append_error(
@@ -351,7 +358,7 @@ def validate_chunk_vectorized(
                     pl.col("_errors"),
                     invalid,
                     pl.format(
-                        f"sales_channel debe ser '{HISTORY_SALES_CHANNEL_VALUE}' (valor en archivo: {{}})",
+                        f"sales_channel debe ser '{sales_channel_default}' (valor en archivo: {{}})",
                         pl.col("_sales_channel_invalid"),
                     ),
                 ).alias("_errors")

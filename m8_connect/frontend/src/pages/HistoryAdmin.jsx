@@ -5,65 +5,123 @@ import { Button, PageHeader, LoadingSpinner, Alert, FormField, Input } from '../
 import { useAuth } from '../context/AuthContext';
 import { fetchTargetTableColumns } from '../services/catalogAdminService';
 import {
-    HISTORY_TABLE_META,
+    getHistoryDefinition,
+    updateHistoryDefinition,
+    buildHistorySavePayload,
+    DEFAULT_PROCESS_TYPES,
+    DEFAULT_SALES_CHANNEL,
+} from '../services/historyAdminService';
+import {
     HISTORY_TARGET_SCHEMA,
     HISTORY_TARGET_TABLE,
 } from '../constants/historyConfig';
-import { buildColumnRequiredMap, classifyHistoryColumn } from '../utils/catalogColumnRules';
+import {
+    buildHistoryColumnRequiredMap,
+    classifyHistoryColumn,
+    deriveHistoryMappingFields,
+    HISTORY_ALWAYS_REQUIRED_MAPPING,
+} from '../utils/catalogColumnRules';
 import {
     HISTORY_TABS,
     CatalogColumnsEditor,
     ChipListEditor,
     ConfigTabs,
 } from '../components/admin/CatalogConfigEditors';
+import ProcessTypesEditor from '../components/admin/ProcessTypesEditor';
+import SalesChannelDefaultEditor from '../components/admin/SalesChannelDefaultEditor';
 
 const HISTORY_FOOTER_NOTE = (
     <>
-        Las columnas PK, <code className="font-mono">organization_id</code>,{' '}
-        <code className="font-mono">granularity</code>, <code className="font-mono">source</code> y{' '}
-        <code className="font-mono">sales_channel</code> se asignan automáticamente en el wizard.
-        Las columnas NOT NULL en la BD se marcan obligatorias por defecto.
+        <code className="font-mono">location_code</code>, <code className="font-mono">sku</code>,{' '}
+        <code className="font-mono">period_start</code>, <code className="font-mono">quantity</code> y{' '}
+        <code className="font-mono">pieces</code> se mapean desde el archivo en el paso 2.
+        {' '}
+        <code className="font-mono">organization_id</code>, <code className="font-mono">granularity</code>,{' '}
+        <code className="font-mono">source</code> y <code className="font-mono">sales_channel</code> se asignan
+        automáticamente. <code className="font-mono">location_code</code> es siempre obligatorio en el mapping.
     </>
 );
+
+const HISTORY_MAPPABLE_LEGEND = 'Mapeable desde el archivo (paso 2)';
 
 const HistoryAdmin = () => {
     const { user } = useAuth();
     const organizationName = user?.organization_name || '';
 
     const [loading, setLoading] = useState(true);
+    const [saving, setSaving] = useState(false);
     const [error, setError] = useState('');
     const [tab, setTab] = useState('general');
+    const [definition, setDefinition] = useState(null);
+    const [processTypes, setProcessTypes] = useState(DEFAULT_PROCESS_TYPES);
     const [schemaColumns, setSchemaColumns] = useState([]);
     const [columnRequired, setColumnRequired] = useState({});
+    const [granularityEditorOpen, setGranularityEditorOpen] = useState(false);
+    const [salesChannelEditorOpen, setSalesChannelEditorOpen] = useState(false);
+    const [salesChannelDefault, setSalesChannelDefault] = useState(DEFAULT_SALES_CHANNEL);
 
-    const loadSchemaColumns = useCallback(async () => {
+    const loadDefinition = useCallback(async () => {
         try {
             setLoading(true);
             setError('');
+            const data = await getHistoryDefinition();
+            setDefinition(data);
+            setProcessTypes(
+                data.process_types?.length ? data.process_types : DEFAULT_PROCESS_TYPES
+            );
+            setSalesChannelDefault(data.sales_channel_default || DEFAULT_SALES_CHANNEL);
+
             const cols = await fetchTargetTableColumns(HISTORY_TARGET_SCHEMA, HISTORY_TARGET_TABLE);
             setSchemaColumns(cols);
             setColumnRequired(
-                buildColumnRequiredMap(
+                buildHistoryColumnRequiredMap(
                     cols,
-                    HISTORY_TABLE_META.required_mapping_columns,
-                    HISTORY_TABLE_META.optional_columns
+                    data.required_mapping_columns || [],
+                    data.optional_columns || []
                 )
             );
         } catch (err) {
-            setError(err.response?.data?.detail || 'No se pudieron cargar las columnas de historia');
-            setSchemaColumns([]);
-            setColumnRequired({});
+            setError(err.response?.data?.detail || 'No se pudo cargar la configuración de historia');
         } finally {
             setLoading(false);
         }
     }, []);
 
     useEffect(() => {
-        loadSchemaColumns();
-    }, [loadSchemaColumns]);
+        loadDefinition();
+    }, [loadDefinition]);
 
-    const handleRequiredChange = () => {
-        // Placeholder: la persistencia de configuración se añadirá más adelante.
+    const handleRequiredChange = (colName, required) => {
+        if (HISTORY_ALWAYS_REQUIRED_MAPPING.includes(colName)) return;
+        setColumnRequired((prev) => ({ ...prev, [colName]: required }));
+    };
+
+    const handleSave = async () => {
+        try {
+            setSaving(true);
+            setError('');
+            const mappingFields = deriveHistoryMappingFields(schemaColumns, columnRequired);
+            const payload = buildHistorySavePayload(definition, {
+                processTypes,
+                salesChannelDefault,
+                mappingFields,
+            });
+            const updated = await updateHistoryDefinition(payload);
+            setDefinition(updated);
+            setProcessTypes(updated.process_types || DEFAULT_PROCESS_TYPES);
+            setSalesChannelDefault(updated.sales_channel_default || DEFAULT_SALES_CHANNEL);
+            setColumnRequired(
+                buildHistoryColumnRequiredMap(
+                    schemaColumns,
+                    updated.required_mapping_columns || [],
+                    updated.optional_columns || []
+                )
+            );
+        } catch (err) {
+            setError(err.response?.data?.detail || err.message || 'Error al guardar');
+        } finally {
+            setSaving(false);
+        }
     };
 
     if (loading) {
@@ -74,6 +132,8 @@ const HistoryAdmin = () => {
         );
     }
 
+    const label = definition?.label || 'Historial de ventas';
+
     return (
         <div className="flex flex-1 flex-col gap-5 overflow-y-auto p-8 max-w-6xl mx-auto w-full scrollbar-thin">
             <PageHeader
@@ -81,7 +141,7 @@ const HistoryAdmin = () => {
                 title="Configuración de historia"
                 subtitle={
                     <>
-                        Reglas de columnas para el mapping de cargas históricas. Destino fijo:{' '}
+                        Reglas de columnas y granularidad para cargas históricas. Destino fijo:{' '}
                         <code className="font-mono text-sm">
                             {HISTORY_TARGET_SCHEMA}.{HISTORY_TARGET_TABLE}
                         </code>
@@ -92,11 +152,6 @@ const HistoryAdmin = () => {
 
             {error && <Alert variant="error">{error}</Alert>}
 
-            <Alert variant="info">
-                La edición y guardado de esta configuración estará disponible próximamente.
-                Por ahora puedes revisar las columnas y reglas actuales del sistema.
-            </Alert>
-
             <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-4 items-start">
                 <aside className="rounded-md border border-[#e2e8f0] bg-white shadow-sm dark:border-[#334155] dark:bg-slate-800 p-4">
                     <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100 mb-3">Destinos</h2>
@@ -104,7 +159,7 @@ const HistoryAdmin = () => {
                         type="button"
                         className="block w-full text-left p-2.5 rounded-lg border border-brand-500 bg-blue-50 dark:bg-blue-950/30"
                     >
-                        <strong>{HISTORY_TABLE_META.label}</strong>
+                        <strong>{label}</strong>
                         <small>
                             {HISTORY_TARGET_SCHEMA}.{HISTORY_TARGET_TABLE}
                         </small>
@@ -117,16 +172,13 @@ const HistoryAdmin = () => {
                     {tab === 'general' && (
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                             <FormField label="Etiqueta" className="md:col-span-2">
-                                <Input value={HISTORY_TABLE_META.label} readOnly disabled />
+                                <Input value={label} readOnly disabled />
                             </FormField>
                             <FormField label="Schema destino">
                                 <Input value={HISTORY_TARGET_SCHEMA} readOnly disabled />
                             </FormField>
                             <FormField label="Tabla destino">
                                 <Input value={HISTORY_TARGET_TABLE} readOnly disabled />
-                            </FormField>
-                            <FormField label="Tipo de carga" className="md:col-span-2">
-                                <Input value="Historia de ventas (agregación semanal/mensual)" readOnly disabled />
                             </FormField>
                         </div>
                     )}
@@ -139,22 +191,45 @@ const HistoryAdmin = () => {
                                 onRequiredChange={handleRequiredChange}
                                 organizationName={organizationName}
                                 classifyColumn={classifyHistoryColumn}
-                                readOnly
+                                mappableLegend={HISTORY_MAPPABLE_LEGEND}
+                                requiredLockedColumns={HISTORY_ALWAYS_REQUIRED_MAPPING}
                                 footerNote={HISTORY_FOOTER_NOTE}
+                                columnEditors={{
+                                    granularity: {
+                                        expanded: granularityEditorOpen,
+                                        onToggle: () => setGranularityEditorOpen((open) => !open),
+                                        panel: (
+                                            <ProcessTypesEditor
+                                                embedded
+                                                value={processTypes}
+                                                onChange={setProcessTypes}
+                                            />
+                                        ),
+                                    },
+                                    sales_channel: {
+                                        expanded: salesChannelEditorOpen,
+                                        onToggle: () => setSalesChannelEditorOpen((open) => !open),
+                                        panel: (
+                                            <SalesChannelDefaultEditor
+                                                value={salesChannelDefault}
+                                                onChange={setSalesChannelDefault}
+                                            />
+                                        ),
+                                    },
+                                }}
                             />
                             <ChipListEditor
                                 label="Notas de validación (UI del wizard)"
-                                value={HISTORY_TABLE_META.validation_hints || []}
+                                value={definition?.validation_hints || []}
                                 readOnly
                             />
+                            <div className="flex flex-wrap gap-3">
+                                <Button variant="primary" onClick={handleSave} disabled={saving}>
+                                    {saving ? 'Guardando…' : 'Guardar cambios'}
+                                </Button>
+                            </div>
                         </div>
                     )}
-
-                    <div className="flex flex-wrap gap-3 mt-5">
-                        <Button variant="primary" disabled title="Próximamente">
-                            Guardar cambios
-                        </Button>
-                    </div>
                 </section>
             </div>
         </div>

@@ -11,20 +11,25 @@ logger = logging.getLogger(__name__)
 
 
 class BatchCancelledError(Exception):
-    """Raised when batch_control.status is CANCELLED and work must stop."""
+    """Raised when batch work must stop (cancelled or batch removed)."""
 
 
-def is_batch_cancelled(batch_id: str, conn: Optional[psycopg2.extensions.connection] = None) -> bool:
-    """Return True if the batch was cancelled by the user."""
-    own_conn = False
-    if conn is None:
-        from data_staging.config import settings
+def is_batch_cancelled(
+    batch_id: str,
+    conn: Optional[psycopg2.extensions.connection] = None,
+) -> bool:
+    """Return True if the batch was cancelled or removed from batch_control.
 
-        conn = psycopg2.connect(str(settings.DATABASE_URL))
-        conn.autocommit = True
-        own_conn = True
+    Always uses a dedicated autocommit connection so open worker transactions
+    cannot hide a fresh CANCELLED status or a delete committed elsewhere.
+    """
+    del conn  # ignored — never read cancellation through the worker txn
+    from data_staging.config import settings
+
+    check_conn = psycopg2.connect(str(settings.DATABASE_URL))
+    check_conn.autocommit = True
     try:
-        cursor = conn.cursor()
+        cursor = check_conn.cursor()
         cursor.execute(
             """
             SELECT status
@@ -35,17 +40,19 @@ def is_batch_cancelled(batch_id: str, conn: Optional[psycopg2.extensions.connect
         )
         row = cursor.fetchone()
         cursor.close()
-        return row is not None and row[0] == "CANCELLED"
+        if row is None:
+            logger.info("Batch %s no longer exists — treat as cancelled", batch_id)
+            return True
+        return row[0] == "CANCELLED"
     finally:
-        if own_conn:
-            conn.close()
+        check_conn.close()
 
 
 def raise_if_batch_cancelled(
     batch_id: str,
     conn: Optional[psycopg2.extensions.connection] = None,
 ) -> None:
-    """Abort current work if the batch was cancelled."""
+    """Abort current work if the batch was cancelled or deleted."""
     if is_batch_cancelled(batch_id, conn):
         logger.info("Batch %s cancelled — stopping worker", batch_id)
-        raise BatchCancelledError(f"Batch {batch_id} cancelled by user")
+        raise BatchCancelledError(f"Batch {batch_id} cancelled or removed")

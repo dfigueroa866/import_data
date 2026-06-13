@@ -77,9 +77,10 @@ def history_preferred_unique_keys(
     table_columns: Set[str],
 ) -> List[str]:
     """Claves preferidas para ON CONFLICT (filtradas a columnas presentes en la tabla)."""
-    from data_staging.services.history.history_config import HISTORY_UNIQUE_KEYS
+    from data_staging.services.history.history_config import resolve_history_rules
 
-    keys = list(metadata.get("unique_keys") or HISTORY_UNIQUE_KEYS)
+    rules = resolve_history_rules(metadata)
+    keys = list(metadata.get("unique_keys") or rules.get("unique_keys") or [])
     col_lower = {c.lower(): c for c in table_columns}
     resolved: List[str] = []
     for key in keys:

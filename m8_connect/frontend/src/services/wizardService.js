@@ -1,5 +1,6 @@
 import api from './api';
 import { FALLBACK_CATALOG_TABLES } from '../constants/catalogTables';
+import { FALLBACK_PROCESS_TYPES, HISTORY_TABLE_META } from '../constants/historyConfig';
 
 /**
  * Wizard-specific upload service
@@ -26,6 +27,38 @@ export const getCatalogTables = async () => {
         'catalog-tables API no disponible; usando lista local. Reinicia el backend: python run_app.py'
     );
     return { tables: FALLBACK_CATALOG_TABLES, fromFallback: true };
+};
+
+/**
+ * History table metadata for upload wizard (process types, mapping rules).
+ */
+export const getHistoryTable = async () => {
+    try {
+        const response = await api.get('/api/v1/system/history-table');
+        const table = response.data?.table;
+        if (table && typeof table === 'object') {
+            return {
+                table: {
+                    ...HISTORY_TABLE_META,
+                    ...table,
+                    process_types: table.process_types?.length
+                        ? table.process_types
+                        : FALLBACK_PROCESS_TYPES,
+                },
+                fromFallback: false,
+            };
+        }
+    } catch (error) {
+        const status = error.response?.status;
+        if (status && status !== 404 && status !== 502) {
+            console.warn('getHistoryTable:', error);
+        }
+    }
+
+    console.warn(
+        'history-table API no disponible; usando configuración local. Reinicia el backend: python run_app.py'
+    );
+    return { table: HISTORY_TABLE_META, fromFallback: true };
 };
 
 export const uploadFileTemp = async (
@@ -59,7 +92,13 @@ export const uploadFileTemp = async (
  * Save column mappings for a batch
  * Step 2 - Saves mappings, toggles, and dedup columns
  */
-export const saveColumnMapping = async (batchId, mappingData, processType = null, loadType = null) => {
+export const saveColumnMapping = async (
+    batchId,
+    mappingData,
+    processType = null,
+    loadType = null,
+    { triggerValidation = true } = {},
+) => {
     try {
         if (loadType) {
             mappingData.load_type = loadType;
@@ -67,12 +106,43 @@ export const saveColumnMapping = async (batchId, mappingData, processType = null
         if (processType) {
             mappingData.process_type = processType;
         }
+        mappingData.trigger_validation = triggerValidation;
         const response = await api.post(`/api/v1/upload/batch/${batchId}/mapping`, mappingData);
         return response.data;
     } catch (error) {
         console.error('Error saving column mapping:', error);
         throw error;
     }
+};
+
+/**
+ * Wait until initial mapping validation finishes (VALIDATE_BATCH worker).
+ */
+export const waitForMappingValidation = async (batchId, { onProgress, maxWaitMs = 600000 } = {}) => {
+    const start = Date.now();
+    const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    while (Date.now() - start < maxWaitMs) {
+        const progress = await getProcessingProgress(batchId);
+        onProgress?.(progress);
+
+        if (progress?.validation_complete) {
+            return progress;
+        }
+        if (progress?.phase === 'mapping_validation_failed') {
+            throw new Error(progress?.current_operation || 'Error en la validación del mapeo.');
+        }
+        if (
+            !progress?.validation_in_progress
+            && progress?.phase === 'mapping_validation_done'
+        ) {
+            return progress;
+        }
+
+        await delay(1500);
+    }
+
+    throw new Error('La validación del mapeo tardó demasiado. Revisa que los workers estén activos.');
 };
 
 /**
@@ -86,6 +156,9 @@ export const startPreview = async (batchId, { force = false } = {}) => {
         });
         return { status: response.status, data: response.data };
     } catch (error) {
+        if (error.response?.status === 202 && error.response?.data?.status === 'validating') {
+            return { status: 202, data: error.response.data, validating: true };
+        }
         console.error('Error starting preview:', error);
         throw error;
     }

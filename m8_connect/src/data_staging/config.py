@@ -123,11 +123,6 @@ class Settings(BaseSettings):
         10_000,
         description="Usar COPY PyArrow solo desde este número de filas por chunk",
     )
-    VECTORIZED_ID_MIN_ROWS: int = Field(
-        10_000,
-        description="Generación vectorizada de id solo en chunks >= este tamaño",
-    )
-    
     # === CONFIGURACIÓN DE ETL ===
     ETL_BATCH_SIZE: int = Field(10000, description="Tamaño de lote para procesamiento ETL")
     ETL_MAX_RETRIES: int = Field(3, description="Máximo número de reintentos")

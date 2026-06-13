@@ -115,6 +115,9 @@ export const CatalogColumnsEditor = ({
     classifyColumn = classifyCatalogColumn,
     readOnly = false,
     footerNote,
+    columnEditors = {},
+    mappableLegend = '',
+    requiredLockedColumns = [],
 }) => {
     if (schemaColumns.length === 0) {
         return (
@@ -141,14 +144,37 @@ export const CatalogColumnsEditor = ({
             return <ColumnLegend>{AUTO_AUDIT_LEGEND}</ColumnLegend>;
         }
         if (kind === 'auto') {
+            const editor = columnEditors[col.name];
+            if (editor) {
+                return (
+                    <div className="flex items-center justify-between gap-3 flex-wrap w-full">
+                        <ColumnLegend>{AUTO_WIZARD_LEGEND}</ColumnLegend>
+                        <Button
+                            type="button"
+                            variant="secondary"
+                            size="sm"
+                            onClick={editor.onToggle}
+                        >
+                            {editor.expanded ? 'Ocultar' : 'Editar'}
+                        </Button>
+                    </div>
+                );
+            }
             return <ColumnLegend>{AUTO_WIZARD_LEGEND}</ColumnLegend>;
         }
         return (
-            <RequiredColumnToggle
-                checked={Boolean(columnRequired[col.name])}
-                onChange={(value) => onRequiredChange(col.name, value)}
-                disabled={readOnly}
-            />
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between w-full">
+                <div className="flex flex-col gap-1">
+                    {mappableLegend ? (
+                        <ColumnLegend>{mappableLegend}</ColumnLegend>
+                    ) : null}
+                    <RequiredColumnToggle
+                        checked={Boolean(columnRequired[col.name])}
+                        onChange={(value) => onRequiredChange(col.name, value)}
+                        disabled={readOnly || requiredLockedColumns.includes(col.name)}
+                    />
+                </div>
+            </div>
         );
     };
 
@@ -175,29 +201,41 @@ export const CatalogColumnsEditor = ({
                         const kind = classifyColumn(col);
                         const isPk = kind === 'primary_key';
                         const isAuto = kind !== 'mappable';
+                        const editor = columnEditors[col.name];
                         return (
-                            <tr
-                                key={col.name}
-                                className={
-                                    isAuto
-                                        ? 'bg-slate-50/80 dark:bg-slate-900/30'
-                                        : 'bg-white dark:bg-slate-800'
-                                }
-                            >
-                                <td className="px-4 py-3 font-mono text-slate-800 dark:text-slate-100">
-                                    {col.name}
-                                    {isPk && (
-                                        <span className="ml-2 text-xs font-sans text-amber-600 dark:text-amber-400">
-                                            PK
-                                        </span>
-                                    )}
-                                </td>
-                                <td className="px-4 py-3 text-slate-500 dark:text-slate-400">
-                                    {col.type}
-                                    {!col.nullable ? ' · NOT NULL' : ''}
-                                </td>
-                                <td className="px-4 py-3">{renderStatus(col)}</td>
-                            </tr>
+                            <React.Fragment key={col.name}>
+                                <tr
+                                    className={
+                                        isAuto
+                                            ? 'bg-slate-50/80 dark:bg-slate-900/30'
+                                            : 'bg-white dark:bg-slate-800'
+                                    }
+                                >
+                                    <td className="px-4 py-3 font-mono text-slate-800 dark:text-slate-100">
+                                        {col.name}
+                                        {isPk && (
+                                            <span className="ml-2 text-xs font-sans text-amber-600 dark:text-amber-400">
+                                                PK
+                                            </span>
+                                        )}
+                                    </td>
+                                    <td className="px-4 py-3 text-slate-500 dark:text-slate-400">
+                                        {col.type}
+                                        {!col.nullable ? ' · NOT NULL' : ''}
+                                    </td>
+                                    <td className="px-4 py-3">{renderStatus(col)}</td>
+                                </tr>
+                                {editor?.expanded && (
+                                    <tr className="bg-slate-50/80 dark:bg-slate-900/30">
+                                        <td
+                                            colSpan={3}
+                                            className="px-4 py-4 border-t border-[#e2e8f0] dark:border-[#334155]"
+                                        >
+                                            {editor.panel}
+                                        </td>
+                                    </tr>
+                                )}
+                            </React.Fragment>
                         );
                     })}
                 </tbody>

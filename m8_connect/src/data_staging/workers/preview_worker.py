@@ -119,22 +119,63 @@ def execute_preview_pipeline(batch_id: str, org_id: str) -> None:
         else:
             from data_staging.services.history.history_preview_pipeline import (
                 process_history_preview_with_validation,
+                run_history_aggregation_from_validated,
+                validated_intermediate_path,
             )
             from data_staging.utils.batch_staging_files import rejected_records_path
 
             try:
-                agg_stats, agg_file_path = process_history_preview_with_validation(
-                    batch_id=batch_id,
-                    file_path=file_path,
-                    column_mappings=column_mappings,
-                    column_toggles=column_toggles,
-                    process_type=process_type,
-                    encoding=encoding,
-                    delimiter=delimiter,
-                    organization_id=org_id,
-                    metadata=metadata,
-                    file_name=getattr(batch, "source_name", "") or "",
-                )
+                pre_stats = metadata.get("processing_stats") or {}
+                if metadata.get("validation_complete") and int(
+                    pre_stats.get("total_inserted") or 0
+                ) == 0:
+                    agg_stats = {
+                        "has_error": True,
+                        "error_detail": (
+                            "Ningún registro pasó la validación. "
+                            "Descarga los rechazados para corregir."
+                        ),
+                        "total_rows": int(pre_stats.get("total_inserted") or 0)
+                        + int(pre_stats.get("total_rejected") or 0),
+                        "rejected_rows": int(pre_stats.get("total_rejected") or 0),
+                        "valid_rows": 0,
+                        "dropped_rows": 0,
+                        "preview_data": [],
+                    }
+                    agg_file_path = Path(file_path)
+                elif metadata.get("validation_complete") and (
+                    metadata.get("validated_temp_file")
+                    or validated_intermediate_path(batch_id, metadata).is_file()
+                ):
+                    validated_path = validated_intermediate_path(batch_id, metadata)
+                    stored = metadata.get("validated_temp_file")
+                    if stored and Path(stored).is_file():
+                        validated_path = Path(stored)
+                    agg_stats, agg_file_path = run_history_aggregation_from_validated(
+                        batch_id=batch_id,
+                        validated_path=validated_path,
+                        column_mappings=column_mappings,
+                        column_toggles=column_toggles,
+                        process_type=process_type,
+                        encoding=encoding,
+                        delimiter=delimiter,
+                        organization_id=org_id,
+                        metadata=metadata,
+                        file_name=getattr(batch, "source_name", "") or "",
+                    )
+                else:
+                    agg_stats, agg_file_path = process_history_preview_with_validation(
+                        batch_id=batch_id,
+                        file_path=file_path,
+                        column_mappings=column_mappings,
+                        column_toggles=column_toggles,
+                        process_type=process_type,
+                        encoding=encoding,
+                        delimiter=delimiter,
+                        organization_id=org_id,
+                        metadata=metadata,
+                        file_name=getattr(batch, "source_name", "") or "",
+                    )
             except BatchCancelledError:
                 raise
             except Exception as exc:
@@ -176,6 +217,7 @@ def execute_preview_pipeline(batch_id: str, org_id: str) -> None:
                 metadata["valid_temp_file"] = agg_path
                 metadata["valid_file_format"] = "parquet"
                 metadata = with_file_path(metadata, agg_path)
+                metadata.pop("validated_temp_file", None)
 
         metadata["wizard_step"] = 3
         metadata["preview_generated"] = True
@@ -256,8 +298,24 @@ def execute_preview_pipeline(batch_id: str, org_id: str) -> None:
         logger.info("Preview cancelled for batch %s (worker)", batch_id)
         try:
             db.rollback()
+            db.execute(
+                text("""
+                    UPDATE staging_meta.batch_control
+                    SET metadata = metadata || jsonb_build_object(
+                            'preview_in_progress', false
+                        ),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE batch_id = :batch_id AND status = 'CANCELLED'
+                """),
+                {"batch_id": batch_id},
+            )
+            db.commit()
         except Exception:
-            pass
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        raise
     except Exception as exc:
         logger.exception("Background preview failed for batch %s", batch_id)
         try:

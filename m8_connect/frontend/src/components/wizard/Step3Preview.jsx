@@ -4,6 +4,7 @@ import {
     getPreviewResult,
     getProcessingProgress,
     downloadRejectedRecords,
+    waitForMappingValidation,
 } from '../../services/wizardService';
 import { useAuth } from '../../context/AuthContext';
 import useSessionLoadGuard from '../../hooks/useSessionLoadGuard';
@@ -143,6 +144,13 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                     return;
                 }
 
+                if (progressData?.phase === 'mapping_validation_failed') {
+                    stopPreviewPoll();
+                    setLoading(false);
+                    setError(progressData?.current_operation || 'Error en la validación del mapeo.');
+                    return;
+                }
+
                 if (isPreviewProgressComplete(progressData)) {
                     stopPreviewPoll();
                     const data = await fetchPreviewResultOnce(batchId);
@@ -230,7 +238,21 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                 setPreviewProgress(null);
                 stopPreviewPoll();
 
-                const { status, data } = await startPreview(batchId, { force });
+                if (wizardData.loadMode === 'history' && !wizardData.validationComplete) {
+                    await waitForMappingValidation(batchId, {
+                        onProgress: (p) => setPreviewProgress(p),
+                    });
+                }
+
+                let previewResponse = await startPreview(batchId, { force });
+                if (previewResponse.validating) {
+                    await waitForMappingValidation(batchId, {
+                        onProgress: (p) => setPreviewProgress(p),
+                    });
+                    previewResponse = await startPreview(batchId, { force });
+                }
+
+                const { status, data } = previewResponse;
 
                 if (status === 200 && data?.validation_summary) {
                     stopPreviewPoll();
@@ -266,7 +288,7 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                 previewInitInflight.delete(batchId);
             }
         }
-    }, [applyPreviewData, pollPreviewUntilDone, stopPreviewPoll]);
+    }, [applyPreviewData, pollPreviewUntilDone, stopPreviewPoll, wizardData.loadMode, wizardData.validationComplete]);
 
     useEffect(() => {
         const batchId = wizardData?.batchId;
@@ -641,7 +663,7 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
 
     if (loading) {
         const pct = Math.min(100, Math.max(0, Number(previewProgress?.progress_percentage) || 0));
-        const operation = previewProgress?.current_operation || 'Generando vista previa del mapeo…';
+        const operation = previewProgress?.current_operation || 'Agregando datos para la vista previa…';
         const processed = previewProgress?.processed_rows ?? 0;
         const total = previewProgress?.total_rows ?? 0;
         const showRowCounts = total > 0;

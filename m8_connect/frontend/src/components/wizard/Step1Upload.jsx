@@ -1,22 +1,78 @@
-import React, { useState } from 'react';
-import { uploadFileTemp } from '../../services/wizardService';
+import React, { useState, useEffect } from 'react';
+import {
+    uploadFileTemp,
+    getHistoryTable,
+    saveColumnMapping,
+    waitForMappingValidation,
+} from '../../services/wizardService';
+import { getTableColumns } from '../../services/systemService';
 import useSessionLoadGuard from '../../hooks/useSessionLoadGuard';
+import { useAuth } from '../../context/AuthContext';
 import { Button, LoadingSpinner, Alert, FormField, Select } from '../ui';
 import {
     HISTORY_TARGET_SCHEMA,
     HISTORY_TARGET_TABLE,
     HISTORY_TABLE_META,
+    FALLBACK_PROCESS_TYPES,
 } from '../../constants/historyConfig';
+import { formatNumber } from '../../lib/format';
+import {
+    appendFixedHistoryAutoMappings,
+    appendFixedOrganizationMapping,
+    buildAutoColumnMappings,
+    buildMappingContext,
+    mergeHistoryProductionColumns,
+} from '../../utils/wizardColumnMapping';
 import './Step1Upload.css';
 
 const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
+    const { user } = useAuth();
+    const organizationId = user?.organization_id || wizardData.organizationId || '';
     const [file, setFile] = useState(wizardData.file || null);
     const [processType, setProcessType] = useState(wizardData.processType || '');
     const [uploading, setUploading] = useState(false);
+    const [validating, setValidating] = useState(false);
+    const [validationProgress, setValidationProgress] = useState(null);
     const [error, setError] = useState('');
+    const [historyMeta, setHistoryMeta] = useState(
+        wizardData.historyTableMeta || HISTORY_TABLE_META
+    );
+    const [metaLoading, setMetaLoading] = useState(!wizardData.historyTableMeta?.process_types?.length);
 
-    useSessionLoadGuard(uploading);
+    useSessionLoadGuard(uploading || validating);
     const [dragActive, setDragActive] = useState(false);
+
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            try {
+                setMetaLoading(true);
+                const { table } = await getHistoryTable();
+                if (!cancelled) {
+                    setHistoryMeta(table);
+                }
+            } catch {
+                if (!cancelled) {
+                    setHistoryMeta(HISTORY_TABLE_META);
+                }
+            } finally {
+                if (!cancelled) {
+                    setMetaLoading(false);
+                }
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, []);
+
+    const processTypes = historyMeta?.process_types?.length
+        ? historyMeta.process_types
+        : FALLBACK_PROCESS_TYPES;
+
+    const validationHints = historyMeta?.validation_hints?.length
+        ? historyMeta.validation_hints
+        : HISTORY_TABLE_META.validation_hints;
 
     const handleDrag = (e) => {
         e.preventDefault();
@@ -52,7 +108,7 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
             return;
         }
         if (!processType) {
-            setError('Selecciona el tipo de proceso (Weekly o Monthly)');
+            setError('Selecciona el tipo de proceso (granularidad)');
             return;
         }
 
@@ -68,19 +124,86 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
                 'history'
             );
 
+            const batchId = response.batch_id;
+            const fileHeaders = response.file_headers || [];
+
+            const colsData = await getTableColumns(HISTORY_TARGET_SCHEMA, HISTORY_TARGET_TABLE);
+            const productionColumns = mergeHistoryProductionColumns(colsData.columns || []);
+            const mappingCtx = buildMappingContext({
+                loadMode: 'history',
+                selectedSchema: HISTORY_TARGET_SCHEMA,
+                selectedTable: HISTORY_TARGET_TABLE,
+                historyTableMeta: historyMeta,
+            });
+
+            let { mappings, toggles } = buildAutoColumnMappings(
+                fileHeaders,
+                productionColumns,
+                mappingCtx,
+            );
+
+            const tableHasOrganizationId = productionColumns.some(
+                (col) => col.name === 'organization_id',
+            );
+            const withOrg = appendFixedOrganizationMapping(mappings, toggles, {
+                organizationId,
+                tableHasOrganizationId,
+            });
+            mappings = withOrg.mappings;
+            toggles = withOrg.toggles;
+
+            const withHistory = appendFixedHistoryAutoMappings(mappings, toggles, {
+                loadMode: 'history',
+                processType,
+                fileName: response.file_name,
+                historyTableMeta: historyMeta,
+            });
+            if (withHistory.error) {
+                setError(withHistory.error);
+                return;
+            }
+            mappings = withHistory.mappings;
+            toggles = withHistory.toggles;
+
+            await saveColumnMapping(
+                batchId,
+                {
+                    target_schema: HISTORY_TARGET_SCHEMA,
+                    target_table: HISTORY_TARGET_TABLE,
+                    column_mappings: mappings,
+                    column_toggles: toggles,
+                },
+                processType,
+                'history',
+                { triggerValidation: true },
+            );
+
+            setUploading(false);
+            setValidating(true);
+            setValidationProgress(null);
+
+            await waitForMappingValidation(batchId, {
+                onProgress: (p) => setValidationProgress(p),
+            });
+
             updateWizardData({
                 file: file,
                 fileName: response.file_name,
-                fileHeaders: response.file_headers || [],
+                fileHeaders,
                 selectedSchema: HISTORY_TARGET_SCHEMA,
                 selectedTable: HISTORY_TARGET_TABLE,
-                historyTableMeta: HISTORY_TABLE_META,
+                historyTableMeta: historyMeta,
                 sourceName: response.source_name,
-                batchId: response.batch_id,
+                batchId,
                 processType: processType,
                 loadMode: 'history',
                 estimatedRows: response.estimated_rows,
                 fileType: response.file_type,
+                columnMappings: mappings,
+                columnToggles: toggles,
+                productionColumns,
+                validationComplete: true,
+                organizationId,
             });
 
             nextStep();
@@ -93,13 +216,50 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
                         : detail
                 );
             } else {
-                setError('No se pudo subir el archivo. Verifica que el API esté en ejecución.');
+                setError(
+                    err.message
+                        || 'No se pudo completar la carga o validación. Verifica que el API y los workers estén activos.'
+                );
             }
             console.error(err);
         } finally {
             setUploading(false);
+            setValidating(false);
         }
     };
+
+    if (validating) {
+        const pct = Math.min(100, Math.max(0, Number(validationProgress?.progress_percentage) || 0));
+        const operation = validationProgress?.current_operation || 'Validando filas del archivo…';
+        const processed = validationProgress?.processed_rows ?? 0;
+        const total = validationProgress?.total_rows ?? 0;
+        const showRowCounts = total > 0;
+
+        return (
+            <div className="step1-upload">
+                <div className="step1-validating">
+                    <LoadingSpinner />
+                    <p>{operation}</p>
+                    <div className="step1-progress">
+                        <div className="step1-progress__bar">
+                            <div
+                                className="step1-progress__fill"
+                                style={{ width: `${pct}%` }}
+                            />
+                        </div>
+                        {showRowCounts && (
+                            <p className="step1-progress__rows">
+                                {formatNumber(processed)} de {formatNumber(total)} filas
+                            </p>
+                        )}
+                    </div>
+                    <p className="step1-validating__hint">
+                        Iniciando validaciones preliminares del archivo.
+                    </p>
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div className="step1-upload">
@@ -165,15 +325,21 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
                 <div className="selection-section">
                     <h3>Configuración</h3>
 
-                    <FormField label="Tipo de proceso" htmlFor="processType" required className="form-group">
+                    <FormField label="Granularidad (tipo de proceso)" htmlFor="processType" required className="form-group">
                         <Select
                             id="processType"
                             value={processType}
                             onChange={(e) => setProcessType(e.target.value)}
+                            disabled={metaLoading}
                         >
-                            <option value="">-- Seleccionar --</option>
-                            <option value="Weekly">Weekly (agrupa por semana)</option>
-                            <option value="Monthly">Monthly (agrupa por mes)</option>
+                            <option value="">
+                                {metaLoading ? 'Cargando opciones…' : '-- Seleccionar --'}
+                            </option>
+                            {processTypes.map((pt) => (
+                                <option key={pt.key} value={pt.key}>
+                                    {pt.label}
+                                </option>
+                            ))}
                         </Select>
                     </FormField>
 
@@ -184,10 +350,10 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
                         </div>
                         <p className="info-hint">
                             Columnas clave: location_code, sku, period_start, quantity.
-                            granularity (week/month) y source (extensión del archivo) se asignan automáticamente.
+                            granularity y source (extensión del archivo) se asignan automáticamente.
                         </p>
                         <ul className="history-hints-list">
-                            {HISTORY_TABLE_META.validation_hints.map((hint) => (
+                            {validationHints.map((hint) => (
                                 <li key={hint}>{hint}</li>
                             ))}
                         </ul>
@@ -200,17 +366,20 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
             <div className="step-actions">
                 <Button
                     variant="primary"
+                    className="step1-submit-btn"
                     onClick={handleSubmit}
-                    disabled={!file || !processType || uploading}
+                    disabled={!file || !processType || uploading || validating || metaLoading}
                 >
-                    {uploading ? (
-                        <>
-                            <LoadingSpinner size="sm" />
-                            Subiendo...
-                        </>
-                    ) : (
-                        'Siguiente: mapear columnas →'
-                    )}
+                    <span className="step1-submit-btn__label">
+                        {uploading ? (
+                            <>
+                                <LoadingSpinner size="sm" />
+                                Subiendo archivo…
+                            </>
+                        ) : (
+                            'Siguiente: mapear columnas →'
+                        )}
+                    </span>
                 </Button>
             </div>
         </div>
