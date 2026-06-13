@@ -16,10 +16,10 @@ from data_staging.services.history.history_validation import (
     identity_wizard_mappings_for_columns,
 )
 from data_staging.utils.batch_staging_files import (
-    get_temp_dir,
     rejected_records_path,
     valid_records_path,
 )
+from data_staging.utils.load_storage_paths import batch_artifact_path
 from data_staging.utils.pipeline_timing import PipelineTimer, persist_timing_metadata
 from data_staging.workers.file_processor import (
     open_progress_connection,
@@ -32,22 +32,25 @@ logger = logging.getLogger(__name__)
 VALIDATED_SUFFIX = "_validated.parquet"
 
 
-def validated_intermediate_path(batch_id: str) -> Path:
-    return get_temp_dir() / f"{batch_id}{VALIDATED_SUFFIX}"
+def validated_intermediate_path(batch_id: str, metadata: Optional[Dict[str, Any]] = None) -> Path:
+    return batch_artifact_path(batch_id, VALIDATED_SUFFIX, metadata)
 
 
-def _clear_staging_files(batch_id: str) -> None:
+def _clear_staging_files(batch_id: str, metadata: Optional[Dict[str, Any]] = None) -> None:
     for path in (
-        rejected_records_path(batch_id),
-        valid_records_path(batch_id),
-        validated_intermediate_path(batch_id),
+        rejected_records_path(batch_id, metadata),
+        valid_records_path(batch_id, metadata),
+        validated_intermediate_path(batch_id, metadata),
     ):
         if path.exists():
             path.unlink()
 
 
-def _delete_validated_intermediate(batch_id: str) -> None:
-    path = validated_intermediate_path(batch_id)
+def _delete_validated_intermediate(
+    batch_id: str,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    path = validated_intermediate_path(batch_id, metadata)
     if path.is_file():
         try:
             path.unlink()
@@ -64,11 +67,12 @@ def validate_original_file(
     delimiter: str,
     conn: psycopg2.extensions.connection,
     progress_conn: Optional[psycopg2.extensions.connection] = None,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> Tuple[int, int, Path, int]:
     """Run PROCESS_FILE validation on all original rows. Returns valid, rejected, path, total_rows."""
-    rejected_path = rejected_records_path(batch_id)
-    validated_path = validated_intermediate_path(batch_id)
-    _clear_staging_files(batch_id)
+    rejected_path = rejected_records_path(batch_id, metadata)
+    validated_path = validated_intermediate_path(batch_id, metadata)
+    _clear_staging_files(batch_id, metadata)
 
     progress_conn = progress_conn or conn
     report_processing_progress(
@@ -181,6 +185,7 @@ def process_history_preview_with_validation(
                 delimiter=delimiter,
                 conn=conn,
                 progress_conn=progress_conn,
+                metadata=meta,
             )
 
         if valid_rows == 0:
@@ -292,11 +297,12 @@ def process_history_preview_with_validation(
                 reduce_progress_callback=_report_reduce_progress,
                 df_finalizer=_enrich_agg_df,
                 batch_id=batch_id,
+                metadata=meta,
             )
 
         if not agg_stats.get("has_error") and agg_path.is_file():
             with preview_timer.phase("finalize_ms"):
-                _delete_validated_intermediate(batch_id)
+                _delete_validated_intermediate(batch_id, meta)
 
         report_processing_progress(
             progress_conn,

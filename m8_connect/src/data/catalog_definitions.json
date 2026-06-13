@@ -104,20 +104,16 @@
       "name": "location",
       "label": "Ubicaciones",
       "target_schema": "public",
-      "target_table": "location",
+      "target_table": "locations",
       "config_file": "location_config.json",
       "is_active": true,
       "required_columns": [
-        "organization_id",
-        "location_code",
-        "location_name"
+        "organization_id"
       ],
       "optional_columns": [
         "country",
         "city",
-        "timezone",
-        "is_active",
-        "location_type"
+        "timezone"
       ],
       "required_mapping_columns": [],
       "unique_keys": [

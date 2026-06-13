@@ -10,6 +10,7 @@ from data_staging.utils.encoding_utils import detect_file_encoding, encoding_for
 from data_staging.config import settings
 from data_staging.utils.chunk_iterators import iter_csv_chunks, iter_parquet_chunks, count_csv_rows, count_parquet_rows
 from data_staging.utils.batch_staging_files import get_temp_dir
+from data_staging.utils.load_storage_paths import resolve_batch_work_dir
 
 # Tolerancia global para diferencias de flotantes (como en weekly.py)
 TOTAL_PRICE_TOL = 1e-6
@@ -108,18 +109,24 @@ def _should_use_agg_spill(total_rows: int) -> bool:
     return total_rows >= _agg_spill_threshold_rows()
 
 
-def _agg_partial_glob(batch_id: str) -> str:
-    return str(get_temp_dir() / f"{batch_id}_agg_partial_*.parquet")
+def _agg_work_dir(metadata: Any = None) -> Path:
+    if metadata:
+        return resolve_batch_work_dir(metadata)
+    return get_temp_dir()
 
 
-def _agg_partial_path(batch_id: str, index: int) -> Path:
-    return get_temp_dir() / f"{batch_id}_agg_partial_{index}.parquet"
+def _agg_partial_glob(batch_id: str, metadata: Any = None) -> str:
+    return str(_agg_work_dir(metadata) / f"{batch_id}_agg_partial_*.parquet")
 
 
-def cleanup_agg_partial_files(batch_id: Optional[str]) -> None:
+def _agg_partial_path(batch_id: str, index: int, metadata: Any = None) -> Path:
+    return _agg_work_dir(metadata) / f"{batch_id}_agg_partial_{index}.parquet"
+
+
+def cleanup_agg_partial_files(batch_id: Optional[str], metadata: Any = None) -> None:
     if not batch_id:
         return
-    for path in glob.glob(_agg_partial_glob(batch_id)):
+    for path in glob.glob(_agg_partial_glob(batch_id, metadata)):
         try:
             Path(path).unlink(missing_ok=True)
         except OSError:
@@ -264,6 +271,7 @@ def process_aggregation_streaming(
     reduce_progress_callback: Optional[AggregationReduceCallback] = None,
     df_finalizer: Optional[AggregationDfFinalizer] = None,
     batch_id: Optional[str] = None,
+    metadata: Any = None,
 ) -> Tuple[Dict[str, Any], Path]:
     """Map-reduce aggregation by chunks (memory-bounded, spill-capable)."""
     path = Path(file_path)
@@ -308,13 +316,17 @@ def process_aggregation_streaming(
 
     use_spill = _should_use_agg_spill(total_rows_original) or total_rows_original > _agg_in_memory_max_rows()
     if batch_id:
-        cleanup_agg_partial_files(batch_id)
+        cleanup_agg_partial_files(batch_id, metadata)
 
     accumulator: Optional[pl.DataFrame] = None
     spill_paths: List[Path] = []
     spill_index = 0
 
     for chunk in chunk_iter:
+        if batch_id:
+            from data_staging.utils.batch_cancel import raise_if_batch_cancelled
+
+            raise_if_batch_cancelled(batch_id)
         chunk_idx += 1
         actual_cols = [c for c in cols_to_keep if c in chunk.columns]
         if actual_cols:
@@ -345,7 +357,7 @@ def process_aggregation_streaming(
 
         if use_spill and batch_id:
             spill_index += 1
-            spill_path = _agg_partial_path(batch_id, spill_index)
+            spill_path = _agg_partial_path(batch_id, spill_index, metadata)
             partial.write_parquet(spill_path)
             spill_paths.append(spill_path)
         else:
@@ -357,7 +369,7 @@ def process_aggregation_streaming(
             ):
                 use_spill = True
                 spill_index += 1
-                spill_path = _agg_partial_path(batch_id, spill_index)
+                spill_path = _agg_partial_path(batch_id, spill_index, metadata)
                 accumulator.write_parquet(spill_path)
                 spill_paths.append(spill_path)
                 accumulator = None
@@ -368,7 +380,7 @@ def process_aggregation_streaming(
     if use_spill and spill_paths:
         if accumulator is not None and not accumulator.is_empty():
             spill_index += 1
-            tail_path = _agg_partial_path(batch_id, spill_index)
+            tail_path = _agg_partial_path(batch_id, spill_index, metadata)
             accumulator.write_parquet(tail_path)
             spill_paths.append(tail_path)
             accumulator = None
@@ -377,7 +389,7 @@ def process_aggregation_streaming(
             group_dimensions,
             reduce_progress_callback=reduce_progress_callback,
         )
-        cleanup_agg_partial_files(batch_id)
+        cleanup_agg_partial_files(batch_id, metadata)
     elif accumulator is not None and not accumulator.is_empty():
         if reduce_progress_callback:
             reduce_progress_callback(1, 1)
@@ -431,6 +443,7 @@ def process_aggregation(
     reduce_progress_callback: Optional[AggregationReduceCallback] = None,
     df_finalizer: Optional[AggregationDfFinalizer] = None,
     batch_id: Optional[str] = None,
+    metadata: Any = None,
 ) -> Tuple[Dict[str, Any], Path]:
     """
     Procesa el archivo completo agrupándolo semanal o mensualmente.
@@ -469,6 +482,7 @@ def process_aggregation(
             reduce_progress_callback=reduce_progress_callback,
             df_finalizer=df_finalizer,
             batch_id=batch_id,
+            metadata=metadata,
         )
 
     pl_encoding = encoding_for_polars(detect_file_encoding(path))

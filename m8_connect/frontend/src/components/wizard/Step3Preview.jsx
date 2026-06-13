@@ -360,7 +360,6 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
     const rejectedRows = val.rejected_rows ?? val.dropped_rows ?? 0;
     const productionRows = val.grouped_rows ?? validRows;
     const canContinue = !val.has_error && (validRows > 0);
-    const rowsSaved = Math.max(0, (validRows || 0) - (val.grouped_rows || 0));
     const qtyIntegrityOk = Math.abs(val.diff_qty || 0) <= 0.001;
     const totalIntegrityOk = Math.abs(val.diff_total || 0) <= 0.001;
     const locIntegrityOk = (val.loc_diff_count || 0) === 0;
@@ -511,12 +510,22 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                             <article className="history-kpi history-kpi--filas">
                                 <span className="history-kpi__label">Filas</span>
                                 <div className="history-kpi__flow history-kpi__flow--prod">
-                                    <div className="history-kpi__value-block">
-                                        <strong>{formatMetric(val.total_rows)}</strong>
-                                        <small>originales</small>
+                                    <div className="step3-prod-summary step3-prod-summary--inline step3-prod-summary--source">
+                                        <p className="step3-prod-summary__hint">
+                                            Filas del archivo original antes de agregación.
+                                        </p>
+                                        <div className="step3-prod-summary__value">
+                                            <span className="step3-prod-summary__label">Originales</span>
+                                            <strong>{formatMetric(val.total_rows)}</strong>
+                                        </div>
                                     </div>
-                                    <span className="history-kpi__arrow" aria-hidden="true">→</span>
-                                    <div className="step3-prod-summary step3-prod-summary--inline">
+                                    <span
+                                        className="history-kpi__arrow history-kpi__arrow--prominent"
+                                        aria-hidden="true"
+                                    >
+                                        →
+                                    </span>
+                                    <div className="step3-prod-summary step3-prod-summary--inline step3-prod-summary--success">
                                         <p className="step3-prod-summary__hint">
                                             Total final que se cargará a producción en el siguiente paso.
                                         </p>
@@ -526,11 +535,6 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                                         </div>
                                     </div>
                                 </div>
-                                {rowsSaved > 0 && (
-                                    <span className="history-kpi__delta">
-                                        −{formatMetric(rowsSaved)} filas consolidadas
-                                    </span>
-                                )}
                             </article>
 
                             {val.orig_total > 0 && (

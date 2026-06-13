@@ -1112,7 +1112,9 @@ def promote_batch_job(payload: Dict[str, Any]):
                 target_schema = HISTORY_TARGET_SCHEMA
                 target_table = HISTORY_TARGET_TABLE
 
-        valid_path = find_valid_records_file(batch_id, metadata.get("valid_temp_file"))
+        valid_path = find_valid_records_file(
+            batch_id, metadata.get("valid_temp_file"), metadata
+        )
 
         logger.info(f"Starting promotion for batch {batch_id} to {target_schema}.{target_table}")
 

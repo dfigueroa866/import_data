@@ -140,7 +140,7 @@ const ProgressBar = ({ pct, label = 'Avance', complete = false }) => {
                 <div
                     className={[
                         'step4-live__bar-fill',
-                        'step4-live__bar-fill--rows',
+                        complete ? 'step4-live__bar-fill--success' : 'step4-live__bar-fill--rows',
                         complete && 'step4-live__bar-fill--static',
                     ]
                         .filter(Boolean)
@@ -205,10 +205,12 @@ const PromotionPanel = ({
         : 'Escribiendo en tabla destino…';
 
     return (
-        <div className="step4-live">
+        <div className={['step4-live', complete && 'step4-live--success'].filter(Boolean).join(' ')}>
             <div className="step4-live__hero">
                 <div className="step4-live__hero-text">
-                    <h2 className="step4-live__title">{title}</h2>
+                    <h2 className={['step4-live__title', complete && 'step4-live__title--success'].filter(Boolean).join(' ')}>
+                        {title}
+                    </h2>
                     <p className="step4-live__subtitle">{subtitle}</p>
                 </div>
                 <ProgressBar
@@ -218,16 +220,42 @@ const PromotionPanel = ({
                 />
             </div>
 
-            <div className="step4-live__stats step4-live__stats--promotion">
-                <div className="step4-live__stat">
+            <div
+                className={[
+                    'step4-live__stats',
+                    'step4-live__stats--promotion',
+                    complete && 'step4-live__stats--success',
+                ]
+                    .filter(Boolean)
+                    .join(' ')}
+            >
+                <div className={['step4-live__stat', complete && 'step4-live__stat--neutral'].filter(Boolean).join(' ')}>
                     <span className="step4-live__stat-value">{formatNumber(promoteTotal)}</span>
-                    <span className="step4-live__stat-label">Total a procesar</span>
+                    <span className="step4-live__stat-label">
+                        {complete ? 'Total procesados' : 'Total a procesar'}
+                    </span>
                 </div>
-                <div className="step4-live__stat step4-live__stat--ok">
+                <div
+                    className={[
+                        'step4-live__stat',
+                        'step4-live__stat--ok',
+                        complete && 'step4-live__stat--highlight-ok',
+                    ]
+                        .filter(Boolean)
+                        .join(' ')}
+                >
                     <span className="step4-live__stat-value">{formatNumber(inserted)}</span>
                     <span className="step4-live__stat-label">Insertados</span>
                 </div>
-                <div className="step4-live__stat step4-live__stat--update">
+                <div
+                    className={[
+                        'step4-live__stat',
+                        'step4-live__stat--update',
+                        complete && 'step4-live__stat--highlight-update',
+                    ]
+                        .filter(Boolean)
+                        .join(' ')}
+                >
                     <span className="step4-live__stat-value">{formatNumber(updated)}</span>
                     <span className="step4-live__stat-label">Actualizados</span>
                 </div>

@@ -18,7 +18,6 @@ from data_staging.utils.batch_staging_files import (
     ValidRecordsParquetWriter,
     append_rejected_records_csv,
     append_valid_records_parquet,
-    get_temp_dir,
     metadata_merge_expr,
     rejected_records_path,
     valid_records_path,
@@ -28,6 +27,7 @@ from data_staging.utils.parallel_validation import (
     configure_polars_threads,
     should_use_parallel_validation,
 )
+from data_staging.utils.batch_cancel import raise_if_batch_cancelled
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +67,8 @@ def report_processing_progress(
     force: bool = False,
 ) -> None:
     """Persist real-time progress in batch metadata for Step 4 polling."""
+    raise_if_batch_cancelled(batch_id, conn)
+
     snapshot_key = (
         f"{phase}|{chunks_processed}|{chunks_total}|"
         f"{int(rows_processed // max(PROGRESS_ROW_INTERVAL, 1))}|"
@@ -382,10 +384,8 @@ def process_file_job(payload: Dict[str, Any]):
             conn.commit()
 
         # 3. Preparar archivos en disco (válidos Parquet, rechazados TSV)
-        temp_dir = get_temp_dir()
-
-        valid_temp_file = valid_records_path(batch_id)
-        rejected_temp_file = rejected_records_path(batch_id)
+        valid_temp_file = valid_records_path(batch_id, metadata)
+        rejected_temp_file = rejected_records_path(batch_id, metadata)
 
         # staging_table sigue existiendo como nombre lógico pero ya NO se crea ni se usa en BD.
         # Se mantiene la variable por compatibilidad con firmas internas que aún la reciben.
@@ -954,6 +954,7 @@ def process_file_in_chunks(
                 parallel_buffer.clear()
 
             for chunk_df in chunk_source:
+                raise_if_batch_cancelled(batch_id, progress_conn)
                 end_idx = min(row_offset + len(chunk_df), total_rows)
                 with (pipeline_timer.phase("read_ms") if pipeline_timer else _null_phase()):
                     chunk_to_process = chunk_df
@@ -992,6 +993,7 @@ def process_file_in_chunks(
                 force=True,
             )
             for i in range(0, total_rows, CHUNK_SIZE_RECORDS):
+                raise_if_batch_cancelled(batch_id, progress_conn)
                 chunk_df = df_full[i:i+CHUNK_SIZE_RECORDS]
                 
                 stats = process_single_chunk(

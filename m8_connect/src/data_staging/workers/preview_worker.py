@@ -17,6 +17,7 @@ from data_staging.utils.batch_control import (
     with_file_path,
 )
 from data_staging.auth.security import ensure_organization_id_mapping
+from data_staging.utils.batch_cancel import BatchCancelledError, raise_if_batch_cancelled
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,8 @@ def execute_preview_pipeline(batch_id: str, org_id: str) -> None:
         batch = result.fetchone()
         if not batch:
             return
+
+        raise_if_batch_cancelled(batch_id)
 
         metadata = normalize_metadata(batch.metadata)
         file_path = resolve_original_file_path(
@@ -134,6 +137,8 @@ def execute_preview_pipeline(batch_id: str, org_id: str) -> None:
                     metadata=metadata,
                     file_name=getattr(batch, "source_name", "") or "",
                 )
+            except BatchCancelledError:
+                raise
             except Exception as exc:
                 logger.exception("History preview pipeline failed for batch %s", batch_id)
                 metadata["preview_in_progress"] = False
@@ -149,7 +154,7 @@ def execute_preview_pipeline(batch_id: str, org_id: str) -> None:
                 db.commit()
                 return
 
-            rejected_path = str(rejected_records_path(batch_id).resolve())
+            rejected_path = str(rejected_records_path(batch_id, metadata).resolve())
             metadata["rejected_temp_file"] = rejected_path
             metadata["validated_in_preview"] = True
             ctx_cols = metadata.get("column_mappings") or {}
@@ -244,11 +249,17 @@ def execute_preview_pipeline(batch_id: str, org_id: str) -> None:
         if metadata.get("aggregated_file_path"):
             update_sql += ", file_path = :file_path"
             update_params["file_path"] = metadata["aggregated_file_path"]
-        update_sql += " WHERE batch_id = :batch_id"
+        update_sql += " WHERE batch_id = :batch_id AND status != 'CANCELLED'"
 
         db.execute(text(update_sql), update_params)
         db.commit()
         logger.info("Preview generated for batch %s (worker)", batch_id)
+    except BatchCancelledError:
+        logger.info("Preview cancelled for batch %s (worker)", batch_id)
+        try:
+            db.rollback()
+        except Exception:
+            pass
     except Exception as exc:
         logger.exception("Background preview failed for batch %s", batch_id)
         try:

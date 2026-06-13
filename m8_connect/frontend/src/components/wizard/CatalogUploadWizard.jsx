@@ -99,7 +99,13 @@ const CatalogUploadWizard = () => {
         backTo="/upload"
         backLabel="Volver a tipo de carga"
       />
-      <WizardStepper steps={STEPS} currentStep={currentStep} completedSteps={completedSteps} errorStep={hasError ? 4 : null} />
+      <WizardStepper
+        steps={STEPS}
+        currentStep={currentStep}
+        completedSteps={completedSteps}
+        successStep={processingComplete ? 4 : null}
+        errorStep={hasError ? 4 : null}
+      />
       <div className="flex-1 min-h-0">{renderStep()}</div>
     </div>
   );

@@ -44,6 +44,34 @@
     }
 }
 
+.step4-live--success {
+    border: 2px solid #10b981;
+    box-shadow:
+        0 0 0 4px rgba(16, 185, 129, 0.12),
+        0 4px 16px rgba(16, 185, 129, 0.15);
+    background: rgba(16, 185, 129, 0.04);
+}
+
+@media (prefers-color-scheme: dark) {
+    .step4-live--success {
+        border-color: #34d399;
+        background: rgba(16, 185, 129, 0.08);
+        box-shadow:
+            0 0 0 4px rgba(52, 211, 153, 0.1),
+            0 4px 16px rgba(0, 0, 0, 0.35);
+    }
+}
+
+.step4-live__title--success {
+    color: #047857;
+}
+
+@media (prefers-color-scheme: dark) {
+    .step4-live__title--success {
+        color: #6ee7b7;
+    }
+}
+
 .step4-live__hero {
     display: flex;
     flex-direction: column;
@@ -182,6 +210,10 @@
     animation: none;
 }
 
+.step4-live__bar-fill--success {
+    background: linear-gradient(90deg, #059669, #10b981);
+}
+
 .step4-live__stats {
     display: grid;
     grid-template-columns: repeat(4, 1fr);
@@ -235,7 +267,58 @@
 }
 
 .step4-live__stat--update .step4-live__stat-value {
-    color: #a5b4fc;
+    color: #2563eb;
+}
+
+.step4-live--success .step4-live__stat--highlight-ok {
+    background: rgba(16, 185, 129, 0.12);
+    border: 2px solid rgba(16, 185, 129, 0.45);
+}
+
+.step4-live--success .step4-live__stat--highlight-ok .step4-live__stat-value {
+    color: #047857;
+}
+
+.step4-live--success .step4-live__stat--highlight-ok .step4-live__stat-label {
+    color: #059669;
+}
+
+.step4-live--success .step4-live__stat--highlight-update {
+    background: rgba(37, 99, 235, 0.1);
+    border: 2px solid rgba(37, 99, 235, 0.4);
+}
+
+.step4-live--success .step4-live__stat--highlight-update .step4-live__stat-value {
+    color: #1d4ed8;
+}
+
+.step4-live--success .step4-live__stat--highlight-update .step4-live__stat-label {
+    color: #2563eb;
+}
+
+.step4-live--success .step4-live__stat--neutral {
+    background: rgba(100, 116, 139, 0.08);
+    border: 1px solid rgba(100, 116, 139, 0.25);
+}
+
+@media (prefers-color-scheme: dark) {
+    .step4-live--success .step4-live__stat--highlight-ok {
+        background: rgba(16, 185, 129, 0.15);
+        border-color: rgba(52, 211, 153, 0.45);
+    }
+
+    .step4-live--success .step4-live__stat--highlight-ok .step4-live__stat-value {
+        color: #6ee7b7;
+    }
+
+    .step4-live--success .step4-live__stat--highlight-update {
+        background: rgba(59, 130, 246, 0.15);
+        border-color: rgba(96, 165, 250, 0.45);
+    }
+
+    .step4-live--success .step4-live__stat--highlight-update .step4-live__stat-value {
+        color: #93c5fd;
+    }
 }
 
 .step4-live__stats--review {

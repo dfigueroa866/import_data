@@ -254,13 +254,14 @@ def _staging_table_exists(db: Session, table_name: str) -> bool:
 def _delete_batch_files(batch_id: str, row_metadata: Any, file_path_column: Optional[str]) -> None:
     meta = normalize_metadata(row_metadata)
     paths = collect_batch_file_paths(meta, file_path_column)
-    
-    # Buscar archivos en disco que comiencen con el batch_id prefix
+    load_storage_dir = meta.get("load_storage_dir")
+
+    # Buscar archivos legacy en disco plano que comiencen con el batch_id prefix
     try:
         from data_staging.config import settings
         upload_dir = Path(settings.UPLOAD_PATH)
         temp_dir = Path(settings.TEMP_PATH)
-        
+
         for directory in (upload_dir, temp_dir):
             if directory.exists() and directory.is_dir():
                 for file_in_dir in directory.iterdir():
@@ -271,6 +272,8 @@ def _delete_batch_files(batch_id: str, row_metadata: Any, file_path_column: Opti
 
     seen = set()
     for path_str in paths:
+        if path_str == load_storage_dir:
+            continue
         p = Path(path_str).resolve()
         p_str = str(p)
         if p_str in seen:
@@ -282,6 +285,19 @@ def _delete_batch_files(batch_id: str, row_metadata: Any, file_path_column: Opti
                 logger.info("Archivo eliminado: %s", p_str)
         except OSError as exc:
             logger.warning("No se pudo borrar archivo %s: %s", p_str, exc)
+
+    if load_storage_dir:
+        storage_path = Path(str(load_storage_dir))
+        if storage_path.is_dir():
+            try:
+                shutil.rmtree(storage_path)
+                logger.info("Carpeta de carga eliminada: %s", storage_path)
+            except OSError as exc:
+                logger.warning(
+                    "No se pudo borrar carpeta de carga %s: %s",
+                    storage_path,
+                    exc,
+                )
 
 
 def _purge_batches_bulk(db: Session, rows: list) -> int:
@@ -440,13 +456,19 @@ class FileUploadService:
         }
     
     async def save_file(
-        self, file: UploadFile, batch_id: str
+        self,
+        file: UploadFile,
+        batch_id: str,
+        *,
+        storage_dir: Optional[Path] = None,
     ) -> Tuple[Path, Optional[Dict[str, Any]]]:
         """Save upload to disk. CSV uploads are converted to .raw.parquet and the CSV is removed."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         file_ext = Path(file.filename).suffix
         safe_filename = f"{batch_id}_{timestamp}_{file.filename}"
-        file_path = self.upload_dir / safe_filename
+        base_dir = storage_dir if storage_dir is not None else self.upload_dir
+        base_dir.mkdir(parents=True, exist_ok=True)
+        file_path = base_dir / safe_filename
 
         try:
             with open(file_path, "wb") as buffer:
@@ -1260,34 +1282,15 @@ async def upload_file_temp(
         
         # 2. Generate batch ID
         batch_id = str(uuid.uuid4())
-        
-        # 3. Save file (CSV → .raw.parquet, source CSV removed)
-        file_path, csv_analysis = await upload_service.save_file(file, batch_id)
-        file_size = file_path.stat().st_size
-        
-        # 4. Analyze file structure and parse headers
-        file_analysis = csv_analysis or upload_service.analyze_file_structure(file_path)
-        
-        if "error" in file_analysis:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Error analyzing file: {file_analysis['error']}"
-            )
-        
-        file_headers = file_analysis.get("columns", [])
-        
-        # 5. Determine source_name based on target_table
-        if target_table:
-            source_name = target_table  #  Worker will add 'stage_' prefix
-        else:
-            source_name = Path(file.filename).stem
-        
+
         normalized_load_type = (load_type or "history").lower()
         if normalized_load_type not in ("history", "catalog"):
             normalized_load_type = "history"
 
         production_table = None
         catalog_name = None
+        source_name = target_table if target_table else Path(file.filename).stem
+
         if normalized_load_type == "history":
             from data_staging.services.history.history_config import (
                 HISTORY_SOURCE_NAME,
@@ -1307,7 +1310,7 @@ async def upload_file_temp(
             target_schema = HISTORY_TARGET_SCHEMA
             target_table = HISTORY_TARGET_TABLE
             source_name = HISTORY_SOURCE_NAME
-        if normalized_load_type == "catalog":
+        elif normalized_load_type == "catalog":
             if not target_table:
                 raise HTTPException(
                     status_code=400,
@@ -1325,6 +1328,46 @@ async def upload_file_temp(
             target_schema = target_schema or catalog_entry.get("target_schema")
             production_table = catalog_entry.get("target_table") or target_table
 
+        from data_staging.utils.load_storage_paths import (
+            ensure_load_storage_dir,
+            fetch_organization_slug,
+            load_storage_metadata_fields,
+        )
+
+        org_id = current_user.organization_id
+        try:
+            org_slug = fetch_organization_slug(db, org_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        load_timestamp = datetime.now()
+        try:
+            storage_dir = ensure_load_storage_dir(
+                org_slug,
+                normalized_load_type,  # type: ignore[arg-type]
+                catalog_name=catalog_name,
+                load_timestamp=load_timestamp,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        # 3. Save file (CSV → .raw.parquet, source CSV removed)
+        file_path, csv_analysis = await upload_service.save_file(
+            file, batch_id, storage_dir=storage_dir
+        )
+        file_size = file_path.stat().st_size
+        
+        # 4. Analyze file structure and parse headers
+        file_analysis = csv_analysis or upload_service.analyze_file_structure(file_path)
+        
+        if "error" in file_analysis:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Error analyzing file: {file_analysis['error']}"
+            )
+        
+        file_headers = file_analysis.get("columns", [])
+
         # 6. Create batch record with PENDING_MAPPING status
         file_path_str = str(file_path)
         metadata = {
@@ -1336,8 +1379,9 @@ async def upload_file_temp(
             "target_table": target_table,
             "load_type": normalized_load_type,
             "process_type": process_type if normalized_load_type == "history" else None,
-            "organization_id": current_user.organization_id,
-            "wizard_step": 1
+            "organization_id": org_id,
+            "wizard_step": 1,
+            **load_storage_metadata_fields(storage_dir, org_slug, load_timestamp),
         }
         if catalog_name:
             metadata["catalog_name"] = catalog_name
@@ -1347,7 +1391,6 @@ async def upload_file_temp(
             metadata["unique_keys"] = get_history_table_meta().get("unique_keys", [])
             metadata["source_extension"] = source_from_filename(file.filename or "")
 
-        org_id = current_user.organization_id
         db.execute(text("""
             INSERT INTO staging_meta.batch_control 
             (batch_id, source_name, source_type, file_name, file_path, file_size,
@@ -2335,6 +2378,14 @@ async def cancel_batch(
                 SET status = 'CANCELLED',
                     error_message = COALESCE(error_message, 'Cancelado por el usuario'),
                     completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP),
+                    metadata = metadata || jsonb_build_object(
+                        'preview_in_progress', false,
+                        'processing_progress', jsonb_build_object(
+                            'phase', 'cancelled',
+                            'current_operation', 'Cancelado por el usuario',
+                            'progress_percentage', 0
+                        )
+                    ),
                     updated_at = CURRENT_TIMESTAMP
                 WHERE batch_id = :batch_id
             """),
@@ -2394,6 +2445,7 @@ async def download_rejected_records(
         resolved_rejected = find_rejected_records_file(
             batch_id,
             metadata.get("rejected_temp_file"),
+            metadata,
         )
 
         if not resolved_rejected:
@@ -2468,7 +2520,9 @@ async def download_valid_records(
             iter_valid_download_lines,
         )
 
-        resolved_valid = find_valid_records_file(batch_id, metadata.get("valid_temp_file"))
+        resolved_valid = find_valid_records_file(
+            batch_id, metadata.get("valid_temp_file"), metadata
+        )
 
         if not resolved_valid or not resolved_valid.exists():
             async def empty_csv():

@@ -14,6 +14,8 @@ import pyarrow.parquet as pq
 
 from data_staging.services.catalog.catalog_transforms import coalesce_empty_to_none, is_empty_value
 from data_staging.config import settings
+from data_staging.utils.batch_control import normalize_metadata
+from data_staging.utils.load_storage_paths import batch_artifact_path, resolve_batch_work_dir
 
 VALID_SUFFIX = "_valid_records.parquet"
 REJECTED_SUFFIX = "_rejected_records.tsv"
@@ -34,12 +36,12 @@ def get_temp_dir() -> Path:
     return base.resolve()
 
 
-def valid_records_path(batch_id: str) -> Path:
-    return get_temp_dir() / f"{batch_id}{VALID_SUFFIX}"
+def valid_records_path(batch_id: str, metadata: Any = None) -> Path:
+    return batch_artifact_path(batch_id, VALID_SUFFIX, metadata)
 
 
-def rejected_records_path(batch_id: str) -> Path:
-    return get_temp_dir() / f"{batch_id}{REJECTED_SUFFIX}"
+def rejected_records_path(batch_id: str, metadata: Any = None) -> Path:
+    return batch_artifact_path(batch_id, REJECTED_SUFFIX, metadata)
 
 
 def resolve_staging_path(stored: Optional[str]) -> Optional[Path]:
@@ -66,10 +68,14 @@ def resolve_staging_path(stored: Optional[str]) -> Optional[Path]:
     return None
 
 
-def find_rejected_records_file(batch_id: str, metadata_path: Optional[str] = None) -> Optional[Path]:
+def find_rejected_records_file(
+    batch_id: str,
+    metadata_path: Optional[str] = None,
+    metadata: Any = None,
+) -> Optional[Path]:
     candidates = [
         resolve_staging_path(metadata_path),
-        rejected_records_path(batch_id),
+        rejected_records_path(batch_id, metadata),
     ]
     for candidate in candidates:
         if candidate and candidate.is_file():
@@ -77,11 +83,16 @@ def find_rejected_records_file(batch_id: str, metadata_path: Optional[str] = Non
     return None
 
 
-def find_valid_records_file(batch_id: str, metadata_path: Optional[str] = None) -> Optional[Path]:
+def find_valid_records_file(
+    batch_id: str,
+    metadata_path: Optional[str] = None,
+    metadata: Any = None,
+) -> Optional[Path]:
+    work_dir = resolve_batch_work_dir(metadata) if metadata else get_temp_dir()
     candidates = [
         resolve_staging_path(metadata_path),
-        valid_records_path(batch_id),
-        get_temp_dir() / f"{batch_id}{LEGACY_VALID_CSV_SUFFIX}",
+        valid_records_path(batch_id, metadata),
+        work_dir / f"{batch_id}{LEGACY_VALID_CSV_SUFFIX}",
     ]
     for candidate in candidates:
         if candidate and candidate.is_file():

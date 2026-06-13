@@ -10,6 +10,8 @@ from datetime import datetime
 from contextlib import contextmanager
 from typing import Optional, Callable, Dict, Any, List
 
+from data_staging.utils.batch_cancel import BatchCancelledError
+
 logger = logging.getLogger(__name__)
 
 
@@ -70,7 +72,7 @@ def sync_batch_on_job_failure(
                     completed_at = CURRENT_TIMESTAMP,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE batch_id = %s
-                  AND status NOT IN ('PROMOTED', 'PARTIALLY_PROMOTED')
+                  AND status NOT IN ('PROMOTED', 'PARTIALLY_PROMOTED', 'CANCELLED')
                 """,
                 (full_error, batch_id),
             )
@@ -247,6 +249,10 @@ class PostgresQueueWorker:
             # Marcar como completado
             self._complete_job(job_id)
             logger.info(f"Worker {self.worker_id}: Job {job_id} completed successfully")
+
+        except BatchCancelledError as e:
+            logger.info(f"Worker {self.worker_id}: Job {job_id} cancelled: {e}")
+            self._ack_cancelled_job(job_id)
             
         except Exception as e:
             logger.error(f"Worker {self.worker_id}: Job {job_id} failed: {e}")
@@ -269,6 +275,26 @@ class PostgresQueueWorker:
                 SET status = 'COMPLETED',
                     completed_at = CURRENT_TIMESTAMP
                 WHERE job_id = %s
+                  AND status = 'PROCESSING'
+            """, (job_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _ack_cancelled_job(self, job_id: str):
+        """Confirma cancelación sin marcar el job como completado."""
+        conn = psycopg2.connect(self.database_url)
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE staging_meta.job_queue
+                SET status = 'CANCELLED',
+                    completed_at = CURRENT_TIMESTAMP,
+                    error_message = COALESCE(error_message, 'Cancelado por el usuario'),
+                    started_at = NULL,
+                    worker_id = NULL
+                WHERE job_id = %s
+                  AND status = 'PROCESSING'
             """, (job_id,))
             conn.commit()
         finally:

@@ -245,8 +245,13 @@
 }
 
 .history-kpi__flow--prod {
-    align-items: stretch;
-    gap: 0.5rem;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.history-kpi__flow--prod .step3-prod-summary--inline {
+    flex: 1 1 0;
+    min-width: 0;
 }
 
 .history-kpi--filas {
@@ -287,6 +292,31 @@
     font-size: 0.875rem;
     color: var(--text-tertiary);
     opacity: 0.75;
+}
+
+.history-kpi__arrow--prominent {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.5rem;
+    height: 2.5rem;
+    font-size: 1.35rem;
+    font-weight: 800;
+    line-height: 1;
+    color: #475569;
+    opacity: 1;
+    background: #f8fafc;
+    border: 2px solid #94a3b8;
+    border-radius: 999px;
+    box-shadow: 0 2px 6px rgba(15, 23, 42, 0.08);
+}
+
+@media (prefers-color-scheme: dark) {
+    .history-kpi__arrow--prominent {
+        color: #e2e8f0;
+        background: #334155;
+        border-color: #64748b;
+    }
 }
 
 .history-kpi__delta {
@@ -529,6 +559,25 @@
     display: flex;
     flex-direction: column;
     gap: 0.65rem;
+    border: 2px solid #ef4444;
+    background: rgba(239, 68, 68, 0.05);
+    box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.1);
+}
+
+.report-section--validation .report-section__title {
+    color: #b91c1c;
+}
+
+@media (prefers-color-scheme: dark) {
+    .report-section--validation {
+        border-color: #f87171;
+        background: rgba(239, 68, 68, 0.1);
+        box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.12);
+    }
+
+    .report-section--validation .report-section__title {
+        color: #fca5a5;
+    }
 }
 
 .step3-prod-summary {
@@ -544,6 +593,49 @@
     display: flex;
     flex-direction: column;
     justify-content: center;
+}
+
+.step3-prod-summary--source {
+    background: rgba(100, 116, 139, 0.06);
+    border: 1px solid rgba(100, 116, 139, 0.25);
+}
+
+.step3-prod-summary--source .step3-prod-summary__value strong {
+    color: var(--text-primary, #0f172a);
+}
+
+.step3-prod-summary--success {
+    background: rgba(16, 185, 129, 0.08);
+    border: 2px solid rgba(16, 185, 129, 0.45);
+    box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.1);
+}
+
+.step3-prod-summary--success .step3-prod-summary__label {
+    color: #059669;
+}
+
+.step3-prod-summary--success .step3-prod-summary__value strong {
+    color: #047857;
+}
+
+@media (prefers-color-scheme: dark) {
+    .step3-prod-summary--source {
+        background: rgba(148, 163, 184, 0.08);
+        border-color: rgba(148, 163, 184, 0.3);
+    }
+
+    .step3-prod-summary--success {
+        background: rgba(16, 185, 129, 0.12);
+        border-color: rgba(52, 211, 153, 0.45);
+    }
+
+    .step3-prod-summary--success .step3-prod-summary__label {
+        color: #6ee7b7;
+    }
+
+    .step3-prod-summary--success .step3-prod-summary__value strong {
+        color: #6ee7b7;
+    }
 }
 
 .step3-prod-summary__hint {
