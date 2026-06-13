@@ -1,4 +1,8 @@
 import api from './api';
+import {
+    buildColumnRequiredMap,
+    deriveCatalogMappingFields,
+} from '../utils/catalogColumnRules';
 
 export const listCatalogDefinitions = async () => {
     const { data } = await api.get('/api/v1/catalogs/admin');
@@ -45,11 +49,10 @@ export const emptyCatalogForm = () => ({
     optional_columns: [],
     required_mapping_columns: [],
     unique_keys: [],
-    ignored_file_headers: ['created_at', 'updated_at', 'imported_at', 'organization_id'],
-    non_mappable_targets: ['organization_id', 'created_at', 'updated_at', 'imported_at'],
+    ignored_file_headers: [],
+    non_mappable_targets: [],
     column_aliases: {},
     enums: {},
-    defaults: {},
     validation_hints: [],
 });
 
@@ -68,6 +71,49 @@ export const catalogToForm = (catalog) => ({
     non_mappable_targets: [...(catalog.non_mappable_targets || [])],
     column_aliases: { ...(catalog.column_aliases || {}) },
     enums: { ...(catalog.enums || {}) },
-    defaults: { ...(catalog.defaults || {}) },
     validation_hints: [...(catalog.validation_hints || [])],
 });
+
+export { buildColumnRequiredMap, deriveCatalogMappingFields };
+
+export const buildCatalogPayload = (
+    form,
+    schemaColumns,
+    columnRequiredMap,
+    aliasesJson,
+    enumsJson,
+    { isNew = false } = {}
+) => {
+    let column_aliases = {};
+    let enums = {};
+    try {
+        column_aliases = JSON.parse(aliasesJson || '{}');
+        enums = JSON.parse(enumsJson || '{}');
+    } catch {
+        throw new Error('JSON inválido en aliases o enums');
+    }
+
+    const targetTable = (form.target_table || '').trim();
+    const catalogName = isNew ? targetTable : (form.name || targetTable);
+
+    const derived =
+        schemaColumns.length > 0
+            ? deriveCatalogMappingFields(schemaColumns, columnRequiredMap)
+            : {
+                  required_mapping_columns: form.required_mapping_columns,
+                  required_columns: form.required_columns,
+                  optional_columns: form.optional_columns,
+                  non_mappable_targets: form.non_mappable_targets,
+                  ignored_file_headers: form.ignored_file_headers,
+              };
+
+    return {
+        ...form,
+        ...derived,
+        name: catalogName,
+        target_table: targetTable,
+        config_file: form.config_file || `${targetTable}_config.json`,
+        column_aliases,
+        enums,
+    };
+};

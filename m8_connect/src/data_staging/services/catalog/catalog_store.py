@@ -6,7 +6,6 @@ Stored in data/catalog_definitions.json; seeded with built-in catalogs on first 
 from __future__ import annotations
 
 import json
-import re
 import threading
 from copy import deepcopy
 from pathlib import Path
@@ -47,7 +46,6 @@ _BUILTIN_CATALOGS: List[Dict[str, Any]] = [
             "attributes": ["attributes", "attrs", "json_attributes"],
         },
         "enums": {"status": ["active", "discontinued", "new_launch"]},
-        "defaults": {"status": "active"},
         "validation_hints": [
             "Clave única: (organization_id, code)",
             "code es el SKU del producto (no uses la columna de archivo sku_id; es el UUID de la BD)",
@@ -93,23 +91,20 @@ _BUILTIN_CATALOGS: List[Dict[str, Any]] = [
             "location_type": ["location_type", "loc_type", "loc_tyoe", "type"],
         },
         "enums": {},
-        "defaults": {"country": "Desconocido", "timezone": "UTC", "is_active": True},
         "validation_hints": [
             "Clave única: (organization_id, location_code)",
             "location_code es el código de negocio (no uses location_id del archivo; es el UUID de la BD)",
             "location_id, organization_id, created_at y updated_at los genera o asigna el sistema",
-            "Valores por defecto: country=Desconocido, timezone=UTC, is_active=true",
         ],
     },
 ]
 
 
-def _normalize_name(name: str) -> str:
-    slug = re.sub(r"[^a-z0-9_]+", "_", (name or "").lower().strip())
-    slug = re.sub(r"_+", "_", slug).strip("_")
-    if not slug:
-        raise ValueError("El nombre del catálogo es obligatorio (solo letras, números y _)")
-    return slug
+def _normalize_table_name(table: str) -> str:
+    name = (table or "").strip().lower()
+    if not name:
+        raise ValueError("La tabla destino es obligatoria")
+    return name
 
 
 def _ensure_store_file() -> None:
@@ -185,7 +180,7 @@ def create_catalog(payload: Dict[str, Any]) -> Dict[str, Any]:
         data = _load_raw()
         catalogs = data.setdefault("catalogs", [])
         if any(c.get("name") == entry["name"] for c in catalogs):
-            raise ValueError(f"Ya existe un catálogo con nombre '{entry['name']}'")
+            raise ValueError(f"Ya existe un catálogo para la tabla '{entry['name']}'")
         catalogs.append(entry)
         _save_raw(data)
     return _public_view(entry)
@@ -200,12 +195,7 @@ def update_catalog(name: str, payload: Dict[str, Any]) -> Dict[str, Any]:
             if existing.get("name", "").lower() != key:
                 continue
             merged = {**existing, **payload}
-            if "name" in payload and payload["name"].lower() != key:
-                new_name = _normalize_name(payload["name"])
-                if any(c.get("name") == new_name for i, c in enumerate(catalogs) if i != idx):
-                    raise ValueError(f"Ya existe un catálogo con nombre '{new_name}'")
-                merged["name"] = new_name
-            entry = _normalize_payload(merged, is_update=True)
+            entry = _normalize_payload(merged, catalog_name=existing["name"])
             catalogs[idx] = entry
             _save_raw(data)
             return _public_view(entry)
@@ -229,10 +219,10 @@ def delete_catalog(name: str, *, hard: bool = False) -> None:
     raise ValueError(f"Catálogo no encontrado: {name}")
 
 
-def _normalize_payload(payload: Dict[str, Any], *, is_update: bool = False) -> Dict[str, Any]:
-    name = _normalize_name(payload.get("name", ""))
-    target_table = (payload.get("target_table") or name).strip()
-    config_file = payload.get("config_file") or f"{name}_config.json"
+def _normalize_payload(payload: Dict[str, Any], *, catalog_name: Optional[str] = None) -> Dict[str, Any]:
+    target_table = _normalize_table_name(payload.get("target_table") or payload.get("name") or "")
+    name = catalog_name or target_table
+    config_file = payload.get("config_file") or f"{target_table}_config.json"
 
     return {
         "name": name,

@@ -6,7 +6,7 @@ import Step2Mapping from './Step2Mapping';
 import Step3Preview from './Step3Preview';
 import Step4Process from './Step4Process';
 
-const STEPS = ['Archivo y tabla', 'Mapear columnas', 'Vista previa', 'Procesar'];
+const STEPS = ['Archivo y tabla', 'Mapear columnas', 'Vista previa', 'Producción'];
 
 const CatalogUploadWizard = () => {
   const [currentStep, setCurrentStep] = useState(1);
@@ -95,7 +95,6 @@ const CatalogUploadWizard = () => {
       <PageHeader
         icon={BookOpen}
         title="Carga de catálogos"
-        subtitle="Productos (SKUs) y ubicaciones en 4 pasos"
         backTo="/upload"
         backLabel="Volver a tipo de carga"
       />

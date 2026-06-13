@@ -35,13 +35,6 @@
     {
       "name": "clean_whitespace",
       "columns": ["code", "name", "category", "family", "brand", "status"]
-    },
-    {
-      "name": "handle_nulls",
-      "strategy": "fill",
-      "fill_values": {
-        "status": "active"
-      }
     }
   ],
   "target_table": "stage_skus",

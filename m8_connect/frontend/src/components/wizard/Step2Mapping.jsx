@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { getTableColumns } from '../../services/systemService';
 import { saveColumnMapping } from '../../services/wizardService';
 import { useAuth } from '../../context/AuthContext';
-import { Button, LoadingSpinner, Alert, Input, Select, inputMappedClasses } from '../ui';
+import { Button, LoadingSpinner, Alert, Select, inputMappedClasses } from '../ui';
 import { cn } from '../../lib/utils';
 import {
     isExcludedMappingTarget,
@@ -13,10 +13,13 @@ import {
     historyHasSkuMapping,
     normalizeHeader,
 } from '../../utils/catalogMapping';
-import { HISTORY_LOGICAL_COLUMN_DEFS } from '../../constants/historyConfig';
+import { HISTORY_LOGICAL_COLUMN_DEFS, HISTORY_SALES_CHANNEL_VALUE, granularityFromProcessType, sourceFromFileName } from '../../constants/historyConfig';
 import './Step2Mapping.css';
 
 const ORG_MAPPING_KEY = '__fixed_organization_id__';
+const GRANULARITY_MAPPING_KEY = '__fixed_granularity__';
+const SOURCE_MAPPING_KEY = '__fixed_source__';
+const SALES_CHANNEL_MAPPING_KEY = '__fixed_sales_channel__';
 
 const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
     const { user } = useAuth();
@@ -27,28 +30,8 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
     const [productionColumns, setProductionColumns] = useState([]);
     const [columnMappings, setColumnMappings] = useState({});
     const [columnToggles, setColumnToggles] = useState({});
-    const [customColumns, setCustomColumns] = useState(wizardData.customColumns || []);
     const [loading, setLoading] = useState(false);
     const [saving, setSaving] = useState(false);
-
-    // Sync custom columns to wizardData on unmount/next? No, better keep local state sync or just use wizardData directly if we passed updateWizardData.
-    // Let's rely on local state and update on submit.
-
-    const addNewColumn = () => {
-        setCustomColumns([...customColumns, { name: '', target: '', defaultValue: '' }]);
-    };
-
-    const removeCustomColumn = (index) => {
-        const newCols = [...customColumns];
-        newCols.splice(index, 1);
-        setCustomColumns(newCols);
-    };
-
-    const handleCustomColumnChange = (index, field, value) => {
-        const newCols = [...customColumns];
-        newCols[index] = { ...newCols[index], [field]: value };
-        setCustomColumns(newCols);
-    };
     const [error, setError] = useState('');
 
     const historyMeta =
@@ -60,12 +43,12 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
             wizardData.catalogTableMeta?.name ||
             historyMeta?.name,
         catalogMeta: wizardData.catalogTableMeta || historyMeta,
+        loadMode: wizardData.loadMode || 'history',
     };
 
     const ignoreFileHeader = (fileCol) =>
         isIgnoredFileHeader(fileCol, mappingCtx);
 
-    // Load production table columns on mount
     useEffect(() => {
         if (wizardData.selectedSchema && wizardData.selectedTable) {
             loadProductionColumns();
@@ -79,7 +62,6 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
             let cols = data.columns || [];
             if (wizardData.loadMode === 'history') {
                 const existing = new Set(cols.map((c) => c.name));
-                // sku_code solo si la tabla no tiene columna «sku»
                 if (!existing.has('sku')) {
                     HISTORY_LOGICAL_COLUMN_DEFS.forEach((logical) => {
                         if (!existing.has(logical.name)) {
@@ -89,8 +71,6 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                 }
             }
             setProductionColumns(cols);
-
-            // Auto-map columns
             autoMapColumns(wizardData.fileHeaders, cols);
         } catch (err) {
             setError('Failed to load production table columns');
@@ -112,7 +92,6 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                 toggles[fileCol] = false;
                 mappings[fileCol] = {
                     target: '',
-                    default_value: '',
                     auto_mapped: false,
                 };
                 return;
@@ -125,7 +104,6 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
             const fileNorm = normalizeHeader(fileCol);
             const fileLower = String(fileCol).toLowerCase();
 
-            // 1) Coincidencia exacta con columna destino (prioridad sobre alias)
             const exact = prodColumns.find(
                 (prodCol) => prodCol.name.toLowerCase() === fileLower
             );
@@ -137,7 +115,6 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                 matchName = exact.name;
             }
 
-            // 2) Alias solo hacia columnas que existen en el destino (evita sku → sku_code cuando hay columna sku)
             if (!matchName) {
                 const aliases = mappingCtx.catalogMeta?.column_aliases;
                 if (aliases && Object.keys(aliases).length > 0) {
@@ -164,13 +141,11 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
             if (matchName) {
                 mappings[fileCol] = {
                     target: matchName,
-                    default_value: '',
                     auto_mapped: true,
                 };
             } else {
                 mappings[fileCol] = {
                     target: '',
-                    default_value: '',
                     auto_mapped: false,
                 };
             }
@@ -241,6 +216,53 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
         return { mappings: nextMappings, toggles: nextToggles };
     };
 
+    const appendFixedHistoryAutoMappings = (mappings, toggles) => {
+        if (wizardData.loadMode !== 'history') {
+            return { mappings, toggles };
+        }
+
+        const nextMappings = { ...mappings };
+        const nextToggles = { ...toggles };
+        const autoTargets = ['granularity', 'source', 'sales_channel'];
+
+        Object.keys(nextMappings).forEach((fileCol) => {
+            if (autoTargets.includes(nextMappings[fileCol]?.target)) {
+                delete nextMappings[fileCol];
+                nextToggles[fileCol] = false;
+            }
+        });
+
+        const granularity = granularityFromProcessType(wizardData.processType);
+        if (!granularity) {
+            return { mappings: nextMappings, toggles: nextToggles, error: 'Falta el tipo de proceso (Weekly/Monthly) del paso 1.' };
+        }
+
+        const sourceExt = sourceFromFileName(wizardData.fileName);
+        nextMappings[GRANULARITY_MAPPING_KEY] = {
+            target: 'granularity',
+            default_value: granularity,
+            auto_mapped: false,
+            is_fixed: true,
+        };
+        nextToggles[GRANULARITY_MAPPING_KEY] = true;
+        nextMappings[SOURCE_MAPPING_KEY] = {
+            target: 'source',
+            default_value: sourceExt,
+            auto_mapped: false,
+            is_fixed: true,
+        };
+        nextToggles[SOURCE_MAPPING_KEY] = true;
+        nextMappings[SALES_CHANNEL_MAPPING_KEY] = {
+            target: 'sales_channel',
+            default_value: HISTORY_SALES_CHANNEL_VALUE,
+            auto_mapped: false,
+            is_fixed: true,
+        };
+        nextToggles[SALES_CHANNEL_MAPPING_KEY] = true;
+
+        return { mappings: nextMappings, toggles: nextToggles };
+    };
+
     const handleSubmit = async () => {
         try {
             setSaving(true);
@@ -256,7 +278,8 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                 wizardData.loadMode === 'catalog'
                     ? getCatalogRequiredTargetColumns(
                           mappingCtx.targetTable,
-                          mappingCtx.catalogMeta
+                          mappingCtx.catalogMeta,
+                          mappingCtx.loadMode
                       )
                     : [];
 
@@ -273,7 +296,6 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                     requiredNames.includes(col.name)
             );
 
-            // Ensure required targets appear even if schema metadata is incomplete
             requiredNames.forEach((colName) => {
                 if (!requiredCols.some((c) => c.name === colName)) {
                     const fromProd = productionColumns.find((c) => c.name === colName);
@@ -285,32 +307,11 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                 }
             });
 
-            // Validar que todas las columnas custom tengan nombre, destino y un valor fijo
-            const invalidCustomCols = customColumns.filter(
-                (c) =>
-                    !c.name?.trim() ||
-                    !c.target ||
-                    !c.defaultValue?.trim()
-            );
-
-            if (invalidCustomCols.length > 0) {
-                setError(
-                    'Todas las columnas personalizadas (Custom) deben tener un nombre de origen, una columna de destino y un valor fijo asignado.'
-                );
-                setSaving(false);
-                return;
-            }
-
             const missingCols = requiredCols.filter((reqCol) => {
                 const mappedFromFile = getMappedFileHeaders().some(
                     (fileCol) => columnMappings[fileCol]?.target === reqCol.name
                 );
-                const mappedFromCustom = customColumns.some(
-                    (c) =>
-                        c.target === reqCol.name &&
-                        !isExcludedMappingTarget(c.target, productionColumns, mappingCtx)
-                );
-                return !mappedFromFile && !mappedFromCustom;
+                return !mappedFromFile;
             });
 
             if (missingCols.length > 0) {
@@ -322,13 +323,10 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
             }
 
             if (wizardData.loadMode === 'history') {
-                const mappedTargets = [
-                    ...getMappedFileHeaders()
-                        .filter((fc) => columnToggles[fc] !== false)
-                        .map((fc) => columnMappings[fc]?.target)
-                        .filter(Boolean),
-                    ...customColumns.map((c) => c.target).filter(Boolean),
-                ];
+                const mappedTargets = getMappedFileHeaders()
+                    .filter((fc) => columnToggles[fc] !== false)
+                    .map((fc) => columnMappings[fc]?.target)
+                    .filter(Boolean);
                 if (!historyHasSkuMapping(mappedTargets, mappingCtx.catalogMeta)) {
                     setError(
                         'Debes mapear el producto a sku o sku_code, y location_code'
@@ -341,7 +339,13 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
             const activeWithoutTarget = getVisibleFileHeaders().filter((fileCol) => {
                 if (columnToggles[fileCol] === false) return false;
                 const target = columnMappings[fileCol]?.target;
-                return !target || target === 'organization_id';
+                return (
+                    !target
+                    || target === 'organization_id'
+                    || target === 'granularity'
+                    || target === 'source'
+                    || target === 'sales_channel'
+                );
             });
             if (activeWithoutTarget.length > 0) {
                 setError(
@@ -373,22 +377,14 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
             Object.assign(finalMappings, withOrg.mappings);
             Object.assign(finalToggles, withOrg.toggles);
 
-            customColumns.forEach((c, idx) => {
-                if (
-                    c.target &&
-                    c.target !== 'organization_id' &&
-                    !isExcludedMappingTarget(c.target, productionColumns, mappingCtx)
-                ) {
-                    const customKey = `__custom_${idx}__${c.name || 'fixed'}`;
-                    finalMappings[customKey] = {
-                        target: c.target,
-                        default_value: c.defaultValue || '',
-                        auto_mapped: false,
-                        is_custom: true
-                    };
-                    finalToggles[customKey] = true;
-                }
-            });
+            const withHistoryAuto = appendFixedHistoryAutoMappings(finalMappings, finalToggles);
+            if (withHistoryAuto.error) {
+                setError(withHistoryAuto.error);
+                setSaving(false);
+                return;
+            }
+            Object.assign(finalMappings, withHistoryAuto.mappings);
+            Object.assign(finalToggles, withHistoryAuto.toggles);
 
             const catalogSlug =
                 wizardData.loadMode === 'catalog'
@@ -410,7 +406,6 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                     : {}),
             };
 
-            // Save to backend
             await saveColumnMapping(
                 wizardData.batchId,
                 mappingData,
@@ -418,17 +413,14 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                 wizardData.loadMode || 'history'
             );
 
-            // Update wizard data
             updateWizardData({
                 columnMappings: finalMappings,
                 columnToggles: finalToggles,
                 organizationId,
                 organizationName,
                 productionColumns,
-                customColumns // Keep for UI persistence
             });
 
-            // Move to next step
             nextStep();
 
         } catch (err) {
@@ -441,13 +433,7 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
 
     const getMappedCount = () => {
         const fileMapped = getMappedFileHeaders().length;
-        const customMapped = customColumns.filter(
-            (c) =>
-                c.target &&
-                c.target !== 'organization_id' &&
-                !isExcludedMappingTarget(c.target, productionColumns, mappingCtx)
-        ).length;
-        return fileMapped + customMapped + (organizationId && tableHasOrganizationId ? 1 : 0);
+        return fileMapped + (organizationId && tableHasOrganizationId ? 1 : 0);
     };
 
     const getSelectableTargetColumns = () => {
@@ -470,25 +456,19 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
     return (
         <div className="step2-mapping">
             <div className="mapping-container">
-                {/* File Columns (Left) */}
-                {/* Mapping (Center - Expanded) */}
                 <div className="mapping-section full-width">
                     <h3>Column Mapping</h3>
 
                     <div className="mappings-list">
-                        {/* Headers */}
                         <div className="mapping-header-row">
                             <div className="col-source">File Column</div>
                             <div className="col-arrow"></div>
                             <div className="col-target">Target Column</div>
-                            <div className="col-default">Default Value</div>
-                            <div className="col-action"></div>
                         </div>
 
                         {getVisibleFileHeaders().length === 0 && (
                             <div className="no-matches-hint">
                                 No hay columnas del archivo para mapear.
-                                Usa &quot;Agregar columna&quot; para valores fijos.
                             </div>
                         )}
 
@@ -530,70 +510,9 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                                             ))}
                                         </Select>
                                     </div>
-                                    <div className="mapping-default">
-                                        <Input
-                                            type="text"
-                                            placeholder="Default value"
-                                            value={mapping.default_value || ''}
-                                            onChange={(e) => handleMappingChange(fileCol, 'default_value', e.target.value)}
-                                            disabled={!isActive}
-                                        />
-                                    </div>
-                                    <div className="mapping-action">
-                                        {/* Action column for custom rows only typically, but we need structure */}
-                                    </div>
                                 </div>
                             );
                         })}
-
-                        {/* Custom Added Columns */}
-                        {customColumns.map((customCol, idx) => (
-                            <div key={`custom-${idx}`} className="mapping-row active-row custom-row">
-                                <div className="mapping-source">
-                                    <span className="source-label">Custom:</span>
-                                    <Input
-                                        type="text"
-                                        value={customCol.name}
-                                        onChange={(e) => handleCustomColumnChange(idx, 'name', e.target.value)}
-                                        placeholder="Col Name"
-                                        className="w-2/3"
-                                    />
-                                </div>
-                                <div className="mapping-arrow">→</div>
-                                <div className="mapping-target">
-                                    <Select
-                                        value={customCol.target || ''}
-                                        onChange={(e) => handleCustomColumnChange(idx, 'target', e.target.value)}
-                                        className={inputMappedClasses}
-                                    >
-                                        <option value="">-- Select Target --</option>
-                                        {selectableTargetColumns.map(col => (
-                                            <option key={col.name} value={col.name}>
-                                                {col.name} ({col.type})
-                                            </option>
-                                        ))}
-                                    </Select>
-                                </div>
-                                <div className="mapping-default">
-                                    <Input
-                                        type="text"
-                                        placeholder="Fixed Value"
-                                        value={customCol.defaultValue || ''}
-                                        onChange={(e) => handleCustomColumnChange(idx, 'defaultValue', e.target.value)}
-                                    />
-                                </div>
-                                <div className="mapping-action">
-                                    <button className="btn-icon danger" onClick={() => removeCustomColumn(idx)}>×</button>
-                                </div>
-                            </div>
-                        ))}
-
-                        {/* Add Custom Column Button - Bottom of List */}
-                        <div className="add-column-row">
-                            <Button variant="secondary" size="small" onClick={addNewColumn} className="add-col-btn full-width-btn">
-                                + Add Custom Column
-                            </Button>
-                        </div>
                     </div>
                 </div>
             </div>

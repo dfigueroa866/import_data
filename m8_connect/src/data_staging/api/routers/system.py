@@ -195,33 +195,15 @@ async def get_table_columns(
 ):
     """Get columns for a specific table in any schema."""
     try:
-        from sqlalchemy import text
+        from data_staging.utils.pg_schema import fetch_table_columns
 
-        query = text("""
-            SELECT column_name, data_type, is_nullable, column_default
-            FROM information_schema.columns
-            WHERE table_schema = :schema
-            AND table_name = :table
-            ORDER BY ordinal_position
-        """)
+        columns = fetch_table_columns(db, schema, table)
 
-        result = db.execute(query, {"schema": schema, "table": table}).fetchall()
-
-        if not result:
+        if not columns:
             return {
                 "columns": [],
                 "error": f"Table {schema}.{table} not found or has no columns",
             }
-
-        columns = [
-            {
-                "name": row.column_name,
-                "type": row.data_type,
-                "nullable": row.is_nullable == "YES",
-                "default": row.column_default,
-            }
-            for row in result
-        ]
 
         return {"columns": columns, "schema": schema, "table": table}
 

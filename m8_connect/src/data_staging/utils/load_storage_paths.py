@@ -1,13 +1,10 @@
-"""Hierarchical load storage paths per organization (slug) and load type."""
+"""Hierarchical load storage paths per organization (id) and load type."""
 
 from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Literal, Optional
-
-from sqlalchemy.orm import Session
-from sqlalchemy import text
 
 from data_staging.config import settings
 from data_staging.utils.batch_control import normalize_metadata
@@ -19,24 +16,6 @@ CATALOGOS_DIR = "catalogos"
 LOAD_TIMESTAMP_FMT = "%Y-%m-%d_%H%M%S"
 
 
-def fetch_organization_slug(db: Session, organization_id: str) -> str:
-    """Return organization slug from public.organizations."""
-    if not organization_id:
-        raise ValueError("organization_id is required")
-    row = db.execute(
-        text("""
-            SELECT slug
-            FROM public.organizations
-            WHERE id = :organization_id
-            LIMIT 1
-        """),
-        {"organization_id": organization_id},
-    ).fetchone()
-    if not row or not row.slug:
-        raise ValueError(f"Organization slug not found for id={organization_id}")
-    return str(row.slug).strip()
-
-
 def format_load_timestamp(ts: Optional[datetime] = None) -> str:
     """Folder name for a load: YYYY-MM-DD_HHMMSS."""
     when = ts or datetime.now()
@@ -44,7 +23,7 @@ def format_load_timestamp(ts: Optional[datetime] = None) -> str:
 
 
 def build_load_storage_dir(
-    org_slug: str,
+    organization_id: str,
     load_type: LoadType,
     *,
     catalog_name: Optional[str] = None,
@@ -53,13 +32,13 @@ def build_load_storage_dir(
 ) -> Path:
     """
     Build path under UPLOAD_PATH:
-      {slug}/historia/{timestamp}/
-      {slug}/catalogos/{catalog}/{timestamp}/
+      {organization_id}/historia/{timestamp}/
+      {organization_id}/catalogos/{catalog}/{timestamp}/
     """
     root = (upload_root or Path(settings.UPLOAD_PATH)).resolve()
-    slug = org_slug.strip()
-    if not slug:
-        raise ValueError("org_slug is required")
+    org_key = organization_id.strip()
+    if not org_key:
+        raise ValueError("organization_id is required")
 
     normalized_type = (load_type or "history").lower()
     if normalized_type not in ("history", "catalog"):
@@ -71,13 +50,13 @@ def build_load_storage_dir(
         if not catalog_name:
             raise ValueError("catalog_name is required for catalog loads")
         catalog_segment = catalog_name.strip().lower().replace(" ", "_")
-        return root / slug / CATALOGOS_DIR / catalog_segment / ts_folder
+        return root / org_key / CATALOGOS_DIR / catalog_segment / ts_folder
 
-    return root / slug / HISTORIA_DIR / ts_folder
+    return root / org_key / HISTORIA_DIR / ts_folder
 
 
 def ensure_load_storage_dir(
-    org_slug: str,
+    organization_id: str,
     load_type: LoadType,
     *,
     catalog_name: Optional[str] = None,
@@ -86,7 +65,7 @@ def ensure_load_storage_dir(
 ) -> Path:
     """Create org/load-type/[catalog]/timestamp directories if missing."""
     path = build_load_storage_dir(
-        org_slug,
+        organization_id,
         load_type,
         catalog_name=catalog_name,
         load_timestamp=load_timestamp,
@@ -129,12 +108,12 @@ def batch_artifact_path(
 
 def load_storage_metadata_fields(
     storage_dir: Path,
-    org_slug: str,
+    organization_id: str,
     load_timestamp: datetime,
 ) -> Dict[str, str]:
     """Metadata fragment to persist on batch creation."""
     return {
         "load_storage_dir": str(storage_dir.resolve()),
-        "organization_slug": org_slug,
+        "organization_id": organization_id.strip(),
         "load_timestamp": load_timestamp.isoformat(timespec="seconds"),
     }

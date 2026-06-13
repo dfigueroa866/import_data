@@ -90,19 +90,17 @@ def execute_preview_pipeline(batch_id: str, org_id: str) -> None:
 
         if load_type == "catalog":
             from data_staging.services.catalog_preview_service import (
-                process_catalog_preview_light,
                 CatalogPreviewError,
+                run_catalog_wizard_preview,
             )
 
             try:
-                agg_stats, agg_file_path = process_catalog_preview_light(
-                    file_path=file_path,
-                    target_table=target_table,
-                    column_mappings=column_mappings,
-                    column_toggles=column_toggles,
+                agg_stats, agg_file_path = run_catalog_wizard_preview(
+                    file_path,
+                    metadata,
+                    organization_id=org_id,
                     encoding=encoding,
                     delimiter=delimiter,
-                    organization_id=org_id,
                 )
                 process_type = "Catalog"
             except CatalogPreviewError as ce:

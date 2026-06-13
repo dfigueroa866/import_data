@@ -246,6 +246,31 @@ def _is_history_promotion(
     return (metadata.get("target_table") or "").lower() == HISTORY_TARGET_TABLE.lower()
 
 
+def _ensure_history_promotion_batch(arrow_batch, valid_db_target_cols: List[str]):
+    """Rellena sales_channel=SELL_IN si falta o viene vacío (parquets legacy)."""
+    from data_staging.services.history.history_config import HISTORY_SALES_CHANNEL_VALUE
+
+    if "sales_channel" not in valid_db_target_cols:
+        return arrow_batch
+
+    import pyarrow as pa
+
+    if arrow_batch.num_rows == 0:
+        return arrow_batch
+
+    df = arrow_batch.to_pandas()
+    if "sales_channel" not in df.columns:
+        df["sales_channel"] = HISTORY_SALES_CHANNEL_VALUE
+    else:
+        empty = df["sales_channel"].isna() | (
+            df["sales_channel"].astype(str).str.strip() == ""
+        )
+        if empty.any():
+            df.loc[empty, "sales_channel"] = HISTORY_SALES_CHANNEL_VALUE
+
+    return pa.RecordBatch.from_pandas(df, preserve_index=False)
+
+
 def _ensure_history_valid_db_columns(
     valid_db_target_cols: List[str],
     db_columns: Dict[str, str],
@@ -750,6 +775,8 @@ def _promote_from_parquet(
             batch_columns = list(frame.columns)
             use_arrow_copy = False
         else:
+            if is_history:
+                arrow_batch = _ensure_history_promotion_batch(arrow_batch, valid_db_target_cols)
             batch_columns = list(arrow_batch.schema.names)
 
         data_cols = _parquet_promotion_columns(batch_columns, valid_db_target_cols)
@@ -886,6 +913,8 @@ def _promote_from_parquet_single_pass(
             batch_columns = list(frame.columns)
             use_arrow_copy = False
         else:
+            if is_history:
+                arrow_batch = _ensure_history_promotion_batch(arrow_batch, valid_db_target_cols)
             batch_columns = list(arrow_batch.schema.names)
 
         data_cols = _parquet_promotion_columns(batch_columns, valid_db_target_cols)

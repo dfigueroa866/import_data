@@ -24,17 +24,21 @@ export const granularityFromProcessType = (processType) => {
     return '';
 };
 
+/** Extensión del archivo original (p. ej. csv, xlsx). */
+export const sourceFromFileName = (fileName) => {
+    const match = String(fileName || '').match(/\.([^.]+)$/i);
+    return match ? match[1].toLowerCase() : 'unknown';
+};
+
+/** Columnas de destino que el wizard rellena automáticamente (no mapear desde archivo). */
+export const HISTORY_AUTO_MAPPING_COLUMNS = ['organization_id', 'granularity', 'source', 'sales_channel'];
+
 /**
- * Añade sales_channel, granularity, source y organization_id a filas de preview.
+ * Añade organization_id a filas de preview cuando aplica (contexto de sesión).
  */
-export const enrichHistoryPreviewRows = (rows, { processType, sourceExtension, organizationId } = {}) => {
-    const granularity = granularityFromProcessType(processType);
-    const source = (sourceExtension || '').trim().toLowerCase();
+export const enrichHistoryPreviewRows = (rows, { organizationId } = {}) => {
     return (rows || []).map((row) => ({
         ...row,
-        sales_channel: HISTORY_SALES_CHANNEL_VALUE,
-        ...(granularity ? { granularity } : {}),
-        ...(source ? { source } : {}),
         ...(organizationId ? { organization_id: organizationId } : {}),
     }));
 };
@@ -58,9 +62,9 @@ export const HISTORY_TABLE_META = {
         'location_code',
         'sku',
         'period_start',
-        'granularity',
-        'quantity',
-        'source',
+    //    'granularity',
+        'quantity'
+    //    'source',
     ],
     required_mapping_columns: ['location_code', 'period_start', 'quantity', 'pieces'],
     sku_mapping_targets: ['sku_code', 'sku'],
@@ -74,25 +78,23 @@ export const HISTORY_TABLE_META = {
     ],
     ignored_file_headers: ['id'],
     non_mappable_targets: ['id', 'granularity', 'source', 'sales_channel'],
-    optional_columns: ['sales_channel', 'pieces', 'source'],
+    optional_columns: ['pieces'],
     column_aliases: {
         period_start: ['period_start', 'start_date', 'fecha', 'date', 'week_monday'],
         quantity: ['quantity', 'qty', 'cantidad', 'amount'],
         location_code: ['location_code', 'loc', 'location', 'store', 'tienda'],
         sku_code: ['sku_code', 'dmd_unit', 'sku', 'product_code', 'code', 'item'],
-        granularity: ['granularity', 'gran', 'period_type'],
         sales_channel: ['sales_channel', 'channel', 'canal', 'sales channel'],
         pieces: ['pieces', 'piezas', 'units', 'unidades'],
     },
-    defaults: {},
     validation_hints: [
         'Destino: public.sales_history',
         'Mapea location_code, sku (o sku_code) y period_start, quantity, pieces',
         'UPSERT: organization_id + location_code + sku + period_start + granularity',
-        'sales_channel siempre es SELL_IN (automático)',
-        'granularity: week (Weekly) o month (Monthly) según el tipo de proceso',
-        'source: extensión del archivo subido (csv, xlsx, etc.)',
-        'organization_id se aplica automáticamente',
+        'granularity se toma del tipo de proceso (Weekly/Monthly) del paso 1',
+        'source se toma de la extensión del archivo subido',
+        'sales_channel se aplica automáticamente como SELL_IN',
+        'organization_id se aplica automáticamente del usuario',
     ],
 };
 

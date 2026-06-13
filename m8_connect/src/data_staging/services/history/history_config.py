@@ -27,14 +27,16 @@ HISTORY_REQUIRED_COLUMNS = [
     "granularity",
     "quantity",
     "source",
+    "pieces"
 ]
 
 # Obligatorias en paso 2 (mapeo desde archivo)
-HISTORY_SKU_MAPPING_TARGETS = ["sku_code", "sku"]
+HISTORY_SKU_MAPPING_TARGETS = ["sku"]
 
 HISTORY_SALES_CHANNEL_VALUE = "SELL_IN"
 
 HISTORY_REQUIRED_MAPPING_COLUMNS = [
+    "sku",
     "location_code",
     "period_start",
     "quantity",
@@ -44,11 +46,11 @@ HISTORY_REQUIRED_MAPPING_COLUMNS = [
 # sku_code solo si la tabla no tiene columna «sku»
 HISTORY_LOGICAL_COLUMNS = ["sku_code"]
 
-# Solo columnas que el sistema rellena; el resto aparece en el dropdown
+# Solo PK / campos generados por el sistema
 HISTORY_NON_MAPPABLE_TARGETS = ["id", "granularity", "source", "sales_channel"]
 
-# Columnas que el process rellena y la promoción debe insertar aunque no estén en el mapeo del wizard
-HISTORY_AUTO_PROMOTION_COLUMNS = ["granularity", "source", "sales_channel", "organization_id"]
+# Columnas inyectadas por el sistema en promoción aunque no estén en el mapeo del wizard
+HISTORY_AUTO_PROMOTION_COLUMNS = ["organization_id", "granularity", "source", "sales_channel"]
 
 
 def is_sales_history_target(target_schema: str, target_table: str) -> bool:
@@ -60,28 +62,28 @@ def is_sales_history_target(target_schema: str, target_table: str) -> bool:
 
 HISTORY_IGNORED_FILE_HEADERS = ["id"]
 
-HISTORY_COLUMN_ALIASES: Dict[str, List[str]] = {
-    "period_start": [
-        "period_start",
-        "start_date",
-        "fecha",
-        "date",
-        "week_monday",
-    ],
-    "quantity": ["quantity", "qty", "cantidad", "amount"],
-    "location_code": ["location_code", "loc", "location", "store", "tienda"],
-    "sku_code": [
-        "sku_code",
-        "dmd_unit",
-        "sku",
-        "product_code",
-        "code",
-        "item",
-    ],
-    "granularity": ["granularity", "gran", "period_type"],
-    "sales_channel": ["sales_channel", "channel", "canal", "sales channel"],
-    "pieces": ["pieces", "piezas", "units", "unidades"],
-}
+#HISTORY_COLUMN_ALIASES: Dict[str, List[str]] = {
+#    "period_start": [
+#        "period_start",
+#        "start_date",
+#        "fecha",
+#        "date",
+#        "week_monday",
+#    ],
+#    "quantity": ["quantity", "qty", "cantidad", "amount"],
+#    "location_code": ["location_code", "loc", "location", "store", "tienda"],
+#    "sku_code": [
+#        "sku_code",
+#        "dmd_unit",
+#        "sku",
+#        "product_code",
+#        "code",
+#        "item",
+#    ],
+#    "granularity": ["granularity", "gran", "period_type"],
+#    "sales_channel": ["sales_channel", "channel", "canal", "sales channel"],
+#    "pieces": ["pieces", "piezas", "units", "unidades"],
+#}
 
 HISTORY_VALID_PROCESS_TYPES = ("Weekly", "Monthly")
 
@@ -170,15 +172,14 @@ def get_history_table_meta() -> Dict[str, Any]:
         "unique_keys": list(HISTORY_UNIQUE_KEYS),
         "ignored_file_headers": list(HISTORY_IGNORED_FILE_HEADERS),
         "non_mappable_targets": list(HISTORY_NON_MAPPABLE_TARGETS),
-        "column_aliases": dict(HISTORY_COLUMN_ALIASES),
-        "defaults": {"sales_channel": HISTORY_SALES_CHANNEL_VALUE},
+#        "column_aliases": dict(HISTORY_COLUMN_ALIASES),
         "validation_hints": [
             "Destino fijo: public.sales_history",
             "Mapea location_code, sku (o sku_code lógico) y period_start, quantity, pieces",
             f"UPSERT por: organization_id + location_code + sku + period_start + granularity",
-            f"sales_channel siempre es {HISTORY_SALES_CHANNEL_VALUE} (automático)",
-            "granularity: week (Weekly) o month (Monthly)",
-            "source: extensión del archivo subido",
+            "sales_channel se aplica automáticamente como SELL_IN",
+            "granularity: week (Weekly) o month (Monthly) — del tipo de proceso (paso 1)",
+            "source: extensión del archivo subido (paso 1)",
             "organization_id se aplica automáticamente del usuario",
         ],
     }

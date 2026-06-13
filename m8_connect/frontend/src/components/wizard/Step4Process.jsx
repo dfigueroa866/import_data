@@ -14,6 +14,7 @@ import {
 } from '../../constants/pollConfig';
 import { Button, LoadingSpinner, Alert } from '../ui';
 import { formatNumber } from '../../lib/format';
+import ValidationCompletePanel from './ValidationCompletePanel';
 import './Step4Process.css';
 
 const resolveApiErrorMessage = (err) => {
@@ -152,40 +153,6 @@ const ProgressBar = ({ pct, label = 'Avance', complete = false }) => {
     );
 };
 
-const ReviewStatCell = ({ value, label, variant, onSelect, selectable, active }) => {
-    const className = [
-        'step4-live__stat',
-        variant && `step4-live__stat--${variant}`,
-        selectable && 'step4-live__stat--action',
-        active && 'step4-live__stat--active',
-    ]
-        .filter(Boolean)
-        .join(' ');
-
-    const content = (
-        <>
-            <span className="step4-live__stat-value">{formatNumber(value)}</span>
-            <span className="step4-live__stat-label">{label}</span>
-        </>
-    );
-
-    if (selectable && onSelect) {
-        return (
-            <button
-                type="button"
-                className={className}
-                onClick={onSelect}
-                aria-pressed={active}
-                title={`Ver ${label.toLowerCase()}`}
-            >
-                {content}
-            </button>
-        );
-    }
-
-    return <div className={className}>{content}</div>;
-};
-
 const PromotionPanel = ({
     progress,
     wizardData,
@@ -290,7 +257,7 @@ const PromotionPanel = ({
     );
 };
 
-const ProcessingLiveView = ({ progress, isCatalog, promoting }) => {
+const ProcessingLiveView = ({ progress, promoting }) => {
     const promotionLive = isPromotionLive(progress, promoting);
     const total = progress?.total_rows || 0;
     const processed = progress?.processed_rows || 0;
@@ -302,11 +269,7 @@ const ProcessingLiveView = ({ progress, isCatalog, promoting }) => {
     const showMeta = (progress?.chunks_total > 1 || progress?.job_status)
         && (!promotionLive || progress?.phase === 'promoting' || progress?.phase === 'queued');
 
-    const title = promoting
-        ? 'Cargando a producción'
-        : isCatalog
-          ? 'Validando catálogo'
-          : 'Validando archivo';
+    const title = promoting ? 'Cargando a producción' : 'Validando archivo';
 
     const phaseHint = promotionLive
         ? pct < 50
@@ -410,8 +373,6 @@ const Step4Process = ({
     const [progress, setProgress] = useState(null);
     const [error, setError] = useState(null);
     const [completed, setCompleted] = useState(false);
-    const [reviewTab, setReviewTab] = useState('passed');
-
     const [promoting, setPromoting] = useState(false);
     const [promoteSuccess, setPromoteSuccess] = useState(false);
     const [promoteError, setPromoteError] = useState('');
@@ -1098,7 +1059,6 @@ const Step4Process = ({
         );
     }
 
-    const isCatalog = wizardData?.loadMode === 'catalog';
     const validatedInPreview =
         wizardData.validatedInPreview
         || wizardData.previewData?.validated_in_preview
@@ -1179,110 +1139,31 @@ const Step4Process = ({
     if (completed) {
         const rejectedCount = progress?.rejected_rows || 0;
         const actualPassed = progress?.loaded_rows || 0;
+        const totalRows = (progress?.total_rows || 0) || actualPassed + rejectedCount;
+        const reportSubtitle =
+            wizardData?.loadMode === 'catalog'
+                ? wizardData?.catalogTableMeta?.target_table
+                    || wizardData?.selectedTable
+                    || wizardData?.catalogTable
+                    || ''
+                : wizardData?.processType === 'Monthly'
+                  ? 'Agrupación mensual'
+                  : 'Agrupación semanal';
 
         return (
             <div className="step4-process">
-                <div className="step4-live">
-                    <div className="step4-live__hero">
-                        <div className="step4-live__hero-text">
-                            <h2 className="step4-live__title">Proceso de validación completo</h2>
-                            <p className="step4-live__subtitle">
-                                {isCatalog
-                                    ? 'Revisa válidos y rechazados antes de cargar a producción.'
-                                    : 'Revisa el resultado antes de cargar a producción.'}
-                            </p>
-                        </div>
-                        <ProgressBar pct={100} label="Completo" complete />
-                    </div>
-
-                    <div className="step4-live__stats step4-live__stats--review">
-                        <ReviewStatCell
-                            value={(progress?.total_rows || 0) || actualPassed + rejectedCount}
-                            label="Total filas"
-                        />
-                        <ReviewStatCell
-                            value={actualPassed}
-                            label="Válidas"
-                            variant="ok"
-                            selectable
-                            active={reviewTab === 'passed'}
-                            onSelect={() => setReviewTab('passed')}
-                        />
-                        <ReviewStatCell
-                            value={rejectedCount}
-                            label="Rechazadas"
-                            variant="err"
-                            selectable
-                            active={reviewTab === 'rejected'}
-                            onSelect={() => setReviewTab('rejected')}
-                        />
-                    </div>
-
-                    <div className="step4-live__body">
-                        {promoteError && (
-                            <div className="promotion-error">
-                                <span className="icon">⛔</span>
-                                {promoteError}
-                            </div>
-                        )}
-
-                        {rejectedCount > 0 && reviewTab !== 'rejected' && (
-                            <p className="step4-rejected-hint" role="note">
-                                Para descargar el archivo con los errores, selecciona{' '}
-                                <strong>Rechazadas</strong> y después pulsa «Descargar rechazados
-                                (.csv)».
-                            </p>
-                        )}
-
-                        {reviewTab === 'passed' && (
-                            <p className="tab-pane__desc">
-                                {isCatalog
-                                    ? 'Pasaron validación de tipos, NOT NULL, enums y reglas del catálogo. Carga a producción cuando estés listo.'
-                                    : 'Pasaron validaciones de formato y tipo. Carga a producción cuando estés listo.'}
-                            </p>
-                        )}
-
-                        {reviewTab === 'rejected' && (
-                            <p className="tab-pane__desc">
-                                {rejectedCount > 0
-                                    ? 'Registros que no cumplen tipos, enums, NOT NULL, duplicados o reglas del catálogo. Descarga el archivo, corrígelo y vuelve a cargar.'
-                                    : 'No hay registros rechazados. Puedes descargar un CSV vacío para referencia.'}
-                            </p>
-                        )}
-
-                        <div className="step4-completed__actions">
-                            {reviewTab === 'rejected' ? (
-                                <Button
-                                    variant="secondary"
-                                    size="lg"
-                                    className="step4-btn-download"
-                                    onClick={handleDownloadRejected}
-                                >
-                                    Descargar rechazados (.csv)
-                                </Button>
-                            ) : (
-                                <Button
-                                    variant="primary"
-                                    size="lg"
-                                    className="step4-btn-promote"
-                                    onClick={handlePromote}
-                                    disabled={promoting || actualPassed === 0}
-                                >
-                                    Cargar a producción
-                                </Button>
-                            )}
-                        </div>
-                    </div>
-
-                    <footer className="step4-live__footer">
-                        <Button variant="secondary" onClick={() => navigate('/batches')}>
-                            Ver batches
-                        </Button>
-                        <Button variant="secondary" onClick={handleNewUpload}>
-                            Nueva carga
-                        </Button>
-                    </footer>
-                </div>
+                <ValidationCompletePanel
+                    totalRows={totalRows}
+                    validRows={actualPassed}
+                    rejectedRows={rejectedCount}
+                    reportSubtitle={reportSubtitle}
+                    promoteError={promoteError}
+                    promoting={promoting}
+                    onPromote={handlePromote}
+                    onDownloadRejected={handleDownloadRejected}
+                    onNavigateBatches={() => navigate('/batches')}
+                    onNewUpload={handleNewUpload}
+                />
             </div>
         );
     }
@@ -1291,7 +1172,6 @@ const Step4Process = ({
         <div className="step4-process">
             <ProcessingLiveView
                 progress={progress}
-                isCatalog={isCatalog}
                 promoting={false}
             />
             <p className="step4-process__hint">

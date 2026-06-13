@@ -18,8 +18,6 @@ from data_staging.services.catalog.catalog_transforms import (
 from data_staging.services.history.history_config import (
     HISTORY_SALES_CHANNEL_VALUE,
     HISTORY_SKU_MAPPING_TARGETS,
-    granularity_for_process_type,
-    source_from_filename,
 )
 
 logger = logging.getLogger(__name__)
@@ -51,6 +49,40 @@ def build_sales_history_id(
 def _is_empty_expr(col: str) -> pl.Expr:
     c = pl.col(col)
     return c.is_null() | (c.cast(pl.Utf8, strict=False).str.strip_chars() == "")
+
+
+def _apply_sales_channel_polars(df: pl.DataFrame, *, validate: bool = True) -> pl.DataFrame:
+    """Default SELL_IN cuando falta o viene vacío; rechaza otros valores si validate=True."""
+    if df.is_empty():
+        return df
+
+    out = df
+    if validate and "sales_channel" in out.columns:
+        normalized_channel = (
+            pl.col("sales_channel")
+            .cast(pl.Utf8, strict=False)
+            .str.strip_chars()
+            .str.to_uppercase()
+            .str.replace_all("-", "_")
+        )
+        out = out.with_columns(
+            pl.when(~_is_empty_expr("sales_channel") & (normalized_channel != "SELL_IN"))
+            .then(pl.col("sales_channel"))
+            .otherwise(None)
+            .alias("_sales_channel_invalid")
+        )
+
+    if "sales_channel" in out.columns:
+        out = out.with_columns(
+            pl.when(_is_empty_expr("sales_channel"))
+            .then(pl.lit(HISTORY_SALES_CHANNEL_VALUE))
+            .otherwise(pl.col("sales_channel").cast(pl.Utf8, strict=False))
+            .alias("sales_channel")
+        )
+    else:
+        out = out.with_columns(pl.lit(HISTORY_SALES_CHANNEL_VALUE).alias("sales_channel"))
+
+    return out
 
 
 def _normalize_period_start_value(value: Any) -> Optional[str]:
@@ -340,10 +372,6 @@ def apply_history_transforms_polars(
     if df.is_empty():
         return df
 
-    default_granularity = (
-        granularity_for_process_type(process_type) if process_type else None
-    )
-    default_source = (source_extension or "").strip().lower() or None
     out = df
 
     if aggregated_mode:
@@ -404,7 +432,7 @@ def apply_history_transforms_polars(
                     "sku_id"
                 )
             )
-        return out
+        return _apply_sales_channel_polars(out, validate=False)
 
     if "sku_code" in out.columns:
         if "sku" in out.columns:
@@ -420,9 +448,6 @@ def apply_history_transforms_polars(
     if "period_start" in out.columns:
         out = out.with_columns(_normalize_period_start_expr("period_start"))
 
-    if default_granularity:
-        out = out.with_columns(pl.lit(default_granularity).alias("granularity"))
-
     if organization_id:
         if "organization_id" in out.columns:
             out = out.with_columns(
@@ -434,24 +459,38 @@ def apply_history_transforms_polars(
         else:
             out = out.with_columns(pl.lit(str(organization_id)).alias("organization_id"))
 
-    if default_source:
-        out = out.with_columns(pl.lit(default_source).alias("source"))
+    if process_type:
+        from data_staging.services.history.history_config import granularity_for_process_type
 
-    if "sales_channel" in out.columns:
-        normalized_channel = (
-            pl.col("sales_channel")
-            .cast(pl.Utf8, strict=False)
-            .str.strip_chars()
-            .str.to_uppercase()
-            .str.replace_all("-", "_")
-        )
-        out = out.with_columns(
-            pl.when(~_is_empty_expr("sales_channel") & (normalized_channel != "SELL_IN"))
-            .then(pl.col("sales_channel"))
-            .otherwise(None)
-            .alias("_sales_channel_invalid")
-        )
-    out = out.with_columns(pl.lit(HISTORY_SALES_CHANNEL_VALUE).alias("sales_channel"))
+        try:
+            gran = granularity_for_process_type(process_type)
+            if "granularity" in out.columns:
+                out = out.with_columns(
+                    pl.when(_is_empty_expr("granularity"))
+                    .then(pl.lit(gran))
+                    .otherwise(pl.col("granularity").cast(pl.Utf8, strict=False))
+                    .alias("granularity")
+                )
+            else:
+                out = out.with_columns(pl.lit(gran).alias("granularity"))
+        except ValueError:
+            pass
+
+    if source_extension:
+        src = str(source_extension).strip().lower()
+        if src == "parquet":
+            src = "csv"
+        if "source" in out.columns:
+            out = out.with_columns(
+                pl.when(_is_empty_expr("source"))
+                .then(pl.lit(src))
+                .otherwise(pl.col("source").cast(pl.Utf8, strict=False))
+                .alias("source")
+            )
+        else:
+            out = out.with_columns(pl.lit(src).alias("source"))
+
+    out = _apply_sales_channel_polars(out, validate=True)
 
     id_cols = ["organization_id", "location_code", "sku", "sku_code", "period_start", "granularity", "id"]
     present = [c for c in id_cols if c in out.columns]

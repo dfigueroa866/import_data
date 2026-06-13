@@ -62,6 +62,11 @@ def count_parquet_rows(file_path: Path) -> int:
     return pf.metadata.num_rows
 
 
+def parquet_column_names(file_path: Path) -> list[str]:
+    """Column names from Parquet metadata (Polars 0.x / 1.x compatible)."""
+    return list(pl.read_parquet(file_path, n_rows=0).columns)
+
+
 def iter_parquet_chunks(file_path: Path, chunk_size: int) -> Iterator[pl.DataFrame]:
     pf = pq.ParquetFile(file_path)
     for batch in pf.iter_batches(batch_size=chunk_size):

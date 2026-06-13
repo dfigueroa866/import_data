@@ -147,7 +147,7 @@ const Step1CatalogUpload = ({ wizardData, updateWizardData, nextStep }) => {
             <h2>Paso 1: Archivo y catálogo</h2>
             <p className="step-description">
                 Sube tu archivo y elige el catálogo destino. El esquema y la tabla se toman de la
-                configuración en <Link to="/catalogs">Catálogos</Link>.
+                configuración en <Link to="/config/catalogs">Catálogos</Link>.
             </p>
 
             <div className="step1-content catalog-step1-layout">
@@ -203,7 +203,7 @@ const Step1CatalogUpload = ({ wizardData, updateWizardData, nextStep }) => {
                         {catalogTables.length === 0 && !loading ? (
                             <p className="catalog-no-match-hint">
                                 No hay catálogos activos.{' '}
-                                <Link to="/catalogs">Configúralos en Catálogos</Link>.
+                                <Link to="/config/catalogs">Configúralos en Catálogos</Link>.
                             </p>
                         ) : (
                             <FormField label="Catálogo destino" htmlFor="catalogDefinition" required className="form-group">
@@ -235,9 +235,12 @@ const Step1CatalogUpload = ({ wizardData, updateWizardData, nextStep }) => {
                         )}
                         <h3>Reglas de {tableMeta.label}</h3>
                         <div className="rules-block">
-                            <strong>Requeridas</strong>
+                            <strong>Obligatorias en mapping</strong>
                             <ul>
-                                {tableMeta.required_columns
+                                {(tableMeta.required_mapping_columns?.length
+                                    ? tableMeta.required_mapping_columns
+                                    : tableMeta.required_columns || []
+                                )
                                     .filter((c) => c !== 'organization_id')
                                     .map((c) => (
                                         <li key={c}>{c}</li>

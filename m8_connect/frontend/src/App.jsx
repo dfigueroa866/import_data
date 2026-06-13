@@ -8,6 +8,7 @@ import Dashboard from './pages/Dashboard';
 import Login from './pages/Login';
 import UploadLanding from './pages/UploadLanding';
 import CatalogAdmin from './pages/CatalogAdmin';
+import HistoryAdmin from './pages/HistoryAdmin';
 import UploadWizard from './components/wizard/UploadWizard';
 import CatalogUploadWizard from './components/wizard/CatalogUploadWizard';
 import Batches from './pages/Batches';
@@ -27,7 +28,9 @@ function AppLayout() {
               <Route path="/upload" element={<UploadLanding />} />
               <Route path="/upload/history" element={<UploadWizard />} />
               <Route path="/upload/catalog" element={<CatalogUploadWizard />} />
-              <Route path="/catalogs" element={<CatalogAdmin />} />
+              <Route path="/config/catalogs" element={<CatalogAdmin />} />
+              <Route path="/config/history" element={<HistoryAdmin />} />
+              <Route path="/catalogs" element={<Navigate to="/config/catalogs" replace />} />
               <Route path="/batches" element={<Batches />} />
               <Route path="/batches/:batchId" element={<BatchProgress />} />
               <Route path="/monitoring" element={<Monitoring />} />

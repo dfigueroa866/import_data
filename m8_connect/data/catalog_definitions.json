@@ -82,8 +82,7 @@
       "validation_hints": [
         "Clave única: (organization_id, location_code)",
         "location_code es el código de negocio (no uses location_id del archivo; es el UUID de la BD)",
-        "location_id, organization_id, created_at y updated_at los genera o asigna el sistema",
-        "Valores por defecto: country=Desconocido, timezone=UTC, is_active=true"
+        "location_id, organization_id, created_at y updated_at los genera o asigna el sistema"
       ]
     },
     {

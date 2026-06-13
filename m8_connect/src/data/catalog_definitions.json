@@ -89,9 +89,6 @@
           "new_launch"
         ]
       },
-      "defaults": {
-        "status": "active"
-      },
       "validation_hints": [
         "Clave única: (organization_id, code)",
         "code es el SKU del producto (no uses la columna de archivo sku_id; es el UUID de la BD)",
@@ -108,32 +105,39 @@
       "config_file": "location_config.json",
       "is_active": true,
       "required_columns": [
-        "organization_id"
+        "code",
+        "name",
+        "loc_type",
+        "status"
       ],
       "optional_columns": [
         "country",
+        "state",
         "city",
         "timezone"
       ],
-      "required_mapping_columns": [],
+      "required_mapping_columns": [
+        "code",
+        "name",
+        "loc_type",
+        "status"
+      ],
       "unique_keys": [
         "organization_id",
         "code"
       ],
       "ignored_file_headers": [
         "location_id",
+        "locationid",
         "organization_id",
         "created_at",
-        "updated_at",
-        "imported_at"
+        "updated_at"
       ],
       "non_mappable_targets": [
         "location_id",
-        "id",
         "organization_id",
         "created_at",
-        "updated_at",
-        "imported_at"
+        "updated_at"
       ],
       "column_aliases": {
         "organization_id": [
@@ -177,17 +181,26 @@
           "type"
         ]
       },
-      "enums": {},
-      "defaults": {
-        "country": "Desconocido",
-        "timezone": "UTC",
-        "is_active": true
+      "enums": {
+        "loc_type": [
+          "store",
+          "warehouse",
+          "distribution_center",
+          "plant",
+          "dark_store",
+          "region",
+          "virtual"
+        ],
+        "loc_status": [
+          "active",
+          "inactive"
+        ]
       },
+      "defaults": {},
       "validation_hints": [
         "Clave única: (organization_id, location_code)",
         "location_code es el código de negocio (no uses location_id del archivo; es el UUID de la BD)",
-        "location_id, organization_id, created_at y updated_at los genera o asigna el sistema",
-        "Valores por defecto: country=Desconocido, timezone=UTC, is_active=true"
+        "location_id, organization_id, created_at y updated_at los genera o asigna el sistema"
       ]
     }
   ]

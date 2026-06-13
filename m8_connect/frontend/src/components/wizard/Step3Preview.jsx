@@ -272,14 +272,13 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
         const batchId = wizardData?.batchId;
         if (!batchId) return undefined;
 
-        loadPreview(batchId);
+        const forceCatalog = wizardData?.loadMode === 'catalog';
+        loadPreview(batchId, { force: forceCatalog });
 
         return () => {
             stopPreviewPoll();
         };
-        // loadPreview/stopPreviewPoll are estabilizados con refs; solo reaccionar al batch.
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [wizardData?.batchId]);
+    }, [wizardData?.batchId, wizardData?.loadMode, loadPreview, stopPreviewPoll]);
 
     const val = previewData?.validation_summary || {};
     const loadMode = previewData?.load_type || wizardData?.loadMode || 'history';
@@ -296,15 +295,11 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
         const raw = previewData?.preview_data || [];
         if (isCatalog) return raw;
         return enrichHistoryPreviewRows(raw, {
-            processType,
-            sourceExtension,
             organizationId: user?.organization_id || wizardData.organizationId,
         });
     }, [
         previewData?.preview_data,
         isCatalog,
-        processType,
-        sourceExtension,
         user?.organization_id,
         wizardData.organizationId,
     ]);
@@ -370,6 +365,279 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
         wizardData?.selectedTable ||
         wizardData?.catalogTable ||
         '-';
+
+    const renderCatalogPreviewSummary = () => (
+        <>
+            <div className="history-metrics-panel">
+                <div className="history-metrics-panel__header">
+                    <h3 className="history-metrics-panel__title">Resumen de vista previa</h3>
+                    <div className="history-metrics-panel__badges">
+                        <span className="metric-chip metric-chip--info">
+                            {targetTableName}
+                        </span>
+                    </div>
+                </div>
+
+                <div className="history-kpi-grid">
+                    <article className="history-kpi history-kpi--filas">
+                        <span className="history-kpi__label">Filas</span>
+                        <div className="history-kpi__flow history-kpi__flow--prod">
+                            <div className="step3-prod-summary step3-prod-summary--inline step3-prod-summary--source">
+                                <p className="step3-prod-summary__hint">
+                                    Total de filas detectadas en el archivo cargado.
+                                </p>
+                                <div className="step3-prod-summary__value">
+                                    <span className="step3-prod-summary__label">En archivo</span>
+                                    <strong>{formatMetric(val.total_rows)}</strong>
+                                </div>
+                            </div>
+                            <span
+                                className="history-kpi__arrow history-kpi__arrow--prominent"
+                                aria-hidden="true"
+                            >
+                                →
+                            </span>
+                            <div className="step3-prod-summary step3-prod-summary--inline step3-prod-summary--success">
+                                <p className="step3-prod-summary__hint">
+                                    Muestra de filas tras aplicar el mapeo del paso 2.
+                                </p>
+                                <div className="step3-prod-summary__value">
+                                    <span className="step3-prod-summary__label">Vista previa</span>
+                                    <strong>{formatMetric(displayPreviewRows.length)}</strong>
+                                </div>
+                            </div>
+                        </div>
+                    </article>
+                </div>
+            </div>
+
+            <div className="validation-report validation-report--compact">
+                <div className="validation-report__header">
+                    <h4 className="validation-report__title">Detalle de vista previa</h4>
+                    <span className="validation-report__subtitle">{targetTableName}</span>
+                </div>
+
+                <div className="validation-report__sections">
+                    <section className="report-section">
+                        <h5 className="report-section__title">Archivo</h5>
+                        <dl className="report-dl">
+                            <div className="report-dl__row">
+                                <dt>Filas</dt>
+                                <dd>{formatMetric(val.total_rows)}</dd>
+                            </div>
+                            {sourceExtension ? (
+                                <div className="report-dl__row">
+                                    <dt>Formato</dt>
+                                    <dd>{sourceExtension.toUpperCase()}</dd>
+                                </div>
+                            ) : null}
+                        </dl>
+                    </section>
+
+                    <section className="report-section">
+                        <h5 className="report-section__title">Destino</h5>
+                        <dl className="report-dl">
+                            <div className="report-dl__row">
+                                <dt>Tabla</dt>
+                                <dd>{targetTableName}</dd>
+                            </div>
+                        </dl>
+                    </section>
+                </div>
+            </div>
+        </>
+    );
+
+    const renderHistoryPreviewSummary = () => (
+        <>
+            {val.has_error && (
+                <div className="validation-alert error">
+                    ⚠ {val.error_detail}
+                </div>
+            )}
+            <div className="history-metrics-panel">
+                <div className="history-metrics-panel__header">
+                    <h3 className="history-metrics-panel__title">Resumen de agregación</h3>
+                    <div className="history-metrics-panel__badges">
+                        {val.compression_factor > 1 && (
+                            <span className="metric-chip metric-chip--info">
+                                Compresión {val.compression_factor}x
+                            </span>
+                        )}
+                        <span
+                            className={`metric-chip ${
+                                qtyIntegrityOk && totalIntegrityOk
+                                    ? 'metric-chip--success'
+                                    : 'metric-chip--danger'
+                            }`}
+                        >
+                            {qtyIntegrityOk && totalIntegrityOk
+                                ? 'Integridad OK'
+                                : 'Revisar integridad'}
+                        </span>
+                    </div>
+                </div>
+
+                <div className="history-kpi-grid">
+                    <article className="history-kpi history-kpi--filas">
+                        <span className="history-kpi__label">Filas</span>
+                        <div className="history-kpi__flow history-kpi__flow--prod">
+                            <div className="step3-prod-summary step3-prod-summary--inline step3-prod-summary--source">
+                                <p className="step3-prod-summary__hint">
+                                    Filas del archivo original antes de agregación.
+                                </p>
+                                <div className="step3-prod-summary__value">
+                                    <span className="step3-prod-summary__label">Originales</span>
+                                    <strong>{formatMetric(val.total_rows)}</strong>
+                                </div>
+                            </div>
+                            <span
+                                className="history-kpi__arrow history-kpi__arrow--prominent"
+                                aria-hidden="true"
+                            >
+                                →
+                            </span>
+                            <div className="step3-prod-summary step3-prod-summary--inline step3-prod-summary--success">
+                                <p className="step3-prod-summary__hint">
+                                    Total final que se cargará a producción en el siguiente paso.
+                                </p>
+                                <div className="step3-prod-summary__value">
+                                    <span className="step3-prod-summary__label">A producción</span>
+                                    <strong>{formatMetric(productionRows)}</strong>
+                                </div>
+                            </div>
+                        </div>
+                    </article>
+
+                    {val.orig_total > 0 && (
+                        <article className={`history-kpi ${!totalIntegrityOk ? 'history-kpi--warn' : ''}`}>
+                            <span className="history-kpi__label">Monto total</span>
+                            <div className="history-kpi__flow">
+                                <div className="history-kpi__value-block">
+                                    <strong>${formatMetric(val.orig_total)}</strong>
+                                    <small>original</small>
+                                </div>
+                                <span className="history-kpi__arrow" aria-hidden="true">→</span>
+                                <div className="history-kpi__value-block">
+                                    <strong>${formatMetric(val.agg_total)}</strong>
+                                    <small>agrupado</small>
+                                </div>
+                            </div>
+                            {!totalIntegrityOk && (
+                                <span className="history-kpi__delta history-kpi__delta--danger">
+                                    Δ ${formatMetric(val.diff_total)}
+                                </span>
+                            )}
+                        </article>
+                    )}
+                </div>
+            </div>
+
+            <div className="validation-report validation-report--compact">
+                <div className="validation-report__header">
+                    <h4 className="validation-report__title">Detalle de validación y agregación</h4>
+                    <span className="validation-report__subtitle">
+                        {processType === 'Monthly' ? 'Agrupación mensual' : 'Agrupación semanal'}
+                    </span>
+                </div>
+
+                <div className="validation-report__sections">
+                    {rejectedRows > 0 && (
+                        <section className="report-section report-section--validation">
+                            <h5 className="report-section__title">Validación</h5>
+                            <dl className="report-dl">
+                                <div className="report-dl__row report-dl__row--rejected">
+                                    <dt>Rechazadas</dt>
+                                    <dd>{formatMetric(rejectedRows)}</dd>
+                                </div>
+                            </dl>
+                            <div className="step3-rejected-download">
+                                <Button
+                                    variant="danger"
+                                    size="sm"
+                                    onClick={handleDownloadRejected}
+                                    disabled={downloadingRejected}
+                                    className="step3-rejected-download__btn"
+                                >
+                                    {downloadingRejected
+                                        ? 'Preparando descarga…'
+                                        : 'Descargar rechazados (.csv)'}
+                                </Button>
+                            </div>
+                        </section>
+                    )}
+
+                    <section className="report-section">
+                        <h5 className="report-section__title">Agregación</h5>
+                        <dl className="report-dl">
+                            <div className="report-dl__row">
+                                <dt>Filas consolidadas</dt>
+                                <dd>{formatMetric(val.grouped_rows)}</dd>
+                            </div>
+                            <div className="report-dl__row report-dl__row--success">
+                                <dt>Filas comprimidas</dt>
+                                <dd>−{formatMetric(val.consolidated_rows)}</dd>
+                            </div>
+                            <div className="report-dl__row">
+                                <dt>Factor de compresión</dt>
+                                <dd>
+                                    <span className="report-pill">{val.compression_factor || 1}x</span>
+                                </dd>
+                            </div>
+                        </dl>
+                    </section>
+
+                    <section className="report-section">
+                        <h5 className="report-section__title">Integridad</h5>
+                        <dl className="report-dl">
+                            <div className="report-dl__row">
+                                <dt>Sumatorias totales</dt>
+                                <dd>
+                                    <span
+                                        className={`report-status ${
+                                            qtyIntegrityOk ? 'success' : 'error'
+                                        }`}
+                                    >
+                                        {qtyIntegrityOk
+                                            ? 'Sin diferencias'
+                                            : `Δ ${formatMetric(val.diff_qty)}`}
+                                    </span>
+                                </dd>
+                            </div>
+                            <div className="report-dl__row">
+                                <dt>Sumatorias por locación</dt>
+                                <dd>
+                                    <span
+                                        className={`report-status ${
+                                            locIntegrityOk ? 'success' : 'error'
+                                        }`}
+                                    >
+                                        {locIntegrityOk
+                                            ? 'Sin diferencias'
+                                            : `${val.loc_diff_count} anomalías`}
+                                    </span>
+                                </dd>
+                            </div>
+                            <div className="report-dl__row">
+                                <dt>Sumatorias por producto</dt>
+                                <dd>
+                                    <span
+                                        className={`report-status ${
+                                            skuIntegrityOk ? 'success' : 'error'
+                                        }`}
+                                    >
+                                        {skuIntegrityOk
+                                            ? 'Sin diferencias'
+                                            : `${val.dmd_unit_diff_count} anomalías`}
+                                    </span>
+                                </dd>
+                            </div>
+                        </dl>
+                    </section>
+                </div>
+            </div>
+        </>
+    );
 
     if (loading) {
         const pct = Math.min(100, Math.max(0, Number(previewProgress?.progress_percentage) || 0));
@@ -461,216 +729,12 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                     : 'Validación completa sobre todas las filas del archivo, descarga de rechazados, agregación weekly/monthly y vista previa del resultado.'}
             </p>
 
-            {isCatalog ? (
-                <div className="catalog-preview-summary">
-                    <div className="validation-alert info catalog-preview-hint">
-                        Las comprobaciones de formato, tipos, enums y duplicados se ejecutan al procesar
-                        el archivo. Podrás descargar los registros rechazados para corregirlos.
-                    </div>
-                    <div className="summary-card">
-                        <div className="card-label">Filas en archivo</div>
-                        <span className="value">{val.total_rows?.toLocaleString() || 0}</span>
-                    </div>
-                    <div className="summary-card summary-card--target">
-                        <div className="card-label">Tabla destino</div>
-                        <span className="value value--table">{targetTableName}</span>
-                    </div>
-                </div>
-            ) : (
-                <>
-                    {val.has_error && (
-                        <div className="validation-alert error">
-                            ⚠ {val.error_detail}
-                        </div>
-                    )}
-                    <div className="history-metrics-panel">
-                        <div className="history-metrics-panel__header">
-                            <h3 className="history-metrics-panel__title">Resumen de agregación</h3>
-                            <div className="history-metrics-panel__badges">
-                                {val.compression_factor > 1 && (
-                                    <span className="metric-chip metric-chip--info">
-                                        Compresión {val.compression_factor}x
-                                    </span>
-                                )}
-                                <span
-                                    className={`metric-chip ${
-                                        qtyIntegrityOk && totalIntegrityOk
-                                            ? 'metric-chip--success'
-                                            : 'metric-chip--danger'
-                                    }`}
-                                >
-                                    {qtyIntegrityOk && totalIntegrityOk
-                                        ? 'Integridad OK'
-                                        : 'Revisar integridad'}
-                                </span>
-                            </div>
-                        </div>
-
-                        <div className="history-kpi-grid">
-                            <article className="history-kpi history-kpi--filas">
-                                <span className="history-kpi__label">Filas</span>
-                                <div className="history-kpi__flow history-kpi__flow--prod">
-                                    <div className="step3-prod-summary step3-prod-summary--inline step3-prod-summary--source">
-                                        <p className="step3-prod-summary__hint">
-                                            Filas del archivo original antes de agregación.
-                                        </p>
-                                        <div className="step3-prod-summary__value">
-                                            <span className="step3-prod-summary__label">Originales</span>
-                                            <strong>{formatMetric(val.total_rows)}</strong>
-                                        </div>
-                                    </div>
-                                    <span
-                                        className="history-kpi__arrow history-kpi__arrow--prominent"
-                                        aria-hidden="true"
-                                    >
-                                        →
-                                    </span>
-                                    <div className="step3-prod-summary step3-prod-summary--inline step3-prod-summary--success">
-                                        <p className="step3-prod-summary__hint">
-                                            Total final que se cargará a producción en el siguiente paso.
-                                        </p>
-                                        <div className="step3-prod-summary__value">
-                                            <span className="step3-prod-summary__label">A producción</span>
-                                            <strong>{formatMetric(productionRows)}</strong>
-                                        </div>
-                                    </div>
-                                </div>
-                            </article>
-
-                            {val.orig_total > 0 && (
-                                <article className={`history-kpi ${!totalIntegrityOk ? 'history-kpi--warn' : ''}`}>
-                                    <span className="history-kpi__label">Monto total</span>
-                                    <div className="history-kpi__flow">
-                                        <div className="history-kpi__value-block">
-                                            <strong>${formatMetric(val.orig_total)}</strong>
-                                            <small>original</small>
-                                        </div>
-                                        <span className="history-kpi__arrow" aria-hidden="true">→</span>
-                                        <div className="history-kpi__value-block">
-                                            <strong>${formatMetric(val.agg_total)}</strong>
-                                            <small>agrupado</small>
-                                        </div>
-                                    </div>
-                                    {!totalIntegrityOk && (
-                                        <span className="history-kpi__delta history-kpi__delta--danger">
-                                            Δ ${formatMetric(val.diff_total)}
-                                        </span>
-                                    )}
-                                </article>
-                            )}
-                        </div>
-                    </div>
-
-                    <div className="validation-report validation-report--compact">
-                        <div className="validation-report__header">
-                            <h4 className="validation-report__title">Detalle de validación y agregación</h4>
-                            <span className="validation-report__subtitle">
-                                {processType === 'Monthly' ? 'Agrupación mensual' : 'Agrupación semanal'}
-                            </span>
-                        </div>
-
-                        <div className="validation-report__sections">
-                            {rejectedRows > 0 && (
-                                <section className="report-section report-section--validation">
-                                    <h5 className="report-section__title">Validación</h5>
-                                    <dl className="report-dl">
-                                        <div className="report-dl__row report-dl__row--rejected">
-                                            <dt>Rechazadas</dt>
-                                            <dd>{formatMetric(rejectedRows)}</dd>
-                                        </div>
-                                    </dl>
-                                    <div className="step3-rejected-download">
-                                        <Button
-                                            variant="danger"
-                                            size="sm"
-                                            onClick={handleDownloadRejected}
-                                            disabled={downloadingRejected}
-                                            className="step3-rejected-download__btn"
-                                        >
-                                            {downloadingRejected
-                                                ? 'Preparando descarga…'
-                                                : 'Descargar rechazados (.csv)'}
-                                        </Button>
-                                    </div>
-                                </section>
-                            )}
-
-                            <section className="report-section">
-                                <h5 className="report-section__title">Agregación</h5>
-                                <dl className="report-dl">
-                                    <div className="report-dl__row">
-                                        <dt>Filas consolidadas</dt>
-                                        <dd>{formatMetric(val.grouped_rows)}</dd>
-                                    </div>
-                                    <div className="report-dl__row report-dl__row--success">
-                                        <dt>Filas comprimidas</dt>
-                                        <dd>−{formatMetric(val.consolidated_rows)}</dd>
-                                    </div>
-                                    <div className="report-dl__row">
-                                        <dt>Factor de compresión</dt>
-                                        <dd>
-                                            <span className="report-pill">{val.compression_factor || 1}x</span>
-                                        </dd>
-                                    </div>
-                                </dl>
-                            </section>
-
-                            <section className="report-section">
-                                <h5 className="report-section__title">Integridad</h5>
-                                <dl className="report-dl">
-                                    <div className="report-dl__row">
-                                        <dt>Sumatorias totales</dt>
-                                        <dd>
-                                            <span
-                                                className={`report-status ${
-                                                    qtyIntegrityOk ? 'success' : 'error'
-                                                }`}
-                                            >
-                                                {qtyIntegrityOk
-                                                    ? 'Sin diferencias'
-                                                    : `Δ ${formatMetric(val.diff_qty)}`}
-                                            </span>
-                                        </dd>
-                                    </div>
-                                    <div className="report-dl__row">
-                                        <dt>Sumatorias por locación</dt>
-                                        <dd>
-                                            <span
-                                                className={`report-status ${
-                                                    locIntegrityOk ? 'success' : 'error'
-                                                }`}
-                                            >
-                                                {locIntegrityOk
-                                                    ? 'Sin diferencias'
-                                                    : `${val.loc_diff_count} anomalías`}
-                                            </span>
-                                        </dd>
-                                    </div>
-                                    <div className="report-dl__row">
-                                        <dt>Sumatorias por producto</dt>
-                                        <dd>
-                                            <span
-                                                className={`report-status ${
-                                                    skuIntegrityOk ? 'success' : 'error'
-                                                }`}
-                                            >
-                                                {skuIntegrityOk
-                                                    ? 'Sin diferencias'
-                                                    : `${val.dmd_unit_diff_count} anomalías`}
-                                            </span>
-                                        </dd>
-                                    </div>
-                                </dl>
-                            </section>
-                        </div>
-                    </div>
-                </>
-            )}
+            {isCatalog ? renderCatalogPreviewSummary() : renderHistoryPreviewSummary()}
 
             {/* Preview Table */}
             {displayPreviewRows.length > 0 ? (
                 <DataTableShell
-                    title={isCatalog ? 'Vista previa (primeras 20 filas)' : 'Vista previa (primeras 20 filas agregadas)'}
+                    title={isCatalog ? 'Vista previa (primeras 20 filas mapeadas)' : 'Vista previa (primeras 20 filas agregadas)'}
                     meta={`${displayPreviewRows.length} filas · ${previewColumnKeys.length} columnas`}
                     maxHeight="400px"
                 >
@@ -712,7 +776,7 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
 
             <div className="step-actions">
                 <Button variant="secondary" onClick={prevStep}>
-                    ← Back to Mapping
+                    ← Volver al mapeo
                 </Button>
                 <Button
                     variant="primary"

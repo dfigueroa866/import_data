@@ -1,4 +1,4 @@
-"""Apply catalog defaults and transformation rules (preview + worker)."""
+"""Apply catalog transformation rules (preview + worker)."""
 
 from __future__ import annotations
 
@@ -16,8 +16,8 @@ from data_staging.services.catalog.catalog_registry import get_catalog_table, lo
 
 _EMPTY_TOKENS = {"", "nan", "none", "null", "n/a", "na"}
 AUDIT_COLUMNS = frozenset({"created_at", "updated_at", "imported_at"})
-# Columns with DB default that remain user-mappable and enum-validated when present in the file.
-MAPPABLE_DEFAULT_COLUMNS = frozenset({"status"})
+# Reserved for columns that must stay validated even when the DB defines a default.
+MAPPABLE_DEFAULT_COLUMNS: frozenset[str] = frozenset()
 # File headers that must never appear in the mapping UI (audit + PK name collisions).
 IGNORED_FILE_HEADERS = frozenset({
     "created_at",
@@ -299,21 +299,13 @@ def apply_catalog_transforms(
     table_name: str,
     mapped_columns: Optional[frozenset[str]] = None,
 ) -> pd.DataFrame:
-    """Apply registry defaults and config transformation_rules to mapped catalog data."""
+    """Apply config transformation_rules to mapped catalog data (no default fill)."""
     catalog = get_catalog_table(table_name)
     if not catalog:
         return pdf
 
     config = load_full_config(table_name)
     out = pdf.copy()
-
-    defaults = catalog.get("defaults") or {}
-    for col, default_val in defaults.items():
-        if not _column_in_scope(col, out, mapped_columns):
-            continue
-        mask = out[col].apply(_is_empty_scalar)
-        if mask.any():
-            out.loc[mask, col] = default_val
 
     for rule in config.get("transformation_rules") or []:
         name = rule.get("name")
@@ -323,14 +315,6 @@ def apply_catalog_transforms(
                     out[col] = out[col].apply(
                         lambda v: np.nan if is_empty_value(v) else str(v).strip()
                     )
-        elif name == "handle_nulls" and rule.get("strategy") == "fill":
-            fill_values = rule.get("fill_values") or {}
-            applicable = [
-                c for c in fill_values.keys() if _column_in_scope(c, out, mapped_columns)
-            ]
-            out = _normalize_empty_to_na(out, applicable)
-            for col in applicable:
-                out[col] = out[col].fillna(fill_values[col])
 
     out = _normalize_enum_columns_in_frame(out, catalog, mapped_columns)
     scope_cols = (

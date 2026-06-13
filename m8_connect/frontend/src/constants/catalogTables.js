@@ -11,7 +11,6 @@ export const FALLBACK_CATALOG_TABLES = [
         optional_columns: ['category', 'family', 'brand', 'status', 'attributes'],
         unique_keys: ['organization_id', 'code'],
         enums: { status: ['active', 'discontinued', 'new_launch'] },
-        defaults: { status: 'active' },
         validation_hints: [
             'Clave única: (organization_id, code)',
             'status debe ser: active, discontinued o new_launch',
@@ -36,11 +35,9 @@ export const FALLBACK_CATALOG_TABLES = [
         optional_columns: ['country', 'city', 'timezone', 'is_active', 'location_type'],
         unique_keys: ['organization_id', 'code'],
         enums: {},
-        defaults: { country: 'Desconocido', timezone: 'UTC', is_active: true },
         validation_hints: [
             'Clave única: (organization_id, location_code)',
             'organization_id se asigna automáticamente del usuario',
-            'Valores por defecto: country=Desconocido, timezone=UTC, is_active=true',
         ],
         column_aliases: {
             organization_id: ['organization_id', 'org_id', 'organization'],

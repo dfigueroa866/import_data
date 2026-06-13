@@ -187,7 +187,9 @@ def build_history_validation_context(
     source_file_columns = list(selected_columns)
     if not source_file_columns and file_path.suffix.lower() == ".parquet":
         try:
-            source_file_columns = list(pl.scan_parquet(file_path).collect_schema().names())
+            from data_staging.utils.chunk_iterators import parquet_column_names
+
+            source_file_columns = parquet_column_names(file_path)
         except Exception as exc:
             logger.warning("Could not read Parquet columns for rejected export: %s", exc)
 

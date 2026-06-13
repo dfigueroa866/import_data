@@ -6,13 +6,13 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from data_staging.auth.security import TokenUser, get_current_user
 from data_staging.services.catalog import catalog_store
 from data_staging.database import get_db_session
 from data_staging.schemas.catalogs import CatalogDefinitionPayload
+from data_staging.utils.pg_schema import fetch_table_columns
 
 logger = logging.getLogger(__name__)
 
@@ -38,28 +38,11 @@ async def list_target_table_columns(
     current_user: TokenUser = Depends(get_current_user),
 ):
     """Columns from information_schema to help configure a catalog."""
-    rows = db.execute(
-        text("""
-            SELECT column_name, data_type, is_nullable, column_default
-            FROM information_schema.columns
-            WHERE table_schema = :schema AND table_name = :table
-            ORDER BY ordinal_position
-        """),
-        {"schema": schema, "table": table},
-    ).fetchall()
+    columns = fetch_table_columns(db, schema, table)
 
-    if not rows:
+    if not columns:
         raise HTTPException(status_code=404, detail=f"Tabla {schema}.{table} no encontrada")
 
-    columns = [
-        {
-            "name": r.column_name,
-            "type": r.data_type,
-            "nullable": r.is_nullable == "YES",
-            "default": r.column_default,
-        }
-        for r in rows
-    ]
     return {"schema": schema, "table": table, "columns": columns}
 
 

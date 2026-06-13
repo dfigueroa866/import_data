@@ -13,6 +13,7 @@ const UploadLanding = () => {
       title: 'Historia',
       description: 'Carga histórica de ventas con agregación semanal o mensual, validación de cantidades y promoción a producción.',
       onClick: () => navigate('/upload/history'),
+      link: { to: '/config/history', label: 'Configurar historia →' },
     },
     {
       icon: BookOpen,
@@ -20,7 +21,7 @@ const UploadLanding = () => {
       title: 'Catálogos',
       description: 'Carga maestros de productos (SKUs) y ubicaciones aplicando las reglas de validación específicas de cada tabla.',
       onClick: () => navigate('/upload/catalog'),
-      link: { to: '/catalogs', label: 'Configurar catálogos →' },
+      link: { to: '/config/catalogs', label: 'Configurar catálogos →' },
     },
   ];
 

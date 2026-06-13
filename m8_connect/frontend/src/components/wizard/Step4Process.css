@@ -4,6 +4,18 @@
     padding: 0.5rem 0 2rem;
 }
 
+.step4-process:has(.validation-complete-panel__metrics) {
+    max-width: min(100%, 960px);
+}
+
+.validation-complete-panel__metrics {
+    margin-bottom: 1rem;
+}
+
+.validation-complete-panel__report {
+    margin-bottom: 0.25rem;
+}
+
 .step4-process__hint {
     display: flex;
     align-items: center;

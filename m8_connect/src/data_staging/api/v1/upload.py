@@ -1330,20 +1330,17 @@ async def upload_file_temp(
 
         from data_staging.utils.load_storage_paths import (
             ensure_load_storage_dir,
-            fetch_organization_slug,
             load_storage_metadata_fields,
         )
 
         org_id = current_user.organization_id
-        try:
-            org_slug = fetch_organization_slug(db, org_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not org_id:
+            raise HTTPException(status_code=400, detail="organization_id is required")
 
         load_timestamp = datetime.now()
         try:
             storage_dir = ensure_load_storage_dir(
-                org_slug,
+                org_id,
                 normalized_load_type,  # type: ignore[arg-type]
                 catalog_name=catalog_name,
                 load_timestamp=load_timestamp,
@@ -1381,7 +1378,7 @@ async def upload_file_temp(
             "process_type": process_type if normalized_load_type == "history" else None,
             "organization_id": org_id,
             "wizard_step": 1,
-            **load_storage_metadata_fields(storage_dir, org_slug, load_timestamp),
+            **load_storage_metadata_fields(storage_dir, org_id, load_timestamp),
         }
         if catalog_name:
             metadata["catalog_name"] = catalog_name
@@ -1668,6 +1665,82 @@ async def generate_preview(
                 status_code=400,
                 detail="Tipo de proceso inválido. Debe ser Weekly o Monthly.",
             )
+
+        if load_type == "catalog":
+            if metadata.get("preview_result") and metadata.get("preview_generated") and not force:
+                return JSONResponse(content=metadata["preview_result"])
+
+            if force or metadata.get("preview_error"):
+                metadata.pop("preview_error", None)
+                metadata.pop("preview_result", None)
+                metadata["preview_generated"] = False
+
+            column_mappings, column_toggles = ensure_organization_id_mapping(
+                metadata.get("column_mappings", {}),
+                metadata.get("column_toggles", {}),
+                org_id,
+            )
+            metadata["column_mappings"] = column_mappings
+            metadata["column_toggles"] = column_toggles
+            metadata["organization_id"] = org_id
+            file_analysis = metadata.get("file_analysis", {}) or {}
+            encoding = _resolve_preview_encoding(file_path, file_analysis)
+
+            from data_staging.services.catalog_preview_service import (
+                CatalogPreviewError,
+                run_catalog_wizard_preview,
+            )
+
+            try:
+                agg_stats, _agg_path = run_catalog_wizard_preview(
+                    file_path,
+                    metadata,
+                    organization_id=org_id,
+                    encoding=encoding,
+                    delimiter=file_analysis.get("delimiter", ","),
+                )
+            except CatalogPreviewError as exc:
+                metadata["preview_in_progress"] = False
+                metadata["preview_error"] = str(exc)
+                db.execute(
+                    text("""
+                        UPDATE staging_meta.batch_control
+                        SET metadata = :metadata, updated_at = CURRENT_TIMESTAMP
+                        WHERE batch_id = :batch_id
+                    """),
+                    {"metadata": json.dumps(metadata), "batch_id": batch_id},
+                )
+                db.commit()
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+            metadata["wizard_step"] = 3
+            metadata["preview_generated"] = True
+            metadata["preview_in_progress"] = False
+            metadata.pop("preview_error", None)
+
+            response_payload = _build_preview_response_payload(
+                batch_id=batch_id,
+                batch_source_name=getattr(batch, "source_name", "") or "",
+                metadata=metadata,
+                agg_stats=agg_stats,
+                org_id=org_id,
+                load_type="catalog",
+                process_type="Catalog",
+            )
+            metadata["preview_result"] = response_payload
+            db.execute(
+                text("""
+                    UPDATE staging_meta.batch_control
+                    SET metadata = :metadata,
+                        status = 'PENDING_PROCESS',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE batch_id = :batch_id
+                """),
+                {"metadata": json.dumps(metadata), "batch_id": batch_id},
+            )
+            db.commit()
+            logger.info("Catalog preview generated synchronously for batch %s", batch_id)
+            return JSONResponse(content=response_payload)
 
         metadata["preview_in_progress"] = True
         metadata.pop("preview_error", None)

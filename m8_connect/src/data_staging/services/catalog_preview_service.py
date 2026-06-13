@@ -21,7 +21,8 @@ from data_staging.services.catalog.catalog_transforms import (
     load_db_not_null_columns,
     load_db_system_managed_columns,
 )
-from data_staging.core.validators.data_validator import DataValidator, ValidationSeverity
+from data_staging.core.validators.data_validator import DataValidator
+from data_staging.utils.chunk_iterators import count_csv_rows, count_parquet_rows, parquet_column_names
 from data_staging.utils.json_helpers import to_json_safe
 from data_staging.utils.mapping_helpers import is_virtual_mapping_key
 
@@ -140,6 +141,14 @@ def _check_required_mapped(
     return issues
 
 
+def _selected_parquet_columns(path: Path, cols_to_read: List[str]) -> Optional[List[str]]:
+    if not cols_to_read:
+        return None
+    available = set(parquet_column_names(path))
+    selected = [c for c in cols_to_read if c in available]
+    return selected or None
+
+
 def _read_and_transform_catalog(
     file_path: str,
     target_table: str,
@@ -148,6 +157,7 @@ def _read_and_transform_catalog(
     encoding: str = "utf-8",
     delimiter: str = ",",
     organization_id: Optional[str] = None,
+    preview_row_limit: Optional[int] = None,
 ) -> Tuple[pd.DataFrame, int, Path, Dict[str, Any]]:
     """Read file, apply mappings and catalog transforms. No validation."""
     path = Path(file_path)
@@ -172,39 +182,52 @@ def _read_and_transform_catalog(
         and not is_virtual_mapping_key(fc)
     ]
 
+    selected_parquet = _selected_parquet_columns(path, cols_to_read) if is_parquet else None
+
     try:
         if is_parquet:
-            lf = pl.scan_parquet(path)
-            if cols_to_read:
-                available = lf.collect_schema().names()
-                selected = [c for c in cols_to_read if c in available]
-                if selected:
-                    lf = lf.select(selected)
-            df = lf.collect()
+            read_kwargs: Dict[str, Any] = {}
+            if selected_parquet:
+                read_kwargs["columns"] = selected_parquet
+            if preview_row_limit is not None:
+                read_kwargs["n_rows"] = preview_row_limit
+                total_rows = count_parquet_rows(path)
+            df = pl.read_parquet(path, **read_kwargs)
+            if preview_row_limit is None:
+                total_rows = df.height
         elif cols_to_read:
-            df = pl.read_csv(
-                path,
-                columns=cols_to_read,
-                separator=delimiter,
-                encoding=pl_encoding,
-                ignore_errors=True,
-                truncate_ragged_lines=True,
-            )
+            csv_kwargs: Dict[str, Any] = {
+                "columns": cols_to_read,
+                "separator": delimiter,
+                "encoding": pl_encoding,
+                "ignore_errors": True,
+                "truncate_ragged_lines": True,
+            }
+            if preview_row_limit is not None:
+                csv_kwargs["n_rows"] = preview_row_limit
+                total_rows = count_csv_rows(path, delimiter, effective_encoding)
+            df = pl.read_csv(path, **csv_kwargs)
+            if preview_row_limit is None:
+                total_rows = df.height
         else:
-            df = pl.read_csv(
-                path,
-                separator=delimiter,
-                encoding=pl_encoding,
-                ignore_errors=True,
-                truncate_ragged_lines=True,
-            )
+            csv_kwargs = {
+                "separator": delimiter,
+                "encoding": pl_encoding,
+                "ignore_errors": True,
+                "truncate_ragged_lines": True,
+            }
+            if preview_row_limit is not None:
+                csv_kwargs["n_rows"] = preview_row_limit
+                total_rows = count_csv_rows(path, delimiter, effective_encoding)
+            df = pl.read_csv(path, **csv_kwargs)
+            if preview_row_limit is None:
+                total_rows = df.height
     except Exception as e:
         raise CatalogPreviewError(
             f"Failed to read {'Parquet' if is_parquet else 'CSV'}: {e}"
         ) from e
 
     df = _apply_mappings(df, column_mappings, column_toggles)
-    total_rows = df.height
 
     pdf = _repair_string_columns(df.to_pandas())
     if organization_id:
@@ -236,6 +259,36 @@ def _build_preview_records(pdf: pd.DataFrame, preview_limit: int = 20) -> List[D
     return preview_df.where(pd.notnull(preview_df), None).to_dict(orient="records")
 
 
+def resolve_catalog_preview_target(metadata: Dict[str, Any]) -> str:
+    """Catalog registry key (catalog_name) for preview / validation."""
+    return str(metadata.get("catalog_name") or metadata.get("target_table") or "").strip()
+
+
+def run_catalog_wizard_preview(
+    file_path: str,
+    metadata: Dict[str, Any],
+    *,
+    organization_id: Optional[str] = None,
+    encoding: str = "utf-8",
+    delimiter: str = ",",
+    preview_limit: int = 20,
+) -> Tuple[Dict[str, Any], Path]:
+    """Wizard step 3: lightweight catalog preview (row sample + total count)."""
+    target_table = resolve_catalog_preview_target(metadata)
+    if not target_table:
+        raise CatalogPreviewError("Catálogo no definido en el batch (catalog_name / target_table)")
+    return process_catalog_preview_light(
+        file_path=file_path,
+        target_table=target_table,
+        column_mappings=metadata.get("column_mappings") or {},
+        column_toggles=metadata.get("column_toggles") or {},
+        encoding=encoding,
+        delimiter=delimiter,
+        organization_id=organization_id,
+        preview_limit=preview_limit,
+    )
+
+
 def process_catalog_preview_light(
     file_path: str,
     target_table: str,
@@ -248,6 +301,7 @@ def process_catalog_preview_light(
 ) -> Tuple[Dict[str, Any], Path]:
     """
     Step 3: mapping preview only (no table validation).
+    Reads a small row sample; total_rows comes from file metadata/count.
     Full validation runs in Step 4 via file_processor worker.
     """
     pdf, total_rows, path, _catalog = _read_and_transform_catalog(
@@ -258,6 +312,7 @@ def process_catalog_preview_light(
         encoding=encoding,
         delimiter=delimiter,
         organization_id=organization_id,
+        preview_row_limit=preview_limit,
     )
     preview_dicts = _build_preview_records(pdf, preview_limit)
     stats: Dict[str, Any] = {

@@ -284,8 +284,8 @@ def process_file_job(payload: Dict[str, Any]):
             if is_enabled:
                 target = mapping_config.get("target")
                 if target and target != "__new__":
-                    default_val = mapping_config.get("default_value", "")
                     if is_virtual_mapping_key(file_col):
+                        default_val = mapping_config.get("default_value", "")
                         column_mapping[target] = {
                             "source": None,
                             "default": default_val,
@@ -294,7 +294,6 @@ def process_file_job(payload: Dict[str, Any]):
                         selected_columns.append(file_col)
                         column_mapping[target] = {
                             "source": file_col,
-                            "default": default_val,
                         }
     # Si viene del API directo (mapeo por columna de destino)
     elif wizard_column_mappings:
@@ -586,7 +585,9 @@ def process_file_job(payload: Dict[str, Any]):
         source_file_columns = list(selected_columns) if selected_columns else []
         if not source_file_columns and file_path.suffix.lower() == ".parquet":
             try:
-                source_file_columns = list(pl.scan_parquet(file_path).collect_schema().names())
+                from data_staging.utils.chunk_iterators import parquet_column_names
+
+                source_file_columns = parquet_column_names(file_path)
             except Exception as header_err:
                 logger.warning(f"Could not read Parquet columns for rejected export: {header_err}")
         elif not source_file_columns and file_path.suffix.lower() == ".csv":
@@ -1404,20 +1405,28 @@ def validate_and_prepare_chunk(
     # 2. Aplicar column mapping si está presente
     if column_mapping:
         if is_already_mapped:
-            # Archivo pre-mapeado: inyectar solo columnas con default que falten
             for target_col, map_info in column_mapping.items():
                 if target_col not in chunk_df.columns:
+                    source_col = map_info.get("source")
                     default_val = map_info.get("default")
-                    chunk_df = chunk_df.with_columns([
-                        pl.lit(default_val if default_val is not None else None).alias(target_col)
-                    ])
+                    if (
+                        source_col is None
+                        and default_val is not None
+                        and str(default_val).strip() != ""
+                    ):
+                        chunk_df = chunk_df.with_columns([
+                            pl.lit(default_val).alias(target_col)
+                        ])
         else:
-            # Crear nuevas columnas según mapping desde columnas originales
             for target_col, map_info in column_mapping.items():
                 source_col = map_info.get("source")
                 default_val = map_info.get("default")
 
-                if default_val is not None and str(default_val).strip() != "":
+                if (
+                    source_col is None
+                    and default_val is not None
+                    and str(default_val).strip() != ""
+                ):
                     chunk_df = chunk_df.with_columns([
                         pl.lit(default_val).alias(target_col)
                     ])

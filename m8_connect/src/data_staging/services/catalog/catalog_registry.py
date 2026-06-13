@@ -11,7 +11,25 @@ from typing import Any, Dict, List, Optional
 
 from data_staging.services.catalog import catalog_store
 
-_CONFIG_ROOT = Path(__file__).resolve().parents[3] / "config" / "catalog"
+_CATALOG_CONFIG_MARKER = Path("config") / "catalog"
+
+
+def resolve_catalog_config_root() -> Path:
+    """
+    Locate project config/catalog/ (not src/config/catalog).
+    Walks up from this module until a catalog config directory with JSON files exists.
+    """
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        candidate = parent / _CATALOG_CONFIG_MARKER
+        if candidate.is_dir() and any(candidate.glob("*_config.json")):
+            return candidate
+    raise FileNotFoundError(
+        f"Could not locate config/catalog directory (searched upward from {here})"
+    )
+
+
+_CONFIG_ROOT = resolve_catalog_config_root()
 
 
 def list_catalog_tables() -> List[Dict[str, Any]]:
@@ -49,7 +67,7 @@ def load_validation_rules(table_name: str) -> Dict[str, Any]:
     if not entry:
         raise ValueError(f"Unknown catalog table: {table_name}")
     config_path = _CONFIG_ROOT / entry["config_file"]
-    if not config_path.exists():
+    if not config_path.is_file():
         raise FileNotFoundError(f"Catalog config not found: {config_path}")
     with open(config_path, "r", encoding="utf-8") as f:
         config = json.load(f)
@@ -62,6 +80,8 @@ def load_full_config(table_name: str) -> Dict[str, Any]:
     if not entry:
         raise ValueError(f"Unknown catalog table: {table_name}")
     config_path = _CONFIG_ROOT / entry["config_file"]
+    if not config_path.is_file():
+        raise FileNotFoundError(f"Catalog config not found: {config_path}")
     with open(config_path, "r", encoding="utf-8") as f:
         return json.load(f)
 

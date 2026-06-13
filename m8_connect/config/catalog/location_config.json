@@ -32,15 +32,6 @@
     {
       "name": "clean_whitespace",
       "columns": ["location_code", "location_name", "country", "city", "timezone", "location_type"]
-    },
-    {
-      "name": "handle_nulls",
-      "strategy": "fill",
-      "fill_values": {
-        "country": "Desconocido",
-        "timezone": "UTC",
-        "is_active": "true"
-      }
     }
   ],
   "target_table": "stage_location",
@@ -58,11 +49,6 @@
     "catalog_table": "location",
     "unique_keys": ["organization_id", "code"],
     "required_columns": ["organization_id", "location_code", "location_name"],
-    "optional_columns": ["country", "city", "timezone", "is_active", "location_type"],
-    "defaults": {
-      "country": "Desconocido",
-      "timezone": "UTC",
-      "is_active": true
-    }
+    "optional_columns": ["country", "city", "timezone", "is_active", "location_type"]
   }
 }
