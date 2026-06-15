@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { startProcessing, getProcessingProgress, promoteBatch, downloadRejectedRecords, deleteBatch } from '../../services/wizardService';
+import { startProcessing, getProcessingProgress, promoteBatch, downloadRejectedRecords, deleteBatch, computePromotionMaxStalePolls, isPromotionStillRunning } from '../../services/wizardService';
 import { uploadService } from '../../services/uploadService';
 import { useNavigate } from 'react-router-dom';
 import useSessionLoadGuard from '../../hooks/useSessionLoadGuard';
@@ -394,6 +394,8 @@ const Step4Process = ({
     const promotionEnqueueRef = useRef(null);
     const beginPromotionRef = useRef(null);
     const startPromotionPollingRef = useRef(null);
+    const promoteMaxStaleRef = useRef(MAX_STALE_POLLS);
+    const promoteTotalRef = useRef(0);
 
     const stopPolling = useCallback(() => {
         if (pollIntervalRef.current) {
@@ -425,6 +427,8 @@ const Step4Process = ({
                 const isQueued = progressData.job_status === 'PENDING';
                 if (isQueued) {
                     staleRef.current = 0;
+                } else if (isPromote && isPromotionStillRunning(progressData)) {
+                    staleRef.current = 0;
                 } else {
                     staleRef.current += 1;
                 }
@@ -450,7 +454,8 @@ const Step4Process = ({
             if (isProgressFailure(progressData)) {
                 return 'failed';
             }
-            if (staleRef.current >= MAX_STALE_POLLS) {
+            const maxStale = isPromote ? promoteMaxStaleRef.current : MAX_STALE_POLLS;
+            if (staleRef.current >= maxStale) {
                 return 'stale';
             }
             return null;
@@ -480,6 +485,22 @@ const Step4Process = ({
         [stopPromotePolling, onComplete]
     );
 
+    const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    const tryRecoverPromotedWithRetries = useCallback(
+        async (batchId, attempts = 3) => {
+            for (let i = 0; i < attempts; i += 1) {
+                const recovered = await tryRecoverPromotedState(batchId);
+                if (recovered) return true;
+                if (i < attempts - 1) {
+                    await delay(2000);
+                }
+            }
+            return false;
+        },
+        [tryRecoverPromotedState]
+    );
+
     const startPromotionPolling = useCallback(
         async (batchId) => {
             const pollPromote = async () => {
@@ -489,7 +510,22 @@ const Step4Process = ({
                     promotePollDelayRef.current = resolvePollIntervalMs(progressData, {
                         promoting: true,
                     });
-                    setPollWarning('');
+
+                    const maxStale = promoteMaxStaleRef.current;
+                    if (
+                        promoteStalePollCountRef.current >= Math.floor(maxStale * 0.8)
+                        && isPromotionStillRunning(progressData)
+                    ) {
+                        const total = promoteTotalRef.current || progressData.total_rows || 0;
+                        const chunks = total > 0 ? Math.ceil(total / 500_000) : '?';
+                        const estMin = Math.max(1, Math.round((maxStale * POLL_INTERVAL_PROMOTION_MS) / 60_000));
+                        setPollWarning(
+                            `UPSERT masivo en curso (${chunks} lote(s) estimados). `
+                            + `Puede tardar hasta ~${estMin} min; el worker sigue activo.`
+                        );
+                    } else {
+                        setPollWarning('');
+                    }
 
                     const result = evaluateProgress(progressData, { mode: 'promote' });
 
@@ -511,11 +547,26 @@ const Step4Process = ({
                         );
                         setPromoting(false);
                     } else if (result === 'stale') {
-                        const recovered = await tryRecoverPromotedState(batchId);
+                        const recovered = await tryRecoverPromotedWithRetries(batchId);
                         if (recovered) return;
+                        let latest = progressData;
+                        try {
+                            latest = await getProcessingProgress(batchId);
+                        } catch {
+                            // usar último snapshot conocido
+                        }
+                        if (isPromotionStillRunning(latest)) {
+                            promoteStalePollCountRef.current = Math.floor(maxStale * 0.5);
+                            setPollWarning(
+                                'La promoción sigue en curso en el worker. Reintentando consulta…'
+                            );
+                            return;
+                        }
                         stopPromotePolling();
                         setPromoteError(
-                            'La promoción no avanzó en varios minutos. Verifica que los workers estén activos (python run_workers.py).'
+                            latest?.error_message
+                            || latest?.current_operation
+                            || 'La promoción no avanzó en varios minutos. Verifica que los workers estén activos (python run_workers.py).'
                         );
                         setPromoting(false);
                     }
@@ -570,7 +621,7 @@ const Step4Process = ({
                 promotePollDelayRef.current
             );
         },
-        [evaluateProgress, stopPromotePolling, onComplete, tryRecoverPromotedState]
+        [evaluateProgress, stopPromotePolling, onComplete, tryRecoverPromotedState, tryRecoverPromotedWithRetries]
     );
     startPromotionPollingRef.current = startPromotionPolling;
 
@@ -589,6 +640,8 @@ const Step4Process = ({
             try {
                 setPromoting(true);
                 setPromoteError('');
+                promoteTotalRef.current = promoteTotal;
+                promoteMaxStaleRef.current = computePromotionMaxStalePolls(promoteTotal);
 
                 if (!skipEnqueue) {
                     if (promotionEnqueueRef.current !== batchId) {

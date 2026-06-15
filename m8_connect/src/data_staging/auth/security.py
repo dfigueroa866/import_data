@@ -66,9 +66,9 @@ def ensure_organization_id_mapping(
 
     mappings[ORG_MAPPING_KEY] = {
         "target": "organization_id",
-        "default_value": organization_id,
         "auto_mapped": False,
         "is_fixed": True,
+        "from_organization_id": True,
     }
     toggles[ORG_MAPPING_KEY] = True
     return mappings, toggles

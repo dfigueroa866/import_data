@@ -25,7 +25,7 @@ def test_golden_validation_passed_count(
     golden_expected,
 ):
     df = pl.read_parquet(golden_aggregated_parquet)
-    org_id = golden_expected["column_mappings"]["__fixed_organization_id__"]["default_value"]
+    org_id = golden_expected["organization_id"]
 
     records = validate_and_prepare_chunk(
         chunk_df=df,

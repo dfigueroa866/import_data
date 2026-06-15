@@ -10,6 +10,11 @@ export const MAX_TRANSIENT_POLL_ERRORS = 48;
 /** Polls sin cambio antes de considerar el job "stale". */
 export const MAX_STALE_POLLS = 400;
 
+/** Promoción: filas por lote UPSERT y tiempo observado por lote (~60s). */
+export const PROMOTION_CHUNK_ROWS = 500_000;
+export const PROMOTION_MS_PER_CHUNK = 60_000;
+export const PROMOTION_BASE_WAIT_MS = 120_000;
+
 export const isPromotionPhase = (progress) =>
     progress?.phase === 'promoting'
     || (progress?.phase === 'queued' && progress?.job_type === 'PROMOTE_BATCH');

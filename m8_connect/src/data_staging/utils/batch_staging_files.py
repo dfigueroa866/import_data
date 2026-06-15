@@ -6,7 +6,7 @@ import csv
 import io
 import json
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Sequence
 
 import pandas as pd
 import pyarrow as pa
@@ -104,6 +104,9 @@ def is_parquet_valid_file(path: Path) -> bool:
     return path.suffix.lower() == ".parquet"
 
 
+HISTORY_CAST_EXCLUDE_COLUMNS: FrozenSet[str] = frozenset({"period_start"})
+
+
 class ValidRecordsParquetWriter:
     """Incremental O(n) Parquet writer for valid records (PyArrow)."""
 
@@ -112,10 +115,14 @@ class ValidRecordsParquetWriter:
         path: Path,
         target_cols: Sequence[str],
         compression: Optional[str] = None,
+        target_column_types: Optional[Dict[str, str]] = None,
+        cast_exclude_columns: Optional[FrozenSet[str]] = None,
     ) -> None:
         self.path = path
         self.target_cols = list(target_cols)
         self.compression = compression or getattr(settings, "PARQUET_COMPRESSION", "snappy")
+        self.target_column_types = target_column_types or {}
+        self.cast_exclude_columns = cast_exclude_columns or frozenset()
         self._writer: Optional[pq.ParquetWriter] = None
         self.rows_written = 0
 
@@ -167,6 +174,18 @@ class ValidRecordsParquetWriter:
         if not cols:
             cols = [c for c in df.columns if not str(c).startswith("_")]
         export = df.select([c for c in cols if c in df.columns])
+        if self.target_column_types:
+            from data_staging.utils.parquet_typing import cast_dataframe_to_target_types
+
+            types_to_cast = {
+                k: v
+                for k, v in self.target_column_types.items()
+                if k not in self.cast_exclude_columns
+            }
+            if types_to_cast:
+                export = cast_dataframe_to_target_types(
+                    export, types_to_cast, skip_already_typed=True
+                )
         export = export.with_columns(
             pl.lit(batch_id).alias("_batch_id_"),
             pl.arange(start_row_number, start_row_number + export.height).alias(

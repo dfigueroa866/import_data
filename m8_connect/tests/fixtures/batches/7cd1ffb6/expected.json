@@ -3,6 +3,8 @@
   "raw_rows": 509,
   "aggregated_rows": 143,
   "process_type": "Monthly",
+  "organization_id": "34b43c21-7aac-4f1c-b6b4-df8d29f7b091",
+  "source_extension": "csv",
   "unique_keys": [
     "organization_id",
     "location_code",
@@ -65,7 +67,7 @@
       "target": "organization_id",
       "is_fixed": true,
       "auto_mapped": false,
-      "default_value": "34b43c21-7aac-4f1c-b6b4-df8d29f7b091"
+      "from_organization_id": true
     }
   }
 }

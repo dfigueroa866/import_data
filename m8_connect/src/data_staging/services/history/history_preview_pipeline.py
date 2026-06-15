@@ -1,4 +1,4 @@
-"""Step 3 history preview: validate original rows, then aggregate valid rows only."""
+"""History wizard pipeline: step 2 validates rows; step 3 groups validated parquet only."""
 
 from __future__ import annotations
 
@@ -6,15 +6,11 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-import polars as pl
 import psycopg2
 
 from data_staging.config import settings
-from data_staging.services.aggregation_service import process_aggregation
-from data_staging.services.history.history_validation import (
-    build_history_validation_context,
-    identity_wizard_mappings_for_columns,
-)
+from data_staging.services.history.history_aggregation import aggregate_validated_parquet
+from data_staging.services.history.history_validation import build_history_validation_context
 from data_staging.utils.batch_staging_files import (
     rejected_records_path,
     valid_records_path,
@@ -78,6 +74,7 @@ def validate_original_file(
     from data_staging.services.history.history_config import resolve_history_rules
 
     history_rules = resolve_history_rules(metadata)
+    validation_timer = PipelineTimer("validation")
     report_processing_progress(
         progress_conn,
         batch_id,
@@ -117,6 +114,15 @@ def validate_original_file(
         resolve_sku_id=ctx.resolve_sku_id,
         source_extension=ctx.source_extension,
         progress_conn=progress_conn,
+        pipeline_timer=validation_timer,
+    )
+
+    timing_snapshot = validation_timer.snapshot()
+    persist_timing_metadata(progress_conn, batch_id, timing_snapshot)
+    logger.info(
+        "Validation timing batch %s: %s",
+        batch_id,
+        timing_snapshot.get("validation_timing_ms"),
     )
 
     total_valid = int(stats.get("total_inserted") or 0)
@@ -242,27 +248,13 @@ def run_history_aggregation_from_validated(
 
     preview_timer = PipelineTimer("preview")
     progress_conn = open_progress_connection()
-    database_url = str(settings.DATABASE_URL)
-    conn = psycopg2.connect(database_url)
     try:
-        cursor = conn.cursor()
-        ctx = build_history_validation_context(
-            cursor,
-            metadata=meta,
-            file_path=validated_path,
-            file_name=file_name,
-            organization_id=organization_id,
-        )
-
         stats = meta.get("processing_stats") or {}
         valid_rows = int(valid_rows if valid_rows is not None else stats.get("total_inserted") or 0)
         rejected_rows = int(
             rejected_rows if rejected_rows is not None else stats.get("total_rejected") or 0
         )
         total_rows = int(total_rows if total_rows is not None else valid_rows + rejected_rows)
-
-        schema_cols = list(pl.read_parquet(validated_path, n_rows=0).columns)
-        agg_mappings, agg_toggles = identity_wizard_mappings_for_columns(schema_cols)
 
         agg_progress_start = 5.0
         agg_progress_end = 99.0
@@ -282,7 +274,7 @@ def run_history_aggregation_from_validated(
                 batch_id,
                 progress_percentage=pct,
                 current_operation=(
-                    f"Agregando filas {rows_done:,} de {agg_total_rows:,} "
+                    f"Agrupando filas {rows_done:,} de {agg_total_rows:,} "
                     f"(bloque {chunk_idx}/{_chunks_total})…"
                 ),
                 phase="preview_aggregating",
@@ -315,40 +307,17 @@ def run_history_aggregation_from_validated(
                 force=True,
             )
 
-        def _enrich_agg_df(agg_df: pl.DataFrame) -> pl.DataFrame:
-            from data_staging.services.history.history_config import resolve_history_rules
-            from data_staging.services.history.history_transforms import apply_history_transforms_polars
-
-            if agg_df.is_empty():
-                return agg_df
-            with preview_timer.phase("enrich_ms"):
-                return apply_history_transforms_polars(
-                    agg_df,
-                    organization_id=organization_id,
-                    process_type=process_type,
-                    source_extension=ctx.source_extension,
-                    sku_resolver=ctx.sku_resolver,
-                    resolve_sku_id=ctx.resolve_sku_id,
-                    aggregated_mode=True,
-                    history_rules=resolve_history_rules(meta),
-                )
-
         _report_agg_progress(0, valid_rows, 0, chunks_total)
 
         with preview_timer.phase("aggregation_ms"):
-            agg_stats, agg_path = process_aggregation(
-                file_path=str(validated_path),
-                column_mappings=agg_mappings,
-                column_toggles=agg_toggles,
+            agg_stats, agg_path = aggregate_validated_parquet(
+                validated_path=validated_path,
                 process_type=process_type,
-                encoding=encoding,
-                delimiter=delimiter,
-                total_rows_hint=valid_rows,
+                metadata=meta,
+                batch_id=batch_id,
+                valid_rows_hint=valid_rows,
                 progress_callback=_report_agg_progress,
                 reduce_progress_callback=_report_reduce_progress,
-                df_finalizer=_enrich_agg_df,
-                batch_id=batch_id,
-                metadata=meta,
             )
 
         report_processing_progress(
@@ -398,7 +367,6 @@ def run_history_aggregation_from_validated(
             progress_conn.close()
         except Exception:
             pass
-        conn.close()
 
 
 def process_history_preview_with_validation(

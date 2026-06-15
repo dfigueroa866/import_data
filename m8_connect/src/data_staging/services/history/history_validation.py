@@ -7,7 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from data_staging.utils.mapping_helpers import is_wizard_virtual_mapping
+from data_staging.utils.mapping_helpers import (
+    is_metadata_driven_fixed_key,
+    is_wizard_virtual_mapping,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +52,8 @@ def convert_wizard_column_mapping(
                 continue
             default_val = mapping_config.get("default_value", "")
             if is_wizard_virtual_mapping(file_col, mapping_config):
+                if is_metadata_driven_fixed_key(file_col):
+                    continue
                 column_mapping[target] = {"source": None, "default": default_val}
             else:
                 selected_columns.append(file_col)
@@ -70,8 +75,6 @@ def build_history_validation_context(
     target_column_types: Optional[Dict[str, str]] = None,
 ) -> HistoryValidationContext:
     """Load schema, FK sets and mapping context (same rules as process_file_job)."""
-    import polars as pl
-
     wizard_column_mappings = metadata.get("column_mappings") or metadata.get("column_mapping") or {}
     wizard_column_toggles = metadata.get("column_toggles") or {}
     column_mapping, selected_columns = convert_wizard_column_mapping(
@@ -112,37 +115,6 @@ def build_history_validation_context(
         logger.error("Failed to query schema info: %s", exc)
 
     foreign_keys_data: Dict[str, set] = {}
-    try:
-        cursor.execute(
-            """
-            SELECT
-                kcu.column_name,
-                ccu.table_schema AS foreign_table_schema,
-                ccu.table_name AS foreign_table_name,
-                ccu.column_name AS foreign_column_name
-            FROM information_schema.table_constraints AS tc
-            JOIN information_schema.key_column_usage AS kcu
-              ON tc.constraint_name = kcu.constraint_name
-             AND tc.table_schema = kcu.table_schema
-            JOIN information_schema.constraint_column_usage AS ccu
-              ON ccu.constraint_name = tc.constraint_name
-             AND ccu.table_schema = tc.table_schema
-            WHERE tc.constraint_type = 'FOREIGN KEY'
-              AND tc.table_name = %s
-              AND tc.table_schema = %s
-            """,
-            (target_table, target_schema),
-        )
-        for col_name, f_schema, f_table, f_col in cursor.fetchall():
-            try:
-                cursor.execute(
-                    f"SELECT DISTINCT {f_col} FROM {f_schema}.{f_table} WHERE {f_col} IS NOT NULL"
-                )
-                foreign_keys_data[col_name] = {str(r[0]).strip() for r in cursor.fetchall()}
-            except Exception as sub_exc:
-                logger.warning("Failed to load FK values for %s: %s", col_name, sub_exc)
-    except Exception as exc:
-        logger.error("Failed to query foreign keys: %s", exc)
 
     sku_resolver = None
     resolve_sku_id = False
@@ -167,9 +139,11 @@ def build_history_validation_context(
                 "SELECT DISTINCT code FROM public.skus WHERE organization_id = %s AND code IS NOT NULL",
                 (organization_id,),
             )
-            foreign_keys_data["__valid_skus__"] = {
+            sku_codes = {
                 str(r[0]).strip().lower() for r in cursor.fetchall()
             }
+            foreign_keys_data["__valid_skus__"] = sku_codes
+            foreign_keys_data["__valid_skus_list__"] = list(sku_codes)
         except Exception as exc:
             logger.error("Failed to load valid SKUs: %s", exc)
 
@@ -178,9 +152,11 @@ def build_history_validation_context(
                 "SELECT DISTINCT code FROM public.locations WHERE organization_id = %s AND code IS NOT NULL",
                 (organization_id,),
             )
-            foreign_keys_data["__valid_locations__"] = {
+            loc_codes = {
                 str(r[0]).strip().lower() for r in cursor.fetchall()
             }
+            foreign_keys_data["__valid_locations__"] = loc_codes
+            foreign_keys_data["__valid_locations_list__"] = list(loc_codes)
         except Exception as exc:
             logger.error("Failed to load valid Locations: %s", exc)
 

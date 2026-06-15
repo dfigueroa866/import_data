@@ -10,8 +10,11 @@ const AppHeader = () => {
         Centro de operaciones
       </span>
       {user && (
-        <span className="max-w-[220px] truncate text-sm text-slate-200">
-          {user.display_name || user.email}
+        <span
+          className="max-w-[220px] truncate text-sm text-slate-200"
+          title={user.organization_name || undefined}
+        >
+          {user.organization_name || user.display_name || user.email}
         </span>
       )}
     </header>

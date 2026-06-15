@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { uploadFileTemp, getCatalogTables } from '../../services/wizardService';
 import { useAuth } from '../../context/AuthContext';
 import useSessionLoadGuard from '../../hooks/useSessionLoadGuard';
-import { Button, LoadingSpinner, Alert, FormField, Select } from '../ui';
+import { Button, Alert, FormField, Select } from '../ui';
 import './Step1Upload.css';
 
 const formatCatalogDestination = (catalog) => {
@@ -277,16 +277,11 @@ const Step1CatalogUpload = ({ wizardData, updateWizardData, nextStep }) => {
                 <Button
                     variant="primary"
                     onClick={handleSubmit}
-                    disabled={!file || !selectedCatalog || uploading}
+                    loading={uploading}
+                    loadingLabel="Subiendo archivo…"
+                    disabled={!file || !selectedCatalog}
                 >
-                    {uploading ? (
-                        <>
-                            <LoadingSpinner size="sm" />
-                            Subiendo...
-                        </>
-                    ) : (
-                        'Siguiente: mapear columnas →'
-                    )}
+                    Siguiente: mapear columnas →
                 </Button>
             </div>
         </div>

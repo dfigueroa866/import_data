@@ -8,10 +8,10 @@ from typing import Any, Dict, List, Optional
 import polars as pl
 
 from data_staging.services.catalog.catalog_transforms import (
-    format_date_for_storage,
     is_empty_value,
 )
 from data_staging.services.history.history_config import (
+    HISTORY_LOGICAL_COLUMNS,
     HISTORY_SALES_CHANNEL_VALUE,
     HISTORY_SKU_MAPPING_TARGETS,
 )
@@ -23,6 +23,13 @@ def _is_empty_expr(col: str) -> pl.Expr:
     c = pl.col(col)
     return c.is_null() | (c.cast(pl.Utf8, strict=False).str.strip_chars() == "")
 
+
+def _sku_resolution_keys() -> List[str]:
+    keys = list(HISTORY_SKU_MAPPING_TARGETS)
+    for name in HISTORY_LOGICAL_COLUMNS:
+        if name not in keys:
+            keys.append(name)
+    return keys
 
 def _apply_sales_channel_polars(
     df: pl.DataFrame,
@@ -63,20 +70,6 @@ def _apply_sales_channel_polars(
         out = out.with_columns(pl.lit(default_val).alias("sales_channel"))
 
     return out
-
-
-def _normalize_period_start_value(value: Any) -> Optional[str]:
-    normalized = format_date_for_storage(value, date_only=True)
-    if normalized:
-        return normalized
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
-
-
-def _normalize_period_start_expr(col: str = "period_start") -> pl.Expr:
-    return pl.col(col).map_elements(_normalize_period_start_value, return_dtype=pl.Utf8).alias(col)
 
 
 class SkuCodeResolver:
@@ -194,23 +187,23 @@ class SkuCodeResolver:
 
         self.preload()
 
-        code_lookup: Optional[pl.Expr] = None
-        if "sku_code" in df.columns:
-            code_lookup = (
-                pl.when(_is_empty_expr("sku_code"))
+        candidates: List[pl.Expr] = []
+        for key in _sku_resolution_keys():
+            if key in ("sku_id", "sku") or key not in df.columns:
+                continue
+            candidates.append(
+                pl.when(_is_empty_expr(key))
                 .then(None)
-                .otherwise(pl.col("sku_code").map_batches(self._lookup_batch, return_dtype=pl.Utf8))
+                .otherwise(pl.col(key).map_batches(self._lookup_batch, return_dtype=pl.Utf8))
             )
 
-        sku_lookup: Optional[pl.Expr] = None
         if "sku" in df.columns:
-            sku_lookup = (
+            candidates.append(
                 pl.when(_is_empty_expr("sku"))
                 .then(None)
                 .otherwise(pl.col("sku").map_batches(self._lookup_batch, return_dtype=pl.Utf8))
             )
 
-        candidates = [e for e in (code_lookup, sku_lookup) if e is not None]
         if candidates:
             resolved = pl.coalesce(candidates)
         else:
@@ -238,16 +231,15 @@ def _resolve_sku_id_from_row(
     if not is_empty_value(record.get("sku_id")):
         return str(record["sku_id"])
 
-    for key in HISTORY_SKU_MAPPING_TARGETS:
+    for key in _sku_resolution_keys():
         if key in ("sku_id", "sku"):
             continue
         val = record.get(key)
         if is_empty_value(val) or not sku_resolver:
             continue
-        if key == "sku_code":
-            resolved = sku_resolver.resolve(val)
-            if resolved:
-                return resolved
+        resolved = sku_resolver.resolve(val)
+        if resolved:
+            return resolved
 
     if sku_resolver and not is_empty_value(record.get("sku")):
         resolved = sku_resolver.resolve(record.get("sku"))
@@ -267,6 +259,7 @@ def apply_history_transforms_polars(
     resolve_sku_id: bool = False,
     aggregated_mode: bool = False,
     history_rules: Optional[Dict[str, Any]] = None,
+    fast_validation: bool = False,
 ) -> pl.DataFrame:
     """
     Enriquece filas mapeadas con expresiones Polars (sin bucle pandas).
@@ -283,8 +276,6 @@ def apply_history_transforms_polars(
     out = df
 
     if aggregated_mode:
-        if "period_start" in out.columns:
-            out = out.with_columns(_normalize_period_start_expr("period_start"))
         if resolve_sku_id and sku_resolver:
             out = out.with_columns(
                 sku_resolver.resolve_sku_id_series(out, resolve_sku_id=resolve_sku_id).alias(
@@ -306,53 +297,28 @@ def apply_history_transforms_polars(
         else:
             out = out.with_columns(pl.col("sku_code").alias("sku"))
 
-    if "period_start" in out.columns:
-        out = out.with_columns(_normalize_period_start_expr("period_start"))
+    # period_start → Date en validate_chunk_vectorized (evita map_elements fila a fila)
 
     if organization_id:
-        if "organization_id" in out.columns:
-            out = out.with_columns(
-                pl.when(_is_empty_expr("organization_id"))
-                .then(pl.lit(str(organization_id)))
-                .otherwise(pl.col("organization_id").cast(pl.Utf8))
-                .alias("organization_id")
-            )
-        else:
-            out = out.with_columns(pl.lit(str(organization_id)).alias("organization_id"))
+        out = out.with_columns(pl.lit(str(organization_id)).alias("organization_id"))
 
     if process_type:
         from data_staging.services.history.history_config import granularity_for_process_type
 
-        try:
-            gran = granularity_for_process_type(process_type)
-            if "granularity" in out.columns:
-                out = out.with_columns(
-                    pl.when(_is_empty_expr("granularity"))
-                    .then(pl.lit(gran))
-                    .otherwise(pl.col("granularity").cast(pl.Utf8, strict=False))
-                    .alias("granularity")
-                )
-            else:
-                out = out.with_columns(pl.lit(gran).alias("granularity"))
-        except ValueError:
-            pass
+        gran = granularity_for_process_type(process_type)
+        out = out.with_columns(pl.lit(gran).alias("granularity"))
 
     if source_extension:
         src = str(source_extension).strip().lower()
         if src == "parquet":
             src = "csv"
-        if "source" in out.columns:
-            out = out.with_columns(
-                pl.when(_is_empty_expr("source"))
-                .then(pl.lit(src))
-                .otherwise(pl.col("source").cast(pl.Utf8, strict=False))
-                .alias("source")
-            )
-        else:
+        if src and src != "unknown":
             out = out.with_columns(pl.lit(src).alias("source"))
 
     out = _apply_sales_channel_polars(
-        out, validate=True, sales_channel_default=sales_channel_default
+        out,
+        validate=not fast_validation,
+        sales_channel_default=sales_channel_default,
     )
 
     if resolve_sku_id and sku_resolver:

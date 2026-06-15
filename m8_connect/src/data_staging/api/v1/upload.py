@@ -31,6 +31,7 @@ from data_staging.utils.encoding_utils import (
     normalize_encoding_name,
 )
 from data_staging.utils.json_helpers import to_json_safe
+from data_staging.utils.parquet_typing import fetch_target_column_types_sql
 from data_staging.auth.security import (
     TokenUser,
     get_current_user,
@@ -50,8 +51,10 @@ from data_staging.utils.batch_control import (
 
 logger = logging.getLogger(__name__)
 
-# Sin actualización de progreso y sin job activo en cola → preview huérfano (p. ej. reinicio del worker).
+# Sin actualización de progreso y sin job activo en cola → preview/validación huérfana (p. ej. reinicio del worker).
 PREVIEW_STALE_SECONDS = 600
+VALIDATION_STALE_SECONDS = 600
+PROMOTION_STALE_SECONDS = 600
 
 
 def _validation_job_active(db: Session, batch_id: str) -> bool:
@@ -59,6 +62,20 @@ def _validation_job_active(db: Session, batch_id: str) -> bool:
         text("""
             SELECT 1 FROM staging_meta.job_queue
             WHERE job_type = 'VALIDATE_BATCH'
+              AND payload->>'batch_id' = :batch_id
+              AND status IN ('PENDING', 'PROCESSING')
+            LIMIT 1
+        """),
+        {"batch_id": batch_id},
+    ).fetchone()
+    return row is not None
+
+
+def _promotion_job_active(db: Session, batch_id: str) -> bool:
+    row = db.execute(
+        text("""
+            SELECT 1 FROM staging_meta.job_queue
+            WHERE job_type = 'PROMOTE_BATCH'
               AND payload->>'batch_id' = :batch_id
               AND status IN ('PENDING', 'PROCESSING')
             LIMIT 1
@@ -102,6 +119,61 @@ def _preview_progress_updated_at(metadata: Dict[str, Any]) -> Optional[datetime]
     return _parse_iso_utc_timestamp(progress.get("updated_at"))
 
 
+def _is_orphan_promotion(
+    metadata: Dict[str, Any],
+    batch_id: str,
+    *,
+    batch_status: Optional[str] = None,
+    db: Optional[Session] = None,
+) -> bool:
+    """True when promotion progress is stuck without an active PROMOTE_BATCH job."""
+    if batch_status not in ("COMPLETED", "PARTIALLY_PROMOTED", None):
+        return False
+    progress = metadata.get("processing_progress") or {}
+    phase = progress.get("phase")
+    if phase not in ("promoting", "staging", "queued"):
+        return False
+    if db is not None and _promotion_job_active(db, batch_id):
+        return False
+    updated = _preview_progress_updated_at(metadata)
+    if updated is None:
+        return True
+    age_seconds = (datetime.now(timezone.utc) - updated).total_seconds()
+    return age_seconds >= PROMOTION_STALE_SECONDS
+
+
+def _recover_orphan_promotion(
+    db: Session,
+    batch_id: str,
+    metadata: Dict[str, Any],
+    *,
+    reason: str,
+) -> Dict[str, Any]:
+    recovered = dict(metadata)
+    progress = dict(recovered.get("processing_progress") or {})
+    progress["phase"] = "promotion_failed"
+    progress["current_operation"] = reason
+    recovered["processing_progress"] = progress
+    recovered["promotion_error"] = reason
+    db.execute(
+        text("""
+            UPDATE staging_meta.batch_control
+            SET metadata = :metadata,
+                error_message = :error_message,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE batch_id = :batch_id
+        """),
+        {
+            "metadata": json.dumps(recovered),
+            "error_message": reason,
+            "batch_id": batch_id,
+        },
+    )
+    db.commit()
+    logger.warning("Recovered orphan promotion for batch %s", batch_id)
+    return recovered
+
+
 def _is_orphan_preview(metadata: Dict[str, Any], batch_id: str, db: Optional[Session] = None) -> bool:
     """True when DB says preview is running but no PREVIEW_BATCH job is active."""
     if not metadata.get("preview_in_progress"):
@@ -135,6 +207,46 @@ def _recover_orphan_preview(
     )
     db.commit()
     logger.warning("Recovered orphan preview for batch %s", batch_id)
+    return recovered
+
+
+def _is_orphan_validation(
+    metadata: Dict[str, Any], batch_id: str, db: Optional[Session] = None
+) -> bool:
+    """True when DB says validation is running but no VALIDATE_BATCH job is active."""
+    if not metadata.get("validation_in_progress"):
+        return False
+    if metadata.get("validation_complete"):
+        return False
+    if db is not None and _validation_job_active(db, batch_id):
+        return False
+    updated = _preview_progress_updated_at(metadata)
+    if updated is None:
+        return True
+    age_seconds = (datetime.now(timezone.utc) - updated).total_seconds()
+    return age_seconds >= VALIDATION_STALE_SECONDS
+
+
+def _recover_orphan_validation(
+    db: Session,
+    batch_id: str,
+    metadata: Dict[str, Any],
+    *,
+    reason: str,
+) -> Dict[str, Any]:
+    recovered = dict(metadata)
+    recovered["validation_in_progress"] = False
+    recovered["validation_error"] = reason
+    db.execute(
+        text("""
+            UPDATE staging_meta.batch_control
+            SET metadata = :metadata, updated_at = CURRENT_TIMESTAMP
+            WHERE batch_id = :batch_id
+        """),
+        {"metadata": json.dumps(recovered), "batch_id": batch_id},
+    )
+    db.commit()
+    logger.warning("Recovered orphan validation for batch %s", batch_id)
     return recovered
 
 
@@ -519,8 +631,9 @@ class FileUploadService:
         batch_id: str,
         *,
         storage_dir: Optional[Path] = None,
+        target_column_types: Optional[Dict[str, str]] = None,
     ) -> Tuple[Path, Optional[Dict[str, Any]]]:
-        """Save upload to disk. CSV uploads are converted to .raw.parquet and the CSV is removed."""
+        """Save upload to disk. CSV uploads are converted to typed .raw.parquet."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         file_ext = Path(file.filename).suffix
         safe_filename = f"{batch_id}_{timestamp}_{file.filename}"
@@ -548,6 +661,7 @@ class FileUploadService:
                     raw_parquet = csv_to_raw_parquet(
                         file_path,
                         delimiter=file_analysis.get("delimiter", ","),
+                        target_column_types=target_column_types,
                     )
                     file_path.unlink(missing_ok=True)
                     logger.info(
@@ -1408,9 +1522,23 @@ async def upload_file_temp(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        # 3. Save file (CSV → .raw.parquet, source CSV removed)
+        target_column_types: Dict[str, str] = {}
+        if target_schema and target_table:
+            try:
+                target_column_types = fetch_target_column_types_sql(
+                    db, target_schema, target_table
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not load target column types for typed Parquet: %s", exc
+                )
+
+        # 3. Save file (CSV → typed .raw.parquet, source CSV removed)
         file_path, csv_analysis = await upload_service.save_file(
-            file, batch_id, storage_dir=storage_dir
+            file,
+            batch_id,
+            storage_dir=storage_dir,
+            target_column_types=target_column_types or None,
         )
         file_size = file_path.stat().st_size
         
@@ -1447,6 +1575,8 @@ async def upload_file_temp(
             metadata["history_config"] = get_history_table_meta()
             metadata["unique_keys"] = get_history_table_meta().get("unique_keys", [])
             metadata["source_extension"] = source_from_filename(file.filename or "")
+        if target_column_types:
+            metadata["target_column_types"] = target_column_types
 
         db.execute(text("""
             INSERT INTO staging_meta.batch_control 
@@ -1700,6 +1830,17 @@ async def generate_preview(
 
         metadata = normalize_metadata(batch.metadata)
         org_id = current_user.organization_id
+
+        if _is_orphan_validation(metadata, batch_id, db):
+            metadata = _recover_orphan_validation(
+                db,
+                batch_id,
+                metadata,
+                reason=(
+                    "La validación se interrumpió (servidor o worker detenido). "
+                    "Reinicia los workers y vuelve a subir el archivo."
+                ),
+            )
 
         if _is_orphan_preview(metadata, batch_id, db):
             metadata = _recover_orphan_preview(
@@ -2075,6 +2216,17 @@ async def get_processing_progress(
         
         metadata = normalize_metadata(batch.metadata)
 
+        if _is_orphan_validation(metadata, batch_id, db):
+            metadata = _recover_orphan_validation(
+                db,
+                batch_id,
+                metadata,
+                reason=(
+                    "La validación se interrumpió (servidor o worker detenido). "
+                    "Reinicia los workers y vuelve a subir el archivo."
+                ),
+            )
+
         if _is_orphan_preview(metadata, batch_id, db):
             metadata = _recover_orphan_preview(
                 db,
@@ -2083,6 +2235,17 @@ async def get_processing_progress(
                 reason=(
                     "La vista previa se interrumpió (servidor reiniciado o proceso detenido). "
                     "Pulsa Reintentar."
+                ),
+            )
+
+        if _is_orphan_promotion(metadata, batch_id, batch_status=batch.status, db=db):
+            metadata = _recover_orphan_promotion(
+                db,
+                batch_id,
+                metadata,
+                reason=(
+                    "La promoción se interrumpió (servidor o worker detenido). "
+                    "Reinicia los workers (python run_workers.py) y pulsa Reintentar."
                 ),
             )
 
@@ -2350,6 +2513,9 @@ async def get_processing_progress(
             "progress_updated_at": live_progress.get("updated_at"),
             "validation_complete": bool(metadata.get("validation_complete")),
             "validation_in_progress": validation_in_progress,
+            "validation_job_active": _validation_job_active(db, batch_id),
+            "promotion_job_active": _promotion_job_active(db, batch_id),
+            "promotion_timing_ms": metadata.get("promotion_timing_ms"),
         }
         
     except HTTPException:

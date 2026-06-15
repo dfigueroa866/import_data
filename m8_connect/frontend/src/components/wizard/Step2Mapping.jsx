@@ -373,6 +373,7 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                 try {
                     await waitForMappingValidation(wizardData.batchId, {
                         onProgress: (p) => setValidationProgress(p),
+                        estimatedRows: wizardData.estimatedRows,
                     });
                     updateWizardData({ validationComplete: true });
                 } finally {
@@ -609,16 +610,11 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                 <Button
                     variant="primary"
                     onClick={handleSubmit}
-                    disabled={saving || revalidating || getMappedCount() === 0}
+                    loading={saving}
+                    loadingLabel="Guardando mapeo…"
+                    disabled={revalidating || getMappedCount() === 0}
                 >
-                    {saving ? (
-                        <>
-                            <LoadingSpinner size="sm" />
-                            Guardando mapeo…
-                        </>
-                    ) : (
-                        'Continuar a vista previa →'
-                    )}
+                    Continuar a vista previa →
                 </Button>
             </div>
         </div>

@@ -25,9 +25,10 @@ def staging_select_expr(
     data_type: Optional[str],
     *,
     udt_name: Optional[str] = None,
+    source_alias: str = "s",
 ) -> str:
     """Cast a text staging column to the target PostgreSQL column type."""
-    raw = f's."{column}"'
+    raw = f'{source_alias}."{column}"'
     base = f"NULLIF({raw}, '')"
     dt = (data_type or "text").lower().strip()
 
@@ -126,14 +127,9 @@ def copy_frame_to_staging(
     """COPY pandas chunk rows into the temp staging table (vectorized via to_csv)."""
     if frame.empty:
         return 0
-    sub = frame[list(data_cols)].copy()
-    for col in sub.select_dtypes(include="object").columns:
-        s = sub[col].replace("", None)
-        mask = s.notna()
-        s = s.where(~mask, s[mask].str.replace("\t", " ", regex=False)
-                                   .str.replace("\n", " ", regex=False)
-                                   .str.replace("\r", " ", regex=False))
-        sub[col] = s
+    from data_staging.utils.parquet_typing import sanitize_frame_for_copy
+
+    sub = sanitize_frame_for_copy(frame[list(data_cols)].copy())
     buffer = io.StringIO()
     sub.to_csv(buffer, sep="\t", index=False, header=False, na_rep="\\N")
     return _write_copy_buffer(cursor, buffer, staging_cols, table=table)
@@ -261,6 +257,147 @@ def build_upsert_from_staging_sql(
         RETURNING 1
     )
     SELECT COUNT(*)::int, COUNT(*)::int, 0::int FROM inserted
+    """
+
+
+def build_upsert_from_staging_batch_sql(
+    target_schema: str,
+    target_table: str,
+    insert_cols: List[str],
+    staging_cols: Sequence[str],
+    conflict_clause: str,
+    *,
+    batch_limit: int,
+    include_imported_at: bool,
+    db_columns: Optional[Mapping[str, str]] = None,
+    db_udt_names: Optional[Mapping[str, str]] = None,
+    staging_table: str = _STAGING_TABLE_PERSISTENT,
+    order_by_cols: Optional[List[str]] = None,
+    count_split: bool = True,
+) -> str:
+    """UPSERT a limited batch from persistent staging, then delete processed rows.
+
+    Uses ctid to select and remove rows so the staging table shrinks incrementally.
+    """
+    if batch_limit <= 0:
+        raise ValueError("batch_limit must be positive")
+
+    db_columns = db_columns or {}
+    db_udt_names = db_udt_names or {}
+    order_cols = order_by_cols or parse_conflict_cols(conflict_clause)
+    order_clause = ""
+    if order_cols:
+        order_clause = "ORDER BY " + ", ".join(f's."{c}"' for c in order_cols)
+
+    staging_col_list = ", ".join(f's."{c}"' for c in staging_cols)
+    select_parts = [
+        staging_select_expr(
+            col,
+            db_columns.get(col),
+            udt_name=db_udt_names.get(col),
+            source_alias="b",
+        )
+        for col in staging_cols
+    ]
+    if include_imported_at:
+        select_parts.append("NOW()")
+
+    insert_cols_str = ", ".join(insert_cols)
+    select_str = ", ".join(select_parts)
+
+    insert_body = f"""
+        INSERT INTO {target_schema}.{target_table} ({insert_cols_str})
+        SELECT {select_str}
+        FROM batch b
+        {conflict_clause}
+    """.strip()
+
+    if not count_split:
+        return f"""
+        WITH batch AS (
+            SELECT ctid, {staging_col_list}
+            FROM {staging_table} s
+            {order_clause}
+            LIMIT {int(batch_limit)}
+        ),
+        upserted AS (
+            {insert_body}
+        ),
+        deleted AS (
+            DELETE FROM {staging_table} d
+            USING batch b
+            WHERE d.ctid = b.ctid
+        )
+        SELECT
+            (SELECT COUNT(*)::int FROM batch),
+            (SELECT COUNT(*)::int FROM batch),
+            0::int
+        """
+
+    upper = (conflict_clause or "").upper()
+    if "DO UPDATE" in upper:
+        return f"""
+        WITH batch AS (
+            SELECT ctid, {staging_col_list}
+            FROM {staging_table} s
+            {order_clause}
+            LIMIT {int(batch_limit)}
+        ),
+        upserted AS (
+            {insert_body}
+            RETURNING (xmax = 0) AS is_insert
+        ),
+        deleted AS (
+            DELETE FROM {staging_table} d
+            USING batch b
+            WHERE d.ctid = b.ctid
+        )
+        SELECT
+            COUNT(*)::int,
+            COUNT(*) FILTER (WHERE is_insert)::int,
+            COUNT(*) FILTER (WHERE NOT is_insert)::int
+        FROM upserted
+        """
+    if conflict_clause and "DO NOTHING" in upper:
+        return f"""
+        WITH batch AS (
+            SELECT ctid, {staging_col_list}
+            FROM {staging_table} s
+            {order_clause}
+            LIMIT {int(batch_limit)}
+        ),
+        upserted AS (
+            {insert_body}
+            RETURNING true AS is_insert
+        ),
+        deleted AS (
+            DELETE FROM {staging_table} d
+            USING batch b
+            WHERE d.ctid = b.ctid
+        )
+        SELECT
+            COUNT(*)::int,
+            COUNT(*)::int,
+            0::int
+        FROM upserted
+        """
+    return f"""
+    WITH batch AS (
+        SELECT ctid, {staging_col_list}
+        FROM {staging_table} s
+        {order_clause}
+        LIMIT {int(batch_limit)}
+    ),
+    upserted AS (
+        {insert_body}
+        RETURNING 1
+    ),
+    deleted AS (
+        DELETE FROM {staging_table} d
+        USING batch b
+        WHERE d.ctid = b.ctid
+    )
+    SELECT COUNT(*)::int, COUNT(*)::int, 0::int FROM upserted
     """
 
 

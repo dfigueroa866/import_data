@@ -7,11 +7,25 @@ from typing import Any, Dict, Optional
 import polars as pl
 
 
+METADATA_DRIVEN_FIXED_KEYS = frozenset(
+    {
+        "__fixed_organization_id__",
+        "__fixed_granularity__",
+        "__fixed_source__",
+    },
+)
+
+
 def is_virtual_mapping_key(file_col: str) -> bool:
     """True when the mapping key is not a real CSV column (custom/fixed values)."""
     if not file_col:
         return False
     return file_col.startswith("__fixed_") or file_col.startswith("__manual__")
+
+
+def is_metadata_driven_fixed_key(file_col: str) -> bool:
+    """Fixed columns from login / batch metadata, not mapping default_value."""
+    return file_col in METADATA_DRIVEN_FIXED_KEYS
 
 
 def is_wizard_virtual_mapping(
@@ -80,3 +94,67 @@ def is_chunk_already_mapped(
             return False
 
     return any(target in columns for target in column_mapping)
+
+
+def apply_chunk_column_mapping(
+    chunk_df: pl.DataFrame,
+    *,
+    column_mapping: Optional[Dict[str, Dict[str, Any]]] = None,
+    selected_columns: Optional[list] = None,
+) -> pl.DataFrame:
+    """Filtra selected_columns y aplica column_mapping al chunk."""
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    if chunk_df.is_empty():
+        return chunk_df
+
+    is_already_mapped = is_chunk_already_mapped(chunk_df, column_mapping)
+
+    if selected_columns and not is_already_mapped:
+        available_cols = [c for c in selected_columns if c in chunk_df.columns]
+        if available_cols:
+            chunk_df = chunk_df.select(available_cols)
+        else:
+            logger.warning("None of selected columns %s found in dataframe", selected_columns)
+
+    if not column_mapping:
+        return chunk_df
+
+    if is_already_mapped:
+        for target_col, map_info in column_mapping.items():
+            if target_col not in chunk_df.columns:
+                default_val = map_info.get("default")
+                if (
+                    map_info.get("source") is None
+                    and default_val is not None
+                    and str(default_val).strip() != ""
+                ):
+                    chunk_df = chunk_df.with_columns(pl.lit(default_val).alias(target_col))
+    else:
+        for target_col, map_info in column_mapping.items():
+            source_col = map_info.get("source")
+            default_val = map_info.get("default")
+
+            if (
+                source_col is None
+                and default_val is not None
+                and str(default_val).strip() != ""
+            ):
+                chunk_df = chunk_df.with_columns(pl.lit(default_val).alias(target_col))
+            elif source_col and source_col in chunk_df.columns:
+                chunk_df = chunk_df.rename({source_col: target_col})
+            elif target_col in chunk_df.columns:
+                pass
+            else:
+                chunk_df = chunk_df.with_columns(pl.lit(None).alias(target_col))
+
+    target_cols = list(column_mapping.keys())
+    available_targets = [c for c in target_cols if c in chunk_df.columns]
+    if available_targets:
+        chunk_df = chunk_df.select(available_targets)
+    else:
+        logger.error("No target columns found after mapping")
+
+    return chunk_df

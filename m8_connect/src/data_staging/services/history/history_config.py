@@ -8,6 +8,9 @@ HISTORY_TARGET_SCHEMA = "public"
 HISTORY_TARGET_TABLE = "sales_history"
 HISTORY_SOURCE_NAME = "sales_history"
 
+# Columnas actualizadas en ON CONFLICT DO UPDATE (promoción fase 2)
+HISTORY_UPSERT_UPDATE_COLUMNS = ["quantity", "pieces", "imported_at"]
+
 # Clave natural en BD (índice único) — UPSERT en promoción
 HISTORY_UNIQUE_KEYS = [
     "organization_id",

@@ -1,6 +1,8 @@
 
 import logging
 import json
+import threading
+import time
 import psycopg2
 import psycopg2.extras
 import itertools
@@ -18,6 +20,7 @@ from data_staging.utils.batch_staging_files import (
 from data_staging.utils.pipeline_timing import PipelineTimer, persist_timing_metadata
 from data_staging.utils.promotion_bulk import (
     _STAGING_TABLE_PERSISTENT,
+    build_upsert_from_staging_batch_sql,
     build_upsert_from_staging_sql,
     build_values_upsert_sql,
     copy_arrow_batch_to_staging,
@@ -40,6 +43,14 @@ PROMOTION_METADATA_EVERY_CHUNKS = int(
 )
 
 
+def resolve_upsert_batch_size(promote_total: int) -> int:
+    """Batch size for phase-2 UPSERT from persistent staging."""
+    override = int(getattr(settings, "PROMOTION_UPSERT_BATCH_SIZE", 0) or 0)
+    if override > 0:
+        return override
+    return resolve_promotion_tuning(promote_total)["batch_size"]
+
+
 def resolve_promotion_tuning(promote_total: int) -> Dict[str, Any]:
     """Adaptive batch size / work_mem by load scale (5M today, 20M+ target)."""
     if promote_total > 15_000_000:
@@ -51,12 +62,12 @@ def resolve_promotion_tuning(promote_total: int) -> Dict[str, Any]:
     if promote_total > 5_000_000:
         return {
             "batch_size": min(500_000, int(getattr(settings, "PROMOTION_BATCH_SIZE_MEDIUM", 500_000))),
-            "work_mem": getattr(settings, "PROMOTION_WORK_MEM_MEDIUM", "1GB"),
+            "work_mem": getattr(settings, "PROMOTION_WORK_MEM_MEDIUM", "2GB"),
             "progress_every": 2,
         }
     return {
         "batch_size": PROMOTION_BATCH_SIZE,
-        "work_mem": getattr(settings, "PROMOTION_WORK_MEM", "512MB"),
+        "work_mem": getattr(settings, "PROMOTION_WORK_MEM", "2GB"),
         "progress_every": PROMOTION_PROGRESS_EVERY_CHUNKS,
     }
 
@@ -211,12 +222,23 @@ def _catalog_upsert_clause(
     if load_type not in ("catalog", "history") or not conflict_cols:
         return ""
 
-    normalized = [c.strip('"') for c in insert_cols if c.strip('"') != "imported_at"]
-    conflict_set = {c.lower() for c in conflict_cols}
-    update_cols = [
-        c for c in normalized if c.lower() not in conflict_set and c.lower() != "id"
-    ]
     conflict_str = ", ".join(f'"{c}"' for c in conflict_cols)
+    insert_lower = {c.strip('"').lower(): c.strip('"') for c in insert_cols}
+
+    if load_type == "history":
+        from data_staging.services.history.history_config import HISTORY_UPSERT_UPDATE_COLUMNS
+
+        update_cols = [
+            insert_lower[key.lower()]
+            for key in HISTORY_UPSERT_UPDATE_COLUMNS
+            if key.lower() in insert_lower
+        ]
+    else:
+        normalized = [c.strip('"') for c in insert_cols if c.strip('"') != "imported_at"]
+        conflict_set = {c.lower() for c in conflict_cols}
+        update_cols = [
+            c for c in normalized if c.lower() not in conflict_set and c.lower() != "id"
+        ]
 
     if not update_cols:
         return f"ON CONFLICT ({conflict_str}) DO NOTHING"
@@ -466,6 +488,228 @@ def _fetch_upsert_counts(cursor) -> Tuple[int, int, int]:
     return affected, inserted, updated
 
 
+def _staging_row_count(cursor) -> int:
+    cursor.execute(f"SELECT COUNT(*)::bigint FROM {_STAGING_TABLE_PERSISTENT}")
+    row = cursor.fetchone()
+    return int(row[0] or 0) if row else 0
+
+
+class _PromotionHeartbeat:
+    """Refresh progress updated_at while a long UPSERT batch runs."""
+
+    def __init__(
+        self,
+        conn,
+        batch_id: str,
+        *,
+        promote_total: int,
+        rows_processed: int,
+        chunks_staged: int,
+        chunks_total: int,
+        current_operation: str,
+        interval_sec: float,
+    ) -> None:
+        self._conn = conn
+        self._batch_id = batch_id
+        self._promote_total = promote_total
+        self._rows_processed = rows_processed
+        self._chunks_staged = chunks_staged
+        self._chunks_total = chunks_total
+        self._current_operation = current_operation
+        self._interval_sec = max(5.0, float(interval_sec))
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def __enter__(self):
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *args):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+        return False
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval_sec):
+            try:
+                pct = min(
+                    99.0,
+                    50.0 + (self._rows_processed / max(self._promote_total, 1)) * 49.0,
+                )
+                report_processing_progress(
+                    self._conn,
+                    self._batch_id,
+                    progress_percentage=pct,
+                    current_operation=self._current_operation,
+                    phase="promoting",
+                    total_rows=self._promote_total,
+                    rows_processed=self._rows_processed,
+                    loaded_rows=self._rows_processed,
+                    rejected_rows=0,
+                    chunks_processed=self._chunks_staged,
+                    chunks_total=self._chunks_total,
+                    force=True,
+                )
+            except Exception as exc:
+                logger.debug("Promotion heartbeat skipped: %s", exc)
+
+
+def _execute_batched_staging_upsert(
+    conn,
+    cursor,
+    batch_id: str,
+    metadata: Dict[str, Any],
+    *,
+    target_schema: str,
+    target_table: str,
+    insert_cols: List[str],
+    staging_cols: List[str],
+    conflict_clause: str,
+    include_imported_at: bool,
+    db_columns: Dict[str, str],
+    db_udt_names: Optional[Dict[str, str]],
+    rows_staged: int,
+    promote_total: int,
+    chunks_staged: int,
+    chunks_total: int,
+    upsert_batch_size: int,
+    timer: Optional[PipelineTimer] = None,
+) -> Tuple[int, int, int]:
+    """Phase 2: UPSERT from persistent staging in batches with live progress."""
+    order_by_cols = parse_conflict_cols(conflict_clause)
+    use_count_split = _uses_upsert_update(conflict_clause)
+    heartbeat_sec = float(getattr(settings, "PROMOTION_HEARTBEAT_SEC", 30.0))
+
+    upsert_batches_total = max(1, (rows_staged + upsert_batch_size - 1) // upsert_batch_size)
+    total_inserted = 0
+    promoted_inserted = 0
+    promoted_updated = 0
+    batch_num = 0
+    upsert_chunks_processed = 0
+
+    remaining = _staging_row_count(cursor)
+    if remaining <= 0:
+        remaining = rows_staged
+
+    while remaining > 0:
+        batch_num += 1
+        limit = min(upsert_batch_size, remaining)
+        operation = (
+            f"UPSERT lote {batch_num}/{upsert_batches_total} "
+            f"({limit:,} de {rows_staged:,} registros)…"
+        )
+        pct = min(99.0, 50.0 + (total_inserted / max(rows_staged, 1)) * 49.0)
+
+        report_processing_progress(
+            conn,
+            batch_id,
+            progress_percentage=pct,
+            current_operation=operation,
+            phase="promoting",
+            total_rows=promote_total,
+            rows_processed=total_inserted,
+            loaded_rows=total_inserted,
+            rejected_rows=0,
+            chunks_processed=chunks_staged + batch_num,
+            chunks_total=chunks_total + upsert_batches_total,
+            force=True,
+        )
+        conn.commit()
+
+        batch_start = time.monotonic()
+        with (timer.phase("upsert_ms") if timer else _noop_phase()):
+            with _PromotionHeartbeat(
+                conn,
+                batch_id,
+                promote_total=promote_total,
+                rows_processed=total_inserted,
+                chunks_staged=chunks_staged + batch_num,
+                chunks_total=chunks_total + upsert_batches_total,
+                current_operation=operation,
+                interval_sec=heartbeat_sec,
+            ):
+                sql = build_upsert_from_staging_batch_sql(
+                    target_schema,
+                    target_table,
+                    insert_cols,
+                    staging_cols,
+                    conflict_clause,
+                    batch_limit=limit,
+                    include_imported_at=include_imported_at,
+                    db_columns=db_columns,
+                    db_udt_names=db_udt_names,
+                    staging_table=_STAGING_TABLE_PERSISTENT,
+                    order_by_cols=order_by_cols,
+                    count_split=use_count_split,
+                )
+                remaining_before = remaining
+                cursor.execute(sql)
+                aff, ins, upd = _fetch_upsert_counts(cursor)
+                if aff <= 0:
+                    aff = remaining_before - _staging_row_count(cursor)
+
+        elapsed_ms = int((time.monotonic() - batch_start) * 1000)
+        logger.info(
+            "Promotion upsert batch %s/%s: %s rows (%s inserted, %s updated) in %sms",
+            batch_num,
+            upsert_batches_total,
+            aff,
+            ins,
+            upd,
+            elapsed_ms,
+        )
+
+        total_inserted += aff
+        promoted_inserted += ins
+        promoted_updated += upd
+        upsert_chunks_processed += 1
+
+        metadata = _merge_promotion_metadata(
+            metadata,
+            promoted_rows=total_inserted,
+            promoted_inserted=promoted_inserted,
+            promoted_updated=promoted_updated,
+        )
+        _persist_promotion_chunk_metadata(
+            conn,
+            cursor,
+            batch_id,
+            metadata,
+            chunks_processed=chunks_staged + upsert_chunks_processed,
+            force=True,
+        )
+
+        pct_after = min(99.0, 50.0 + (total_inserted / max(rows_staged, 1)) * 49.0)
+        report_processing_progress(
+            conn,
+            batch_id,
+            progress_percentage=pct_after,
+            current_operation=operation,
+            phase="promoting",
+            total_rows=promote_total,
+            rows_processed=total_inserted,
+            loaded_rows=total_inserted,
+            rejected_rows=0,
+            chunks_processed=chunks_staged + batch_num,
+            chunks_total=chunks_total + upsert_batches_total,
+            force=True,
+        )
+        conn.commit()
+
+        remaining = _staging_row_count(cursor)
+        if aff == 0 and remaining > 0:
+            logger.error(
+                "Promotion upsert batch %s made no progress (%s rows remaining); aborting",
+                batch_num,
+                remaining,
+            )
+            break
+
+    return total_inserted, promoted_inserted, promoted_updated
+
+
 def _execute_promotion_batch(
     cursor,
     insert_query: str,
@@ -565,10 +809,10 @@ def _persist_promotion_chunk_metadata(
 
 def _apply_promotion_session_tuning(cursor, *, work_mem: Optional[str] = None) -> None:
     cursor.execute("SET statement_timeout = 0;")
-    work_mem = work_mem or getattr(settings, "PROMOTION_WORK_MEM", "512MB")
+    work_mem = work_mem or getattr(settings, "PROMOTION_WORK_MEM", "2GB")
     if work_mem:
         cursor.execute(f"SET work_mem = '{work_mem}';")
-    maintenance_work_mem = getattr(settings, "PROMOTION_MAINTENANCE_WORK_MEM", "1GB")
+    maintenance_work_mem = getattr(settings, "PROMOTION_MAINTENANCE_WORK_MEM", "2GB")
     if maintenance_work_mem:
         cursor.execute(f"SET maintenance_work_mem = '{maintenance_work_mem}';")
     parallel_workers = int(getattr(settings, "PROMOTION_PARALLEL_WORKERS", 4))
@@ -1009,7 +1253,7 @@ def _promote_from_parquet_single_pass(
         return 0, 0, 0
 
     logger.info(
-        "Single-pass promotion: %s rows in staging → INSERT into %s.%s",
+        "Single-pass promotion: %s rows in staging -> INSERT into %s.%s",
         rows_staged, target_schema, target_table,
     )
 
@@ -1045,32 +1289,31 @@ def _promote_from_parquet_single_pass(
     )
     conn.commit()
 
-    # ── Phase 2: single INSERT … SELECT from staging ───────────────────────────
-    # Sort by conflict key so B-tree leaf pages are accessed sequentially
-    # (avoids random I/O on the unique index — main bottleneck for large tables).
-    order_by_cols = parse_conflict_cols(conflict_clause)
-    split_counts = _uses_upsert_update(conflict_clause)
-    with (timer.phase("upsert_ms") if timer else _noop_phase()):
-        sql = build_upsert_from_staging_sql(
-            target_schema,
-            target_table,
-            insert_cols,
-            staging_cols,
-            conflict_clause,
-            include_imported_at=include_imported_at,
-            db_columns=db_columns,
-            db_udt_names=db_udt_names,
-            staging_table=_STAGING_TABLE_PERSISTENT,
-            order_by_cols=order_by_cols,
-            count_split=split_counts,
-        )
-        cursor.execute(sql)
-        if split_counts:
-            total_inserted, promoted_inserted, promoted_updated = _fetch_upsert_counts(cursor)
-        else:
-            total_inserted = cursor.rowcount if cursor.rowcount >= 0 else 0
-            promoted_inserted = total_inserted
-            promoted_updated = 0
+    # ── Phase 2: batched UPSERT from persistent staging ────────────────────────
+    upsert_batch_size = resolve_upsert_batch_size(promote_total)
+    if promotion_batch_size and promotion_batch_size > 0:
+        upsert_batch_size = promotion_batch_size
+
+    total_inserted, promoted_inserted, promoted_updated = _execute_batched_staging_upsert(
+        conn,
+        cursor,
+        batch_id,
+        metadata,
+        target_schema=target_schema,
+        target_table=target_table,
+        insert_cols=insert_cols,
+        staging_cols=staging_cols,
+        conflict_clause=conflict_clause,
+        include_imported_at=include_imported_at,
+        db_columns=db_columns,
+        db_udt_names=db_udt_names,
+        rows_staged=rows_staged,
+        promote_total=promote_total,
+        chunks_staged=chunks_staged,
+        chunks_total=chunks_total,
+        upsert_batch_size=upsert_batch_size,
+        timer=timer,
+    )
 
     report_processing_progress(
         conn,

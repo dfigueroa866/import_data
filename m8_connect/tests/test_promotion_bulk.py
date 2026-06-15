@@ -1,6 +1,7 @@
 import pyarrow as pa
 
 from data_staging.utils.promotion_bulk import (
+    build_upsert_from_staging_batch_sql,
     build_upsert_from_staging_sql,
     copy_arrow_batch_to_staging,
     staging_select_expr,
@@ -95,3 +96,44 @@ def test_build_upsert_from_staging_sql_split_insert_update_counts():
     )
     assert 'NULLIF(s."organization_id", \'\')::uuid' in sql
     assert 's."location_code"' in sql
+
+
+def test_build_upsert_from_staging_batch_sql_limits_and_deletes():
+    conflict = (
+        'ON CONFLICT ("organization_id", "granularity", "location_code", "sku", '
+        '"sales_channel", "period_start") DO UPDATE SET "quantity" = EXCLUDED."quantity"'
+    )
+    sql = build_upsert_from_staging_batch_sql(
+        "public",
+        "sales_history",
+        ['"organization_id"', '"sku"', '"quantity"'],
+        ["organization_id", "sku", "quantity"],
+        conflict,
+        batch_limit=500_000,
+        include_imported_at=False,
+        order_by_cols=["organization_id", "sku"],
+        count_split=True,
+    )
+    assert "LIMIT 500000" in sql
+    assert 'ORDER BY s."organization_id", s."sku"' in sql
+    assert "WITH batch AS" in sql
+    assert "DELETE FROM batch_promo_staging_acc d" in sql
+    assert "USING batch b" in sql
+    assert "xmax = 0" in sql
+
+
+def test_build_upsert_from_staging_batch_sql_no_count_split():
+    sql = build_upsert_from_staging_batch_sql(
+        "public",
+        "sales_history",
+        ['"organization_id"', '"quantity"'],
+        ["organization_id", "quantity"],
+        "",
+        batch_limit=250_000,
+        include_imported_at=False,
+        count_split=False,
+    )
+    assert "LIMIT 250000" in sql
+    assert "xmax" not in sql
+    assert "SELECT COUNT(*)::int FROM batch" in sql
+    assert "SELECT 1" not in sql

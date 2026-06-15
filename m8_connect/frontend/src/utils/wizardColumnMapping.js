@@ -16,6 +16,21 @@ export const SOURCE_MAPPING_KEY = '__fixed_source__';
 export const SALES_CHANNEL_MAPPING_KEY = '__fixed_sales_channel__';
 export const MANUAL_MAPPING_PREFIX = '__manual__';
 
+/**
+ * Columnas virtuales fijas (historia):
+ * | Clave                      | Target           | Fuente                          |
+ * | __fixed_organization_id__  | organization_id  | sesión / login                  |
+ * | __fixed_granularity__      | granularity      | processType (paso 1)            |
+ * | __fixed_source__           | source           | source_extension (archivo)    |
+ * | __fixed_sales_channel__    | sales_channel    | default SELL_IN                 |
+ */
+export const HISTORY_FIXED_VIRTUAL_COLUMNS = [
+    { key: ORG_MAPPING_KEY, target: 'organization_id', source: 'from_organization_id' },
+    { key: GRANULARITY_MAPPING_KEY, target: 'granularity', source: 'from_process_type' },
+    { key: SOURCE_MAPPING_KEY, target: 'source', source: 'from_source_file' },
+    { key: SALES_CHANNEL_MAPPING_KEY, target: 'sales_channel', source: 'default_value' },
+];
+
 export const isManualMappingKey = (key) =>
     String(key || '').startsWith(MANUAL_MAPPING_PREFIX);
 
@@ -24,6 +39,12 @@ export const isSystemVirtualMappingKey = (key) =>
     || key === GRANULARITY_MAPPING_KEY
     || key === SOURCE_MAPPING_KEY
     || key === SALES_CHANNEL_MAPPING_KEY;
+
+/** Columnas fijas cuyo valor viene del contexto (login / paso 1), no de default_value en mapeo. */
+export const isMetadataDrivenFixedMappingKey = (key) =>
+    key === ORG_MAPPING_KEY
+    || key === GRANULARITY_MAPPING_KEY
+    || key === SOURCE_MAPPING_KEY;
 
 export const createManualMappingKey = () =>
     `${MANUAL_MAPPING_PREFIX}${Date.now()}_${Math.random().toString(36).slice(2, 9)}__`;
@@ -136,9 +157,9 @@ export const appendFixedOrganizationMapping = (
     });
     nextMappings[ORG_MAPPING_KEY] = {
         target: 'organization_id',
-        default_value: organizationId,
         auto_mapped: false,
         is_fixed: true,
+        from_organization_id: true,
     };
     nextToggles[ORG_MAPPING_KEY] = true;
     return { mappings: nextMappings, toggles: nextToggles };
@@ -166,7 +187,7 @@ export const appendFixedHistoryAutoMappings = (
 
     const processTypes = wizardData.historyTableMeta?.process_types;
     const granularity = granularityFromProcessType(wizardData.processType, processTypes);
-    if (!granularity) {
+    if (!wizardData.processType || !granularity) {
         return {
             mappings: nextMappings,
             toggles: nextToggles,
@@ -175,18 +196,26 @@ export const appendFixedHistoryAutoMappings = (
     }
 
     const sourceExt = sourceFromFileName(wizardData.fileName);
+    if (!sourceExt || sourceExt === 'unknown') {
+        return {
+            mappings: nextMappings,
+            toggles: nextToggles,
+            error: 'No se pudo determinar source desde el archivo original (extensión).',
+        };
+    }
+
     nextMappings[GRANULARITY_MAPPING_KEY] = {
         target: 'granularity',
-        default_value: granularity,
         auto_mapped: false,
         is_fixed: true,
+        from_process_type: true,
     };
     nextToggles[GRANULARITY_MAPPING_KEY] = true;
     nextMappings[SOURCE_MAPPING_KEY] = {
         target: 'source',
-        default_value: sourceExt,
         auto_mapped: false,
         is_fixed: true,
+        from_source_file: true,
     };
     nextToggles[SOURCE_MAPPING_KEY] = true;
     const salesChannelDefault =

@@ -184,6 +184,7 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
 
             await waitForMappingValidation(batchId, {
                 onProgress: (p) => setValidationProgress(p),
+                estimatedRows: response.estimated_rows,
             });
 
             updateWizardData({
@@ -366,20 +367,12 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
             <div className="step-actions">
                 <Button
                     variant="primary"
-                    className="step1-submit-btn"
                     onClick={handleSubmit}
-                    disabled={!file || !processType || uploading || validating || metaLoading}
+                    loading={uploading}
+                    loadingLabel="Subiendo archivo…"
+                    disabled={!file || !processType || validating || metaLoading}
                 >
-                    <span className="step1-submit-btn__label">
-                        {uploading ? (
-                            <>
-                                <LoadingSpinner size="sm" />
-                                Subiendo archivo…
-                            </>
-                        ) : (
-                            'Siguiente: mapear columnas →'
-                        )}
-                    </span>
+                    Siguiente: mapear columnas →
                 </Button>
             </div>
         </div>

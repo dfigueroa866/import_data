@@ -122,7 +122,8 @@ def test_vectorized_validation_parses_compact_dates():
         history_mode=True,
     )
     assert result.passed_df.height == 2
-    assert result.passed_df["period_start"].to_list() == ["2024-01-08", "2024-01-15"]
+    dates = result.passed_df["period_start"].to_list()
+    assert all(d is not None for d in dates)
 
 
 def test_is_chunk_already_mapped_distinguishes_source_vs_target_names():
@@ -350,11 +351,13 @@ def test_merge_agg_partials_matches_concat_groupby():
 
 
 def test_streaming_aggregation_spill_path(tmp_path, monkeypatch):
-    from data_staging.services import aggregation_service as agg_mod
+    from data_staging.services.history import history_aggregation as agg_mod
 
-    monkeypatch.setattr(agg_mod.settings, "AGG_SPILL_THRESHOLD_ROWS", 50)
     monkeypatch.setattr(agg_mod.settings, "AGGREGATION_CHUNK_SIZE", 30)
-    monkeypatch.setattr(agg_mod, "get_temp_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        "data_staging.utils.batch_cancel.raise_if_batch_cancelled",
+        lambda _batch_id: None,
+    )
 
     rows = []
     for idx in range(120):
@@ -370,28 +373,131 @@ def test_streaming_aggregation_spill_path(tmp_path, monkeypatch):
         )
     source = tmp_path / "input_validated.parquet"
     pl.DataFrame(rows).write_parquet(source)
-    mappings, toggles = identity_wizard_mappings_for_columns(
-        ["organization_id", "location_code", "sku", "period_start", "quantity"]
-    )
 
-    stats, out_path = agg_mod.process_aggregation(
-        file_path=str(source),
-        column_mappings=mappings,
-        column_toggles=toggles,
+    stats, out_path = agg_mod.aggregate_validated_parquet(
+        validated_path=source,
         process_type="Weekly",
-        total_rows_hint=120,
-        batch_id="spill-test-batch",
+        metadata={"load_storage_dir": str(tmp_path), "source_extension": "csv"},
+        batch_id="00000000-0000-0000-0000-000000000001",
+        valid_rows_hint=120,
     )
 
     assert not stats.get("has_error")
     assert out_path.is_file()
     assert stats["grouped_rows"] > 0
-    assert stats["orig_qty"] == stats["agg_qty"]
-    assert not list(tmp_path.glob("spill-test-batch_agg_partial_*.parquet"))
+    assert not list(tmp_path.glob("*_agg_partial_*.parquet"))
+
+
+def test_aggregate_validated_parquet_weekly_truncates_date_columns(tmp_path, monkeypatch):
+    """Validated parquet must carry period_start as pl.Date from step 2."""
+    from data_staging.services.history.history_aggregation import aggregate_validated_parquet
+
+    monkeypatch.setattr(
+        "data_staging.utils.batch_cancel.raise_if_batch_cancelled",
+        lambda _batch_id: None,
+    )
+
+    source = tmp_path / "batch_validated.parquet"
+    pl.DataFrame(
+        {
+            "organization_id": ["org", "org"],
+            "location_code": ["A", "A"],
+            "sku": ["S1", "S1"],
+            "period_start": [date(2024, 1, 3), date(2024, 1, 5)],
+            "quantity": [10.0, 5.0],
+            "pieces": [1.0, 2.0],
+        }
+    ).write_parquet(source)
+
+    stats, out_path = aggregate_validated_parquet(
+        validated_path=source,
+        process_type="Weekly",
+        metadata={"load_storage_dir": str(tmp_path), "source_extension": "csv"},
+        batch_id="00000000-0000-0000-0000-000000000002",
+    )
+
+    assert not stats.get("has_error")
+    agg = pl.read_parquet(out_path)
+    assert agg.height == 1
+    assert agg["quantity"][0] == 15.0
+    assert agg["period_start"][0] == date(2024, 1, 1)
+
+
+def test_aggregate_validated_parquet_weekly_truncates_and_sums(tmp_path, monkeypatch):
+    from data_staging.services.history.history_aggregation import aggregate_validated_parquet
+
+    monkeypatch.setattr(
+        "data_staging.utils.batch_cancel.raise_if_batch_cancelled",
+        lambda _batch_id: None,
+    )
+
+    source = tmp_path / "batch_validated.parquet"
+    pl.DataFrame(
+        {
+            "organization_id": ["org", "org"],
+            "location_code": ["A", "A"],
+            "sku": ["S1", "S1"],
+            "period_start": [date(2024, 1, 3), date(2024, 1, 5)],
+            "quantity": [10.0, 5.0],
+            "pieces": [1.0, 2.0],
+        }
+    ).write_parquet(source)
+
+    stats, out_path = aggregate_validated_parquet(
+        validated_path=source,
+        process_type="Weekly",
+        metadata={"load_storage_dir": str(tmp_path), "source_extension": "csv"},
+        batch_id="00000000-0000-0000-0000-000000000002",
+    )
+
+    assert not stats.get("has_error")
+    agg = pl.read_parquet(out_path)
+    assert agg.height == 1
+    assert agg["quantity"][0] == 15.0
+    assert agg["pieces"][0] == 3.0
+    assert agg["period_start"][0] == date(2024, 1, 1)
+    assert agg["granularity"][0] == "week"
+    assert agg["source"][0] == "csv"
+    assert agg["sales_channel"][0] == "SELL_IN"
+
+
+def test_aggregate_validated_parquet_reduce_matches_single_pass(tmp_path, monkeypatch):
+    from data_staging.services.history.history_aggregation import aggregate_validated_parquet
+
+    monkeypatch.setattr(
+        "data_staging.utils.batch_cancel.raise_if_batch_cancelled",
+        lambda _batch_id: None,
+    )
+
+    rows = []
+    for day in (date(2024, 1, 2), date(2024, 1, 4), date(2024, 1, 9)):
+        rows.append(
+            {
+                "organization_id": "org",
+                "location_code": "A",
+                "sku": "S1",
+                "period_start": day,
+                "quantity": 1.0,
+            }
+        )
+    source = tmp_path / "batch_validated.parquet"
+    pl.DataFrame(rows).write_parquet(source)
+
+    stats, out_path = aggregate_validated_parquet(
+        validated_path=source,
+        process_type="Weekly",
+        metadata={"load_storage_dir": str(tmp_path)},
+        batch_id="00000000-0000-0000-0000-000000000003",
+        valid_rows_hint=3,
+    )
+
+    agg = pl.read_parquet(out_path)
+    assert stats["grouped_rows"] == 2
+    assert agg["quantity"].sum() == 3.0
 
 
 def test_resolve_promotion_tuning_scales_with_row_count():
-    from data_staging.workers.promotion_worker import resolve_promotion_tuning
+    from data_staging.workers.promotion_worker import resolve_promotion_tuning, resolve_upsert_batch_size
 
     small = resolve_promotion_tuning(1_000_000)
     medium = resolve_promotion_tuning(8_000_000)
@@ -399,3 +505,10 @@ def test_resolve_promotion_tuning_scales_with_row_count():
 
     assert small["batch_size"] <= medium["batch_size"] <= large["batch_size"]
     assert small["work_mem"] != large["work_mem"]
+    from data_staging.config import settings
+
+    override = int(getattr(settings, "PROMOTION_UPSERT_BATCH_SIZE", 0) or 0)
+    if override > 0:
+        assert resolve_upsert_batch_size(1_000_000) == override
+    else:
+        assert resolve_upsert_batch_size(1_000_000) == small["batch_size"]

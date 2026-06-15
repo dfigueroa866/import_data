@@ -241,6 +241,7 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                 if (wizardData.loadMode === 'history' && !wizardData.validationComplete) {
                     await waitForMappingValidation(batchId, {
                         onProgress: (p) => setPreviewProgress(p),
+                        estimatedRows: wizardData.estimatedRows,
                     });
                 }
 
@@ -248,6 +249,7 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                 if (previewResponse.validating) {
                     await waitForMappingValidation(batchId, {
                         onProgress: (p) => setPreviewProgress(p),
+                        estimatedRows: wizardData.estimatedRows,
                     });
                     previewResponse = await startPreview(batchId, { force });
                 }

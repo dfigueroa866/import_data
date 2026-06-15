@@ -10,10 +10,8 @@ from typing import Any, Dict, List, Optional, Set, Union
 import polars as pl
 
 from data_staging.services.catalog.catalog_transforms import (
-    format_date_for_storage,
     is_empty_value,
     parse_dates_polars_series,
-    parse_flexible_datetime,
     sanitize_row_dict,
 )
 from data_staging.config import settings
@@ -96,27 +94,6 @@ def _source_row_from_mapped(
     return source_file_row
 
 
-def _normalize_date_column(df: pl.DataFrame, col_name: str, target_type: str) -> pl.DataFrame:
-    date_only = target_type.strip() == "date" or (
-        "date" in target_type and "timestamp" not in target_type
-    )
-
-    def _norm(val: Any) -> Any:
-        if is_empty_value(val):
-            return val
-        parsed = parse_flexible_datetime(val)
-        if not parsed:
-            return val
-        normalized = format_date_for_storage(parsed, date_only=date_only)
-        return normalized if normalized is not None else val
-
-    return df.with_columns(
-        pl.col(col_name)
-        .map_elements(_norm, return_dtype=pl.Utf8)
-        .alias(col_name)
-    )
-
-
 def validate_chunk_vectorized(
     chunk_df: pl.DataFrame,
     batch_id: str,
@@ -133,25 +110,18 @@ def validate_chunk_vectorized(
     composite_unique_keys: Optional[List[str]] = None,
     seen_composite_keys: Optional[set] = None,
 ) -> ChunkValidationResult:
-    """Vectorized validation for history/catalog chunks."""
+    """Vectorized validation for catalog chunks (history uses history_chunk_validation)."""
     if chunk_df.is_empty():
         return ChunkValidationResult(pl.DataFrame(), [], 0.0)
 
-    from data_staging.utils.mapping_helpers import apply_worker_mapping_defaults
-
-    df = apply_worker_mapping_defaults(chunk_df, column_mapping)
-    total_cols = len(df.columns)
+    df = chunk_df
+    total_cols = len([c for c in df.columns if not str(c).startswith("_")])
     start_row_num = (chunk_idx * chunk_size) + 1
     fk_data = foreign_keys_data or {}
     valid_skus: Set[str] = fk_data.get("__valid_skus__", set())
     valid_locs: Set[str] = fk_data.get("__valid_locations__", set())
 
-    for col in df.columns:
-        if df[col].dtype in (pl.Date, pl.Datetime, pl.Time):
-            df = df.with_columns(pl.col(col).cast(pl.Utf8))
-
-    df = df.with_row_count("_vec_row_idx")
-    df = df.with_columns(pl.lit("").alias("_errors"))
+    df = df.with_row_count("_vec_row_idx").with_columns(pl.lit("").alias("_errors"))
 
     if target_column_types:
         for col_name, target_type in target_column_types.items():
@@ -159,9 +129,14 @@ def validate_chunk_vectorized(
                 continue
             target_type_l = target_type.lower()
             is_not_null = (not_null_columns or {}).get(col_name, False)
-            has_fk = bool(fk_data and col_name in fk_data)
-
+            has_fk = bool(
+                not history_mode
+                and fk_data
+                and col_name in fk_data
+                and not str(col_name).startswith("__")
+            )
             empty_cond = _is_empty_expr(col_name)
+
             if is_not_null or has_fk:
                 df = df.with_columns(
                     _append_error(
@@ -217,6 +192,29 @@ def validate_chunk_vectorized(
                 )
 
             elif "date" in target_type_l or "time" in target_type_l:
+                col_series = df.get_column(col_name)
+                if col_series.dtype == pl.Date:
+                    if is_not_null or has_fk:
+                        df = df.with_columns(
+                            _append_error(
+                                pl.col("_errors"),
+                                empty_cond,
+                                f"Empty value not allowed for '{col_name}' (Database NOT NULL constraint or Foreign Key)",
+                            ).alias("_errors")
+                        )
+                    continue
+                if col_series.dtype == pl.Datetime:
+                    df = df.with_columns(pl.col(col_name).dt.date().alias(col_name))
+                    if is_not_null or has_fk:
+                        df = df.with_columns(
+                            _append_error(
+                                pl.col("_errors"),
+                                empty_cond,
+                                f"Empty value not allowed for '{col_name}' (Database NOT NULL constraint or Foreign Key)",
+                            ).alias("_errors")
+                        )
+                    continue
+
                 parsed_col = f"__parsed_{col_name}"
                 parsed_series = parse_dates_polars_series(df.get_column(col_name))
                 df = df.with_columns(parsed_series.alias(parsed_col))
@@ -238,18 +236,18 @@ def validate_chunk_vectorized(
                 ):
                     normalized = (
                         pl.when(empty_cond)
-                        .then(pl.col(col_name))
+                        .then(pl.lit(None, dtype=pl.Date))
                         .when(parsed_dt.is_not_null())
-                        .then(parsed_dt.dt.strftime("%Y-%m-%d"))
-                        .otherwise(pl.col(col_name))
+                        .then(parsed_dt.cast(pl.Date))
+                        .otherwise(pl.lit(None, dtype=pl.Date))
                     )
                 else:
                     normalized = (
                         pl.when(empty_cond)
-                        .then(pl.col(col_name))
+                        .then(pl.lit(None, dtype=pl.Datetime))
                         .when(parsed_dt.is_not_null())
-                        .then(parsed_dt.dt.strftime("%Y-%m-%d %H:%M:%S"))
-                        .otherwise(pl.col(col_name))
+                        .then(parsed_dt)
+                        .otherwise(pl.lit(None, dtype=pl.Datetime))
                     )
                 df = df.with_columns(normalized.alias(col_name)).drop(parsed_col)
 
@@ -284,85 +282,60 @@ def validate_chunk_vectorized(
         sales_channel_default = rules.get("sales_channel_default") or "SELL_IN"
         sku_check_cols = sku_columns_for_validation(rules)
 
+        history_errors_expr = pl.col("_errors")
         sku_present = [k for k in sku_check_cols if k in df.columns]
         if sku_present:
             has_sku = pl.any_horizontal([~_is_empty_expr(k) for k in sku_present])
-            df = df.with_columns(
-                _append_error(
-                    pl.col("_errors"),
-                    ~has_sku,
-                    "Falta código de producto (mapea sku o sku_code)",
-                ).alias("_errors")
-            )
-
-        if "sku" in required_cols and "sku" in (target_column_types or {}) and "sku" in df.columns:
-            df = df.with_columns(
-                _append_error(
-                    pl.col("_errors"),
-                    _is_empty_expr("sku"),
-                    "Campo obligatorio vacío: sku",
-                ).alias("_errors")
+            history_errors_expr = _append_error(
+                history_errors_expr,
+                ~has_sku,
+                "Falta código de producto (mapea sku o sku_code)",
             )
 
         for req in required_cols:
-            if req in (target_column_types or {}) and req in df.columns:
-                df = df.with_columns(
-                    _append_error(
-                        pl.col("_errors"),
-                        _is_empty_expr(req),
-                        f"Campo obligatorio vacío: {req}",
-                    ).alias("_errors")
+            if req in df.columns:
+                history_errors_expr = _append_error(
+                    history_errors_expr,
+                    _is_empty_expr(req),
+                    f"Campo obligatorio vacío: {req}",
                 )
 
         if "sku" in df.columns and valid_skus:
             sku_norm = _normalize_fk_series(df["sku"])
             sku_fail = ~_is_empty_expr("sku") & ~sku_norm.is_in(list(valid_skus))
-            df = df.with_columns(
-                _append_error(
-                    pl.col("_errors"),
-                    sku_fail,
-                    pl.format(
-                        "El SKU '{}' no existe en la tabla de productos (skus.code) de la organización",
-                        pl.col("sku"),
-                    ),
-                ).alias("_errors")
+            history_errors_expr = _append_error(
+                history_errors_expr,
+                sku_fail,
+                pl.format(
+                    "El SKU '{}' no existe en la tabla de productos (skus.code) de la organización",
+                    pl.col("sku"),
+                ),
             )
 
         if "location_code" in df.columns and valid_locs:
             loc_norm = _normalize_fk_series(df["location_code"])
             loc_fail = ~_is_empty_expr("location_code") & ~loc_norm.is_in(list(valid_locs))
-            df = df.with_columns(
-                _append_error(
-                    pl.col("_errors"),
-                    loc_fail,
-                    pl.format(
-                        "La locación '{}' no existe en la tabla de ubicaciones (locations.code) de la organización",
-                        pl.col("location_code"),
-                    ),
-                ).alias("_errors")
-                )
-
-        if "granularity" in (target_column_types or {}) and "granularity" in df.columns:
-            df = df.with_columns(
-                _append_error(
-                    pl.col("_errors"),
-                    _is_empty_expr("granularity"),
-                    "Campo obligatorio vacío: granularity",
-                ).alias("_errors")
+            history_errors_expr = _append_error(
+                history_errors_expr,
+                loc_fail,
+                pl.format(
+                    "La locación '{}' no existe en la tabla de ubicaciones (locations.code) de la organización",
+                    pl.col("location_code"),
+                ),
             )
 
         if "_sales_channel_invalid" in df.columns:
             invalid = ~pl.col("_sales_channel_invalid").is_null()
-            df = df.with_columns(
-                _append_error(
-                    pl.col("_errors"),
-                    invalid,
-                    pl.format(
-                        f"sales_channel debe ser '{sales_channel_default}' (valor en archivo: {{}})",
-                        pl.col("_sales_channel_invalid"),
-                    ),
-                ).alias("_errors")
+            history_errors_expr = _append_error(
+                history_errors_expr,
+                invalid,
+                pl.format(
+                    f"sales_channel debe ser '{sales_channel_default}' (valor en archivo: {{}})",
+                    pl.col("_sales_channel_invalid"),
+                ),
             )
+
+        df = df.with_columns(history_errors_expr.alias("_errors"))
 
     if catalog_table:
         from data_staging.services.catalog.catalog_registry import get_catalog_table
@@ -412,18 +385,17 @@ def validate_chunk_vectorized(
     string_cols = [
         c for c in df.columns if df[c].dtype == pl.Utf8 and not str(c).startswith("_")
     ]
-    if string_cols:
-        for col_name in string_cols:
-            if col_name == "_errors":
-                continue
-            bad = pl.col(col_name).str.contains(r"[\x00-\x08\x0B\x0C\x0E-\x1F]", literal=False)
-            df = df.with_columns(
-                _append_error(
-                    pl.col("_errors"),
-                    bad,
-                    f"Invalid control characters detected in '{col_name}'",
-                ).alias("_errors")
-            )
+    for col_name in string_cols:
+        if col_name == "_errors":
+            continue
+        bad = pl.col(col_name).str.contains(r"[\x00-\x08\x0B\x0C\x0E-\x1F]", literal=False)
+        df = df.with_columns(
+            _append_error(
+                pl.col("_errors"),
+                bad,
+                f"Invalid control characters detected in '{col_name}'",
+            ).alias("_errors")
+        )
 
     df = df.with_columns((pl.col("_errors").str.len_chars() > 0).alias("_failed"))
 
@@ -455,8 +427,8 @@ def validate_chunk_vectorized(
                 "batch_id": batch_id,
                 "source_row_number": start_row_num + vec_idx,
                 "source_file_data": json.dumps(source_file_row, default=str),
-                "raw_data": json.dumps(row),
-                "processed_data": json.dumps(row),
+                "raw_data": json.dumps(row, default=str),
+                "processed_data": json.dumps(row, default=str),
                 "validation_status": "FAILED",
                 "data_quality_score": quality_score,
                 "is_duplicate": False,
@@ -497,6 +469,13 @@ def validate_chunk_vectorized(
 
     extra_drop = [c for c in ("_sales_channel_invalid",) if c in passed_df.columns]
     passed_df = passed_df.drop(drop_cols + extra_drop)
+
+    if target_column_types and passed_df.height > 0:
+        from data_staging.utils.parquet_typing import cast_dataframe_to_target_types
+
+        passed_df = cast_dataframe_to_target_types(
+            passed_df, target_column_types, skip_already_typed=True
+        )
 
     if passed_df.height > 0:
         null_row = passed_df.null_count().row(0)

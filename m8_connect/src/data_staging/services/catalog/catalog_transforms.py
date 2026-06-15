@@ -164,22 +164,64 @@ def parse_dates_polars_series(
     *,
     prefer_us_format: bool = False,
 ) -> pl.Series:
-    """Parsea fechas heterogéneas; opcionalmente prioriza M/D/Y como el fallback histórico de agregación."""
+    """Parse heterogeneous dates; vectorized first, Python fallback only for leftovers."""
     if series.dtype == pl.Datetime:
         return series
     if series.dtype == pl.Date:
         return series.cast(pl.Datetime)
-    values = series.cast(pl.Utf8, strict=False).str.strip_chars().to_list()
+
+    name = series.name
+
+    if series.dtype in pl.NUMERIC_DTYPES:
+        return (
+            series.cast(pl.Int64, strict=False)
+            .cast(pl.Utf8)
+            .str.zfill(8)
+            .str.strptime(pl.Datetime, "%Y%m%d", strict=False)
+            .alias(name)
+        )
+
+    text = series.cast(pl.Utf8, strict=False).str.strip_chars()
+
     if prefer_us_format:
+        values = text.to_list()
         parsed_pd = pd.to_datetime(pd.Series(values), errors="coerce")
         for i, value in enumerate(values):
             if pd.isna(parsed_pd.iat[i]):
                 dt = parse_flexible_datetime(value)
                 if dt is not None:
                     parsed_pd.iat[i] = dt
-        return pl.Series(name=series.name, values=parsed_pd.to_list(), dtype=pl.Datetime)
-    parsed = [parse_flexible_datetime(v) for v in values]
-    return pl.Series(name=series.name, values=parsed, dtype=pl.Datetime)
+        return pl.Series(name=name, values=parsed_pd.to_list(), dtype=pl.Datetime)
+
+    parsed = (
+        pl.DataFrame({"__txt": text})
+        .select(
+            pl.coalesce(
+                pl.col("__txt").str.strptime(pl.Datetime, "%Y-%m-%d", strict=False),
+                pl.col("__txt").str.strptime(pl.Datetime, "%Y%m%d", strict=False),
+                pl.col("__txt").str.strptime(pl.Datetime, "%d/%m/%Y", strict=False),
+                pl.col("__txt").str.strptime(pl.Datetime, "%m/%d/%Y", strict=False),
+                pl.col("__txt").str.strptime(pl.Datetime, "%Y/%m/%d", strict=False),
+                pl.col("__txt").str.strptime(pl.Datetime, "%Y-%m-%d %H:%M:%S", strict=False),
+                pl.col("__txt").str.strptime(pl.Datetime, "%Y-%m-%dT%H:%M:%S", strict=False),
+            ).alias("__parsed")
+        )["__parsed"]
+    )
+
+    if parsed.null_count() == 0:
+        return parsed.alias(name)
+
+    need_fallback = parsed.is_null() & (text.str.len_chars() > 0)
+    if not need_fallback.any():
+        return parsed.alias(name)
+
+    values = text.to_list()
+    parsed_list = parsed.to_list()
+    fallback_mask = need_fallback.to_list()
+    for i, use_fallback in enumerate(fallback_mask):
+        if use_fallback:
+            parsed_list[i] = parse_flexible_datetime(values[i])
+    return pl.Series(name=name, values=parsed_list, dtype=pl.Datetime)
 
 
 def coerce_period_start_to_date(df: pl.DataFrame, col: str = "period_start") -> pl.DataFrame:

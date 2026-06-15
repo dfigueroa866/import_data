@@ -62,7 +62,7 @@ class Settings(BaseSettings):
     MAX_ERROR_RATE: float = Field(0.05, description="Tasa máxima de errores permitida")
     MIN_QUALITY_SCORE: int = Field(95, description="Score mínimo de calidad de datos")
     VALIDATION_TIMEOUT: int = Field(300, description="Timeout de validación en segundos")
-    PROCESS_CHUNK_SIZE: int = Field(250_000, description="Filas por chunk en PROCESS_FILE")
+    PROCESS_CHUNK_SIZE: int = Field(500_000, description="Filas por chunk en PROCESS_FILE")
     AGGREGATION_CHUNK_SIZE: int = Field(500_000, description="Filas por chunk en agregación")
     AGG_SPILL_THRESHOLD_ROWS: int = Field(
         5_000_000,
@@ -96,17 +96,29 @@ class Settings(BaseSettings):
         description="Validación vectorizada Polars (paridad con legacy vía tests)",
     )
     PROMOTION_BATCH_SIZE: int = Field(
-        250_000, description="Filas por chunk en PROMOTE_BATCH"
+        750_000, description="Filas por chunk en PROMOTE_BATCH"
     )
     PROMOTION_METADATA_EVERY_CHUNKS: int = Field(
         3, description="Persistir metadata promoted_rows cada N chunks UPSERT"
     )
     PROMOTION_WORK_MEM: str = Field(
-        "512MB", description="work_mem de sesión durante promoción masiva"
+        "1GB", description="work_mem de sesión durante promoción masiva"
     )
     PROMOTION_SYNCHRONOUS_COMMIT: bool = Field(
         False,
         description="Si False, SET synchronous_commit=off en worker de promoción",
+    )
+    PROMOTION_UPSERT_BATCH_SIZE: int = Field(
+        750_000,
+        description="Filas por lote UPSERT fase 2 (0 = usar resolve_promotion_tuning)",
+    )
+    PROMOTION_COUNT_SPLIT_ON_LAST_BATCH_ONLY: bool = Field(
+        False,
+        description="Obsoleto: el conteo insert/update es por lote en todos los UPSERT",
+    )
+    PROMOTION_HEARTBEAT_SEC: float = Field(
+        30.0,
+        description="Intervalo heartbeat de progreso durante UPSERT largo por lote",
     )
     USE_VALIDATION_MULTIPROCESSING: bool = Field(
         False,

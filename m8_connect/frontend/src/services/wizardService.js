@@ -1,6 +1,13 @@
 import api from './api';
 import { FALLBACK_CATALOG_TABLES } from '../constants/catalogTables';
 import { FALLBACK_PROCESS_TYPES, HISTORY_TABLE_META } from '../constants/historyConfig';
+import {
+    MAX_STALE_POLLS,
+    POLL_INTERVAL_PROMOTION_MS,
+    PROMOTION_BASE_WAIT_MS,
+    PROMOTION_CHUNK_ROWS,
+    PROMOTION_MS_PER_CHUNK,
+} from '../constants/pollConfig';
 
 /**
  * Wizard-specific upload service
@@ -118,11 +125,38 @@ export const saveColumnMapping = async (
 /**
  * Wait until initial mapping validation finishes (VALIDATE_BATCH worker).
  */
-export const waitForMappingValidation = async (batchId, { onProgress, maxWaitMs = 600000 } = {}) => {
+const VALIDATION_CHUNK_ROWS = 250_000;
+const VALIDATION_MS_PER_CHUNK = 45_000;
+const VALIDATION_BASE_MS = 120_000;
+const VALIDATION_MIN_WAIT_MS = 600_000;
+const VALIDATION_MAX_WAIT_MS = 3_600_000;
+
+/** Escalar timeout según filas estimadas (~45 s/chunk + 2 min base, mín. 10 min). */
+export const computeMappingValidationMaxWaitMs = (estimatedRows = 0) => {
+    const rows = Math.max(0, Number(estimatedRows) || 0);
+    const chunks = rows > 0 ? Math.ceil(rows / VALIDATION_CHUNK_ROWS) : 4;
+    const scaled = VALIDATION_BASE_MS + chunks * VALIDATION_MS_PER_CHUNK;
+    return Math.min(VALIDATION_MAX_WAIT_MS, Math.max(VALIDATION_MIN_WAIT_MS, scaled));
+};
+
+const _validationStillRunning = (progress) => {
+    if (!progress) return false;
+    if (progress.validation_in_progress || progress.validation_job_active) return true;
+    return (
+        progress.job_type === 'VALIDATE_BATCH'
+        && ['PENDING', 'PROCESSING'].includes(progress.job_status)
+    );
+};
+
+export const waitForMappingValidation = async (
+    batchId,
+    { onProgress, maxWaitMs, estimatedRows = 0 } = {},
+) => {
+    const waitLimit = maxWaitMs ?? computeMappingValidationMaxWaitMs(estimatedRows);
     const start = Date.now();
     const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-    while (Date.now() - start < maxWaitMs) {
+    while (Date.now() - start < waitLimit) {
         const progress = await getProcessingProgress(batchId);
         onProgress?.(progress);
 
@@ -142,7 +176,39 @@ export const waitForMappingValidation = async (batchId, { onProgress, maxWaitMs 
         await delay(1500);
     }
 
-    throw new Error('La validación del mapeo tardó demasiado. Revisa que los workers estén activos.');
+    const last = await getProcessingProgress(batchId).catch(() => null);
+    if (last?.validation_complete) {
+        return last;
+    }
+    if (_validationStillRunning(last)) {
+        const mins = Math.round(waitLimit / 60_000);
+        throw new Error(
+            `La validación sigue en curso (${mins} min de espera en pantalla). `
+            + 'El worker puede terminar en breve; revisa el progreso en Lotes o espera y recarga.',
+        );
+    }
+    throw new Error(
+        'La validación no avanzó. Revisa que los workers estén activos (python run_workers.py).',
+    );
+};
+
+/** True while a PROMOTE_BATCH job is queued or running. */
+export const isPromotionStillRunning = (progress) => {
+    if (!progress) return false;
+    if (progress.promotion_job_active) return true;
+    return (
+        progress.job_type === 'PROMOTE_BATCH'
+        && ['PENDING', 'PROCESSING'].includes(progress.job_status)
+    );
+};
+
+/** Scale stale poll threshold for long promotion UPSERT runs (~60s per 500k batch). */
+export const computePromotionMaxStalePolls = (estimatedRows = 0) => {
+    const rows = Math.max(0, Number(estimatedRows) || 0);
+    const chunks = rows > 0 ? Math.ceil(rows / PROMOTION_CHUNK_ROWS) : 4;
+    const waitMs = PROMOTION_BASE_WAIT_MS + chunks * PROMOTION_MS_PER_CHUNK;
+    const polls = Math.ceil(waitMs / POLL_INTERVAL_PROMOTION_MS);
+    return Math.max(MAX_STALE_POLLS, polls);
 };
 
 /**

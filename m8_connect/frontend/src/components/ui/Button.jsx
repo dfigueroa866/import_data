@@ -29,23 +29,27 @@ const Button = ({
   className,
   icon: Icon,
   loading = false,
+  loadingLabel = 'Cargando…',
 }) => {
   return (
     <button
       type={type}
       className={cn(
-        'inline-flex items-center justify-center gap-1.5 font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed',
+        'inline-flex items-center justify-center gap-1.5 font-medium rounded-lg transition-colors disabled:cursor-not-allowed',
+        !loading && 'disabled:opacity-50',
+        loading && 'cursor-wait',
         variants[variant],
         sizes[size],
         className
       )}
       onClick={onClick}
       disabled={disabled || loading}
+      aria-busy={loading || undefined}
     >
       {loading ? (
         <>
-          <Loader2 className="h-4 w-4 animate-spin" />
-          <span>Cargando…</span>
+          <Loader2 className={cn('animate-spin shrink-0', size === 'lg' ? 'h-5 w-5' : 'h-4 w-4')} />
+          <span>{loadingLabel}</span>
         </>
       ) : (
         <>

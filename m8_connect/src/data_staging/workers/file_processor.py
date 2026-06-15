@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 import json
 import os
@@ -7,7 +9,7 @@ import numpy as np
 import io
 import csv
 import uuid
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Union
 from datetime import datetime
 from pathlib import Path
 import polars as pl
@@ -15,6 +17,7 @@ import psycopg2
 from data_staging.config import settings
 from data_staging.utils.mapping_helpers import is_wizard_virtual_mapping
 from data_staging.utils.batch_staging_files import (
+    HISTORY_CAST_EXCLUDE_COLUMNS,
     ValidRecordsParquetWriter,
     append_rejected_records_csv,
     append_valid_records_parquet,
@@ -513,9 +516,9 @@ def process_file_job(payload: Dict[str, Any]):
 
         logger.info(f"Target schema loaded: {len(target_column_types)} columns for validation")
 
-        # FETCH FOREIGN KEYS
+        # FK genéricos solo catálogos; historia usa __valid_skus__ / __valid_locations__
         foreign_keys_data = {}
-        if target_schema and target_table:
+        if target_schema and target_table and not history_mode:
             try:
                 cursor.execute("""
                     SELECT
@@ -544,7 +547,6 @@ def process_file_job(payload: Dict[str, Any]):
             except Exception as e:
                 logger.error(f"Failed to query foreign keys: {e}")
 
-        # FETCH CUSTOM HISTORY VALIDATIONS FOR SKU AND LOCATION
         if history_mode and organization_id:
             try:
                 cursor.execute(
@@ -806,7 +808,12 @@ def process_file_in_chunks(
 
     own_writer: Optional[ValidRecordsParquetWriter] = None
     if valid_temp_file and parquet_writer is None and not direct_load:
-        own_writer = ValidRecordsParquetWriter(valid_temp_file, [])
+        own_writer = ValidRecordsParquetWriter(
+            valid_temp_file,
+            [],
+            target_column_types=target_column_types or {},
+            cast_exclude_columns=HISTORY_CAST_EXCLUDE_COLUMNS if history_mode else None,
+        )
         parquet_writer = own_writer
 
     file_ext = file_path.suffix.lower()
@@ -1157,7 +1164,10 @@ def process_single_chunk(
     if prevalidated is not None:
         validation_out = prevalidated
     else:
-        with (pipeline_timer.phase("validate_ms") if pipeline_timer else _null_phase()):
+        validate_phase = _null_phase()
+        if pipeline_timer and not (history_mode and organization_id):
+            validate_phase = pipeline_timer.phase("validate_ms")
+        with validate_phase:
             validation_out = validate_and_prepare_chunk(
                 chunk_df=chunk_df,
                 batch_id=batch_id,
@@ -1265,7 +1275,12 @@ def process_single_chunk(
                         target_cols=target_cols,
                     )
                 else:
-                    writer = ValidRecordsParquetWriter(valid_temp_file, target_cols)
+                    writer = ValidRecordsParquetWriter(
+                        valid_temp_file,
+                        target_cols,
+                        target_column_types=target_column_types or {},
+                        cast_exclude_columns=HISTORY_CAST_EXCLUDE_COLUMNS if history_mode else None,
+                    )
                     try:
                         db_inserted = writer.write_polars_chunk(
                             passed_df,
@@ -1383,87 +1398,42 @@ def validate_and_prepare_chunk(
     progress_chunks_processed: int = 0,
     progress_chunks_total: int = 1,
     pipeline_timer: Optional[PipelineTimer] = None,
-) -> List[Dict[str, Any]]:
+) -> Union[List[Dict[str, Any]], ChunkValidationResult]:
     """
-    Valida y prepara registros de un chunk.
-    Aplica column_mapping y selected_columns.
-    VALIDA TIPOS Y CARACTERES ESPECIALES.
+    Valida y prepara registros de un chunk (catálogo).
+    Historia delega en validate_history_chunk().
     """
-    import re
+    from data_staging.services.catalog.catalog_transforms import apply_catalog_transforms_polars
+    from data_staging.utils.mapping_helpers import apply_chunk_column_mapping
+    from data_staging.utils.vectorized_validation import ChunkValidationResult, validate_chunk_vectorized
 
-    from data_staging.services.catalog.catalog_registry import get_catalog_table
-    from data_staging.services.catalog.catalog_transforms import (
-        apply_catalog_transforms_polars,
-        format_date_for_storage,
-        is_empty_value,
-        parse_flexible_datetime,
-        sanitize_row_dict,
+    if history_mode and organization_id:
+        from data_staging.services.history.history_chunk_validation import validate_history_chunk
+
+        return validate_history_chunk(
+            chunk_df=chunk_df,
+            batch_id=batch_id,
+            chunk_idx=chunk_idx,
+            chunk_size=CHUNK_SIZE_RECORDS,
+            column_mapping=column_mapping,
+            selected_columns=selected_columns,
+            target_column_types=target_column_types,
+            not_null_columns=not_null_columns,
+            foreign_keys_data=foreign_keys_data,
+            history_rules=history_rules,
+            organization_id=organization_id,
+            process_type=process_type,
+            source_extension=source_extension,
+            sku_resolver=sku_resolver,
+            resolve_sku_id=resolve_sku_id,
+            pipeline_timer=pipeline_timer,
+        )
+
+    chunk_df = apply_chunk_column_mapping(
+        chunk_df,
+        column_mapping=column_mapping,
+        selected_columns=selected_columns,
     )
-    
-    # Regex para caracteres peligrosos o invalidos (control characters except tab/newline)
-    INVALID_CHARS_REGEX = re.compile(r'[\x00-\x08\x0B\x0C\x0E-\x1F]')
-    
-    from data_staging.utils.mapping_helpers import is_chunk_already_mapped
-
-    is_already_mapped = is_chunk_already_mapped(chunk_df, column_mapping)
-
-    # 1. Filtrar columnas si selected_columns está presente (solo si no está pre-mapeado)
-    if selected_columns and not is_already_mapped:
-        available_cols = [c for c in selected_columns if c in chunk_df.columns]
-        if available_cols:
-            chunk_df = chunk_df.select(available_cols)
-        else:
-            logger.warning(f"None of selected columns {selected_columns} found in dataframe")
-
-    # Conservar filas originales del archivo (antes de mapear) para export de rechazados
-    if is_already_mapped and column_mapping:
-        original_rows = None
-    else:
-        original_rows = chunk_df.to_dicts()
-    
-    # 2. Aplicar column mapping si está presente
-    if column_mapping:
-        if is_already_mapped:
-            for target_col, map_info in column_mapping.items():
-                if target_col not in chunk_df.columns:
-                    source_col = map_info.get("source")
-                    default_val = map_info.get("default")
-                    if (
-                        source_col is None
-                        and default_val is not None
-                        and str(default_val).strip() != ""
-                    ):
-                        chunk_df = chunk_df.with_columns([
-                            pl.lit(default_val).alias(target_col)
-                        ])
-        else:
-            for target_col, map_info in column_mapping.items():
-                source_col = map_info.get("source")
-                default_val = map_info.get("default")
-
-                if (
-                    source_col is None
-                    and default_val is not None
-                    and str(default_val).strip() != ""
-                ):
-                    chunk_df = chunk_df.with_columns([
-                        pl.lit(default_val).alias(target_col)
-                    ])
-                elif source_col and source_col in chunk_df.columns:
-                    chunk_df = chunk_df.rename({source_col: target_col})
-                elif target_col in chunk_df.columns:
-                    pass
-                else:
-                    chunk_df = chunk_df.with_columns([
-                        pl.lit(None).alias(target_col)
-                    ])
-
-        target_cols = list(column_mapping.keys())
-        available_targets = [c for c in target_cols if c in chunk_df.columns]
-        if available_targets:
-            chunk_df = chunk_df.select(available_targets)
-        else:
-            logger.error("No target columns found after mapping")
 
     if catalog_table:
         mapped_cols = frozenset(column_mapping.keys()) if column_mapping else None
@@ -1472,374 +1442,19 @@ def validate_and_prepare_chunk(
                 chunk_df, catalog_table, mapped_columns=mapped_cols
             )
 
-    if history_mode and organization_id:
-        from data_staging.services.history.history_transforms import apply_history_transforms_polars
-
-        with (pipeline_timer.phase("transform_ms") if pipeline_timer else _null_phase()):
-            chunk_df = apply_history_transforms_polars(
-                chunk_df,
-                organization_id=organization_id,
-                process_type=process_type,
-                source_extension=source_extension,
-                sku_resolver=sku_resolver,
-                resolve_sku_id=resolve_sku_id,
-                history_rules=history_rules,
-            )
-
-    from data_staging.utils.vectorized_validation import use_vectorized_validation
-
-    if use_vectorized_validation():
-        from data_staging.utils.vectorized_validation import validate_chunk_vectorized
-
-        return validate_chunk_vectorized(
-            chunk_df=chunk_df,
-            batch_id=batch_id,
-            chunk_idx=chunk_idx,
-            chunk_size=CHUNK_SIZE_RECORDS,
-            column_mapping=column_mapping,
-            target_column_types=target_column_types,
-            not_null_columns=not_null_columns,
-            foreign_keys_data=foreign_keys_data,
-            history_mode=history_mode,
-            history_rules=history_rules,
-            original_rows=original_rows,
-            catalog_table=catalog_table,
-            composite_unique_keys=composite_unique_keys,
-            seen_composite_keys=seen_composite_keys,
-        )
-    
-    # 3. Preparar registros
-    records = []
-    
-    if chunk_df.is_empty():
-        return []
-
-    # Calcular quality score
-    total_cols = len(chunk_df.columns)
-    
-    # Convert dates to string para JSON serialization
-    for col in chunk_df.columns:
-        if chunk_df[col].dtype in [pl.Date, pl.Datetime, pl.Time]:
-            chunk_df = chunk_df.with_columns(pl.col(col).cast(pl.Utf8))
-    
-    # Iterar filas y crear registros
-    rows = chunk_df.to_dicts()
-    
-    start_row_num = (chunk_idx * CHUNK_SIZE_RECORDS) + 1
-    
-    # DEBUG: Log available columns vs target schema
-    logger.debug(f"Chunk columns: {chunk_df.columns}")
-    logger.debug(f"Target schema keys: {list((target_column_types or {}).keys())}")
-
-    if progress_conn and progress_total_rows > 0:
-        report_processing_progress(
-            progress_conn,
-            batch_id,
-            progress_percentage=min(
-                99.0, ((progress_row_offset + len(rows)) / progress_total_rows) * 100
-            ),
-            current_operation=(
-                f"Validando filas {progress_row_offset + 1:,}–"
-                f"{progress_row_offset + len(rows):,} de {progress_total_rows:,} "
-                f"(bloque {progress_chunks_processed + 1}/{progress_chunks_total})…"
-            ),
-            phase="validating",
-            total_rows=progress_total_rows,
-            rows_processed=progress_row_offset,
-            loaded_rows=progress_loaded_before,
-            rejected_rows=progress_rejected_before,
-            chunks_processed=progress_chunks_processed,
-            chunks_total=progress_chunks_total,
-        )
-    
-    logged_errors = 0
-    chunk_passed = 0
-    chunk_failed = 0
-    last_progress_at = time.monotonic()
-    for i, row in enumerate(rows):
-        row = sanitize_row_dict(row)
-        if original_rows is not None:
-            source_file_row = original_rows[i] if i < len(original_rows) else {}
-        elif is_already_mapped and column_mapping:
-            source_file_row = _source_row_from_mapped(row, column_mapping)
-        else:
-            source_file_row = {}
-        validation_status = "PASSED"
-        error_list = []
-        
-        # --- VALIDACIÓN ROW-LEVEL ---
-        
-        # 1. Validar tipos de datos y constraints (si target schema disponible)
-        if target_column_types:
-            for col_name, value in row.items():
-                if col_name not in target_column_types:
-                    continue
-
-                target_type = target_column_types[col_name].lower()
-                is_not_null = (not_null_columns or {}).get(col_name, False)
-                has_foreign_key = bool(foreign_keys_data and col_name in foreign_keys_data)
-                
-                is_empty = is_empty_value(value)
-
-                # Validar NULL en columnas NOT NULL o llaves foráneas requeridas
-                if is_empty:
-                    if is_not_null or has_foreign_key:
-                        validation_status = "FAILED"
-                        error_list.append(f"Empty value not allowed for '{col_name}' (Database NOT NULL constraint or Foreign Key)")
-                    continue  # IF it's intentionally empty and allowed by schema, simply skip further string analysis
-                
-                # Validate Foreign Key integrity
-                if has_foreign_key:
-                    val_str = str(value).strip()
-                    # Normalizamos los floats enteros que polars pudo haber exportado (ej: 10001.0 -> 10001)
-                    if val_str.endswith(".0"):
-                        val_str = val_str[:-2]
-                        
-                    if val_str not in foreign_keys_data[col_name]:
-                        validation_status = "FAILED"
-                        error_list.append(f"Foreign Key violation for '{col_name}': '{value}' not found in target table lookup")
-                        continue
-
-                # Log debug for first row only
-                if i == 0:
-                    logger.info(f"Validating {col_name}='{value}' against {target_type}")
-
-                # Validación Integer / Numeric
-                # IMPORTANTE: validar siempre sin importar el tipo que traiga el valor.
-                # Si Polars infirió el tipo antes de llegar aqui, aun asi se verifica
-                # que el valor original sea convertible a numero.
-                if 'int' in target_type or 'numeric' in target_type or 'float' in target_type or 'double' in target_type:
-                    try:
-                        # Convertir a string primero para normalizar cualquier tipo
-                        raw_str = str(value).strip()
-                        # Limpiar simbolos de moneda/separadores permitidos
-                        clean_val = raw_str.replace('$', '').replace(',', '').strip()
-                        if not clean_val:
-                            raise ValueError("Empty value")
-                        float(clean_val)
-                    except (ValueError, TypeError):
-                        validation_status = "FAILED"
-                        error_list.append(f"Invalid format for '{col_name}': expected number, got '{value}'")
-
-                # Validación Date / Timestamp (acepta datetime con fracciones .000000000)
-                elif 'date' in target_type or 'time' in target_type:
-                    if not is_empty:
-                        parsed_dt = parse_flexible_datetime(value)
-                        if not parsed_dt:
-                            validation_status = "FAILED"
-                            error_list.append(
-                                f"Invalid date format for '{col_name}': got '{value}'"
-                            )
-                        else:
-                            date_only = (
-                                target_type.strip() == 'date'
-                                or (
-                                    'date' in target_type
-                                    and 'timestamp' not in target_type
-                                )
-                            )
-                            normalized = format_date_for_storage(
-                                parsed_dt, date_only=date_only
-                            )
-                            if normalized is not None:
-                                row[col_name] = normalized
-
-                # Validación String Length (varchar)
-                elif 'char' in target_type or 'text' in target_type:
-                    import re
-                    match = re.search(r'\((\d+)\)', target_type)
-                    if match:
-                        max_len = int(match.group(1))
-                        if len(str(value)) > max_len:
-                            validation_status = "FAILED"
-                            error_list.append(f"String too long for '{col_name}': len={len(str(value))}, max={max_len}")
-
-        # 2. Columnas requeridas del catálogo (definición de negocio)
-        if history_mode:
-            from data_staging.services.history.history_config import (
-                resolve_history_rules,
-                sku_columns_for_validation,
-            )
-
-            rules = history_rules or resolve_history_rules()
-            required_cols = list(rules.get("required_mapping_columns") or [])
-            sales_channel_default = rules.get("sales_channel_default") or "SELL_IN"
-            sku_check_cols = sku_columns_for_validation(rules)
-
-            has_sku_value = any(
-                not is_empty_value(row.get(k)) for k in sku_check_cols
-            )
-            if not has_sku_value:
-                validation_status = "FAILED"
-                error_list.append(
-                    "Falta código de producto (mapea sku o sku_code)"
-                )
-            elif "sku" in required_cols and "sku" in (target_column_types or {}):
-                if is_empty_value(row.get("sku")):
-                    validation_status = "FAILED"
-                    error_list.append("Campo obligatorio vacío: sku")
-            for req in required_cols:
-                if req in (target_column_types or {}) and is_empty_value(row.get(req)):
-                    validation_status = "FAILED"
-                    error_list.append(f"Campo obligatorio vacío: {req}")
-
-            # Validar existencia de SKU en catálogo public.skus de la organización
-            sku_val = row.get("sku")
-            if not is_empty_value(sku_val):
-                sku_str = str(sku_val).strip().lower()
-                if sku_str.endswith(".0"):
-                    sku_str = sku_str[:-2]
-                if foreign_keys_data and "__valid_skus__" in foreign_keys_data:
-                    if sku_str not in foreign_keys_data["__valid_skus__"]:
-                        validation_status = "FAILED"
-                        error_list.append(
-                            f"El SKU '{sku_val}' no existe en la tabla de productos (skus.code) de la organización"
-                        )
-
-            # Validar existencia de Location en catálogo public.locations de la organización
-            loc_val = row.get("location_code")
-            if not is_empty_value(loc_val):
-                loc_str = str(loc_val).strip().lower()
-                if loc_str.endswith(".0"):
-                    loc_str = loc_str[:-2]
-                if foreign_keys_data and "__valid_locations__" in foreign_keys_data:
-                    if loc_str not in foreign_keys_data["__valid_locations__"]:
-                        validation_status = "FAILED"
-                        error_list.append(
-                            f"La locación '{loc_val}' no existe en la tabla de ubicaciones (locations.code) de la organización"
-                        )
-
-            if "granularity" in (target_column_types or {}) and is_empty_value(
-                row.get("granularity")
-            ):
-                validation_status = "FAILED"
-                error_list.append("Campo obligatorio vacío: granularity")
-
-            invalid_channel = row.pop("_sales_channel_invalid", None)
-            if invalid_channel is not None:
-                validation_status = "FAILED"
-                error_list.append(
-                    f"sales_channel debe ser '{sales_channel_default}' "
-                    f"(valor en archivo: {invalid_channel!r})"
-                )
-
-        if catalog_table:
-            catalog_def = get_catalog_table(catalog_table)
-            if catalog_def:
-                for col in catalog_def.get("required_columns") or []:
-                    if not col or col == "organization_id":
-                        continue
-                    resolved = _resolve_row_column(row, col)
-                    if not resolved:
-                        validation_status = "FAILED"
-                        error_list.append(
-                            f"Columna requerida no mapeada o ausente: '{col}'"
-                        )
-                    elif is_empty_value(row.get(resolved)):
-                        validation_status = "FAILED"
-                        error_list.append(
-                            f"Valor vacío no permitido en columna requerida '{col}'"
-                        )
-
-        # 3. Validar enums de catálogo (status, etc.) cuando la columna está mapeada
-        if catalog_table:
-            from data_staging.services.catalog.catalog_transforms import validate_catalog_row_enums
-
-            enum_errors = validate_catalog_row_enums(row, catalog_table)
-            if enum_errors:
-                validation_status = "FAILED"
-                error_list.extend(enum_errors)
-
-        if (
-            composite_unique_keys
-            and seen_composite_keys is not None
-            and validation_status == "PASSED"
-        ):
-            key_tuple = _resolve_composite_key(row, composite_unique_keys)
-            if key_tuple is None:
-                validation_status = "FAILED"
-                error_list.append(
-                    f"Faltan columnas para clave única: {', '.join(composite_unique_keys)}"
-                )
-            elif key_tuple in seen_composite_keys:
-                validation_status = "FAILED"
-                error_list.append(
-                    f"Clave duplicada en archivo ({', '.join(composite_unique_keys)})"
-                )
-            else:
-                seen_composite_keys.add(key_tuple)
-
-        # 4. Validar Caracteres Especiales (en todos los campos string)
-        for col_name, value in row.items():
-            if isinstance(value, str):
-                if INVALID_CHARS_REGEX.search(value):
-                    validation_status = "FAILED"
-                    error_list.append(f"Invalid control characters detected in '{col_name}'")
-
-        # LOG VALIDATION FAILURES
-        if validation_status == "FAILED":
-            if logged_errors < 5:
-                logger.warning(f"Validation FAILED for row {i}: {error_list}")
-                logged_errors += 1
-
-        # 3. Calcular Data Quality Score
-        null_count = sum(1 for v in row.values() if v is None)
-        quality_score = 100.0 - (null_count * 100.0 / total_cols) if total_cols > 0 else 100.0
-        
-        # Si ya falló validación estricta, el status es FAILED
-        if validation_status == "PASSED" and quality_score < 80.0:
-             # Opcional: fallar por baja calidad? Por ahora solo warning en score
-             pass
-
-        error_details_json = json.dumps({"errors": error_list}) if error_list else None
-        
-        record = {
-            "batch_id": batch_id,
-            "source_row_number": start_row_num + i,
-            "source_file_data": json.dumps(source_file_row, default=str),
-            "raw_data": json.dumps(row),
-            "processed_data": json.dumps(row),
-            "validation_status": validation_status,
-            "data_quality_score": quality_score,
-            "is_duplicate": False,  # Se calcula en Pre-flight Check (Promotion)
-            "error_details": error_details_json
-        }
-        
-        records.append(record)
-
-        if validation_status == "PASSED":
-            chunk_passed += 1
-        else:
-            chunk_failed += 1
-
-        rows_done = progress_row_offset + i + 1
-        should_report_rows = (
-            progress_conn
-            and progress_total_rows > 0
-            and rows_done % PROGRESS_ROW_INTERVAL == 0
-        )
-        should_report_time = (
-            progress_conn
-            and progress_total_rows > 0
-            and (time.monotonic() - last_progress_at) >= PROGRESS_TIME_INTERVAL_SEC
-        )
-        if should_report_rows or should_report_time:
-            last_progress_at = time.monotonic()
-            report_processing_progress(
-                progress_conn,
-                batch_id,
-                progress_percentage=min(99.0, (rows_done / progress_total_rows) * 100),
-                current_operation=(
-                    f"Validando filas {rows_done:,} de {progress_total_rows:,} "
-                    f"(bloque {progress_chunks_processed + 1}/{progress_chunks_total})…"
-                ),
-                phase="validating",
-                total_rows=progress_total_rows,
-                rows_processed=rows_done,
-                loaded_rows=progress_loaded_before + chunk_passed,
-                rejected_rows=progress_rejected_before + chunk_failed,
-                chunks_processed=progress_chunks_processed,
-                chunks_total=progress_chunks_total,
-            )
-    
-    return records
+    return validate_chunk_vectorized(
+        chunk_df=chunk_df,
+        batch_id=batch_id,
+        chunk_idx=chunk_idx,
+        chunk_size=CHUNK_SIZE_RECORDS,
+        column_mapping=column_mapping,
+        target_column_types=target_column_types,
+        not_null_columns=not_null_columns,
+        foreign_keys_data=foreign_keys_data,
+        history_mode=history_mode,
+        history_rules=history_rules,
+        original_rows=None,
+        catalog_table=catalog_table,
+        composite_unique_keys=composite_unique_keys,
+        seen_composite_keys=seen_composite_keys,
+    )

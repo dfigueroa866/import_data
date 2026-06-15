@@ -294,20 +294,6 @@
     border-top: 1px solid var(--border-color);
 }
 
-.step1-upload .step1-submit-btn {
-    min-width: 17.5rem;
-    flex-shrink: 0;
-}
-
-.step1-upload .step1-submit-btn__label {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.5rem;
-    width: 100%;
-    white-space: nowrap;
-}
-
 .history-hints-list {
     margin: 0.5rem 0 0 1.1rem;
     padding: 0;
