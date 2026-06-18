@@ -217,7 +217,7 @@ def process_file_job(payload: Dict[str, Any]):
     # PASO 1: Leer metadata del batch
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT source_name, file_name, metadata
+        SELECT source_name, file_name, metadata, organization_id
         FROM staging_meta.batch_control
         WHERE batch_id = %s
     """, (batch_id,))
@@ -229,6 +229,7 @@ def process_file_job(payload: Dict[str, Any]):
     source_name = row[0]
     file_name = row[1]
     metadata = row[2] or {}
+    batch_organization_id = row[3]
     if isinstance(metadata, str):
         metadata = json.loads(metadata)
     
@@ -458,7 +459,12 @@ def process_file_job(payload: Dict[str, Any]):
 
             history_rules = resolve_history_rules(metadata)
         process_type = metadata.get("process_type")
-        organization_id = metadata.get("organization_id")
+        organization_id = str(
+            payload.get("organization_id")
+            or batch_organization_id
+            or metadata.get("organization_id")
+            or ""
+        ).strip() or None
         source_extension = metadata.get("source_extension")
         if history_mode and not source_extension:
             from data_staging.services.history.history_config import source_from_filename
@@ -519,6 +525,8 @@ def process_file_job(payload: Dict[str, Any]):
         # FK genéricos solo catálogos; historia usa __valid_skus__ / __valid_locations__
         foreign_keys_data = {}
         if target_schema and target_table and not history_mode:
+            from data_staging.services.history.org_reference_data import load_generic_fk_values
+
             try:
                 cursor.execute("""
                     SELECT
@@ -538,8 +546,13 @@ def process_file_job(payload: Dict[str, Any]):
                 for fk in cursor.fetchall():
                     col_name, f_schema, f_table, f_col = fk
                     try:
-                        cursor.execute(f"SELECT DISTINCT {f_col} FROM {f_schema}.{f_table} WHERE {f_col} IS NOT NULL")
-                        valid_values = {str(r[0]).strip() for r in cursor.fetchall()}
+                        valid_values = load_generic_fk_values(
+                            cursor,
+                            schema=f_schema,
+                            table=f_table,
+                            column=f_col,
+                            organization_id=organization_id,
+                        )
                         foreign_keys_data[col_name] = valid_values
                         logger.info(f"Loaded {len(valid_values)} valid keys for FK {col_name}")
                     except Exception as sub_e:
@@ -548,27 +561,14 @@ def process_file_job(payload: Dict[str, Any]):
                 logger.error(f"Failed to query foreign keys: {e}")
 
         if history_mode and organization_id:
-            try:
-                cursor.execute(
-                    "SELECT DISTINCT code FROM public.skus WHERE organization_id = %s AND code IS NOT NULL",
-                    (organization_id,)
-                )
-                valid_skus = {str(r[0]).strip().lower() for r in cursor.fetchall()}
-                foreign_keys_data["__valid_skus__"] = valid_skus
-                logger.info(f"Loaded {len(valid_skus)} valid SKU codes for organization {organization_id}")
-            except Exception as e:
-                logger.error(f"Failed to load valid SKUs: {e}")
+            from data_staging.services.history.org_reference_data import load_org_scoped_fk_sets
 
-            try:
-                cursor.execute(
-                    "SELECT DISTINCT code FROM public.locations WHERE organization_id = %s AND code IS NOT NULL",
-                    (organization_id,)
-                )
-                valid_locations = {str(r[0]).strip().lower() for r in cursor.fetchall()}
-                foreign_keys_data["__valid_locations__"] = valid_locations
-                logger.info(f"Loaded {len(valid_locations)} valid Location codes for organization {organization_id}")
-            except Exception as e:
-                logger.error(f"Failed to load valid Locations: {e}")
+            foreign_keys_data.update(load_org_scoped_fk_sets(cursor, organization_id))
+        elif history_mode:
+            logger.error(
+                "organization_id missing for history batch %s; SKU/location FK validation disabled",
+                batch_id,
+            )
 
         if system_managed and column_mapping:
             column_mapping = {
@@ -1407,7 +1407,7 @@ def validate_and_prepare_chunk(
     from data_staging.utils.mapping_helpers import apply_chunk_column_mapping
     from data_staging.utils.vectorized_validation import ChunkValidationResult, validate_chunk_vectorized
 
-    if history_mode and organization_id:
+    if history_mode:
         from data_staging.services.history.history_chunk_validation import validate_history_chunk
 
         return validate_history_chunk(

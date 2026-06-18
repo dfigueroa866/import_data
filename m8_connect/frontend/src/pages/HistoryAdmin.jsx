@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { History } from 'lucide-react';
 import { Button, PageHeader, LoadingSpinner, Alert, FormField, Input } from '../components/ui';
 import { useAuth } from '../context/AuthContext';
+import { canEditConfig } from '../utils/permissions';
 import { fetchTargetTableColumns } from '../services/catalogAdminService';
 import {
     getHistoryDefinition,
@@ -46,6 +47,7 @@ const HISTORY_MAPPABLE_LEGEND = 'Mapeable desde el archivo (paso 2)';
 
 const HistoryAdmin = () => {
     const { user } = useAuth();
+    const readOnly = !canEditConfig(user);
     const organizationName = user?.organization_name || '';
 
     const [loading, setLoading] = useState(true);
@@ -224,9 +226,13 @@ const HistoryAdmin = () => {
                                 readOnly
                             />
                             <div className="flex flex-wrap gap-3">
-                                <Button variant="primary" onClick={handleSave} disabled={saving}>
-                                    {saving ? 'Guardando…' : 'Guardar cambios'}
-                                </Button>
+                                {!readOnly ? (
+                                  <Button variant="primary" onClick={handleSave} disabled={saving}>
+                                      {saving ? 'Guardando…' : 'Guardar cambios'}
+                                  </Button>
+                                ) : (
+                                  <p className="text-sm text-slate-500">Modo solo lectura</p>
+                                )}
                             </div>
                         </div>
                     )}

@@ -13,6 +13,7 @@ from data_staging.auth.security import (
     create_refresh_token,
     decode_refresh_token,
     get_current_user,
+    resolve_user_connect_context,
     verify_password,
 )
 from data_staging.schemas.auth import (
@@ -60,13 +61,17 @@ def _fetch_organization_name(db: Session, organization_id: str) -> Optional[str]
 def _build_user_response(db: Session, user_row) -> UserResponse:
     email = str(user_row.email)
     organization_id = str(user_row.organization_id)
+    user_id = str(user_row.id)
+    m8_connect_role, permissions = resolve_user_connect_context(db, user_id)
     return UserResponse(
-        id=str(user_row.id),
+        id=user_id,
         email=email,
         display_name=email.split("@")[0],
         role=str(user_row.role),
         organization_id=organization_id,
         organization_name=_fetch_organization_name(db, organization_id),
+        m8_connect_role=m8_connect_role,
+        permissions=permissions,
     )
 
 
@@ -110,17 +115,23 @@ async def login(credentials: LoginRequest, db: Session = Depends(get_db_session)
             detail="Correo o contraseña incorrectos",
         )
 
+    m8_connect_role, permissions = resolve_user_connect_context(db, str(result.id))
+
     access_token = create_access_token(
         user_id=str(result.id),
         email=str(result.email),
         role=str(result.role),
         organization_id=str(result.organization_id),
+        m8_connect_role=m8_connect_role,
+        permissions=permissions,
     )
     refresh_token = create_refresh_token(
         user_id=str(result.id),
         email=str(result.email),
         role=str(result.role),
         organization_id=str(result.organization_id),
+        m8_connect_role=m8_connect_role,
+        permissions=permissions,
     )
 
     email = str(result.email)
@@ -166,11 +177,15 @@ async def refresh_session(
                 detail="Cuenta bloqueada temporalmente. Inténtalo más tarde.",
             )
 
+    m8_connect_role, permissions = resolve_user_connect_context(db, str(result.id))
+
     access_token = create_access_token(
         user_id=str(result.id),
         email=str(result.email),
         role=str(result.role),
         organization_id=str(result.organization_id),
+        m8_connect_role=m8_connect_role,
+        permissions=permissions,
     )
 
     return RefreshResponse(

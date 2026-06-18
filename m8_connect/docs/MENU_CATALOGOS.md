@@ -1,6 +1,6 @@
 # Menú Catálogos — Lógica y arquitectura
 
-Documentación del panel **Catálogos** (`/catalogs`) y su relación con el wizard de carga de catálogos (`/upload/catalog`).
+Documentación del panel **Catálogos** (`/config/catalogs`) y su relación con el wizard de carga de catálogos (`/upload/catalog`).
 
 Índice general del proyecto: [README raíz](../../README.md).
 
@@ -40,10 +40,16 @@ flowchart LR
 
 | Pieza | Ubicación | Rol |
 |--------|-----------|-----|
-| Enlace sidebar | `frontend/src/components/Sidebar.jsx` | **Catálogos** → `/catalogs` |
+| Enlace sidebar | `frontend/src/components/layout/Sidebar.jsx` | **Catálogos** → `/config/catalogs` |
 | Ruta | `frontend/src/App.jsx` | Renderiza `CatalogAdmin` |
 | Página | `frontend/src/pages/CatalogAdmin.jsx` | UI principal |
 | Servicio HTTP | `frontend/src/services/catalogAdminService.js` | Llamadas al API admin |
+
+### Control de acceso (RBAC M8 Connect)
+
+- `admin_m8_connect`: acceso completo (lectura + edición).
+- `loader`: acceso de solo lectura si tiene permiso `config.catalogs_view`.
+- Si no cumple lo anterior, la ruta es bloqueada por `PermissionRoute`.
 
 **Layout:** lista de catálogos a la izquierda + formulario con pestañas a la derecha.
 
@@ -94,7 +100,12 @@ flowchart LR
 
 ## API admin (`src/data_staging/api/routers/catalogs.py`)
 
-Todas las rutas requieren usuario autenticado (`get_current_user`).
+Todas las rutas requieren usuario autenticado.
+
+Reglas RBAC del router:
+
+- Lectura (`GET /admin`, `/admin/{name}`, `/admin/schema-columns`): admin o loader con `config.catalogs_view`.
+- Escritura (`POST`, `PUT`, `DELETE`): solo `admin_m8_connect`.
 
 | Método | Ruta | Función |
 |--------|------|---------|
@@ -285,7 +296,7 @@ Cambios en el admin (JSON del store) se reflejan de inmediato en wizard y transf
 
 ## Flujo operativo resumido
 
-1. En **Catálogos** (`/catalogs`) defines destino en BD, columnas, reglas de mapping y JSON avanzado.
+1. En **Catálogos** (`/config/catalogs`) defines destino en BD, columnas, reglas de mapping y JSON avanzado.
 2. Marcas **Activo en wizard de carga** para que aparezca en `/upload/catalog`.
 3. (Opcional) Creas `config/catalog/{name}_config.json` para validación profunda.
 4. En **Carga de catálogos**, el usuario elige el catálogo y sigue el wizard de 4 pasos.

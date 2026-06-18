@@ -202,6 +202,7 @@ def test_validate_applies_mapping_before_history_validation():
         foreign_keys_data={
             "__valid_skus__": {"sku-1"},
             "__valid_locations__": {"loc-a"},
+            "__fk_org_scoped__": True,
         },
         history_mode=True,
         organization_id="test-org",

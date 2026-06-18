@@ -63,7 +63,8 @@ def _apply_fk_rule_join(
 ) -> pl.DataFrame:
     """FK via left join (más rápido que is_in con listas grandes)."""
     if not valid_values:
-        return df
+        fail = ~_is_empty_expr(col)
+        return _apply_error_rule(df, fail, message)
     norm_col = f"__fk_{col}"
     val_col = f"__v_{col}"
     hit_col = f"__hit_{col}"
@@ -308,8 +309,9 @@ def validate_history_chunk_vectorized(
         )
         df = _apply_error_rule(df, any_req_empty, req_msg)
 
+    org_scoped_fk = bool(fk_data.get("__fk_org_scoped__"))
     valid_skus = _fk_lookup_list(fk_data, "__valid_skus__", "__valid_skus_list__")
-    if "sku" in df.columns and valid_skus:
+    if "sku" in df.columns and org_scoped_fk:
         df = _apply_fk_rule_join(
             df,
             "sku",
@@ -321,7 +323,7 @@ def validate_history_chunk_vectorized(
         )
 
     valid_locs = _fk_lookup_list(fk_data, "__valid_locations__", "__valid_locations_list__")
-    if "location_code" in df.columns and valid_locs:
+    if "location_code" in df.columns and org_scoped_fk:
         df = _apply_fk_rule_join(
             df,
             "location_code",

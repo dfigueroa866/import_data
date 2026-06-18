@@ -126,6 +126,7 @@ def test_history_period_start_accepts_iso_date_only():
     fk = {
         "__valid_skus__": {"s1", "s2", "s3"},
         "__valid_locations__": {"a", "b", "c"},
+        "__fk_org_scoped__": True,
     }
     result = validate_history_chunk_vectorized(
         df,
@@ -159,7 +160,7 @@ def test_history_period_start_empty_skips_format_error():
             "sku": ["s1"],
         }
     )
-    fk = {"__valid_skus__": {"s1"}, "__valid_locations__": {"a"}}
+    fk = {"__valid_skus__": {"s1"}, "__valid_locations__": {"a"}, "__fk_org_scoped__": True}
     result = validate_history_chunk_vectorized(
         df,
         batch_id="b",

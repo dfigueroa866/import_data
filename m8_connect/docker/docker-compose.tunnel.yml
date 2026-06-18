@@ -21,21 +21,22 @@ services:
       REMOTE_PG_HOST: ${REMOTE_PG_HOST:-127.0.0.1}
       REMOTE_PG_PORT: ${REMOTE_PG_PORT:-5432}
     volumes:
-      # Clave privada para autenticación (sin passphrase, o usar ssh-agent)
-      - ${SSH_KEY_PATH}:/root/.ssh/id_rsa:ro
+      # Montaje read-only; se copia a /tmp para chmod (falla en bind mounts de Windows)
+      - ${SSH_KEY_PATH}:/mnt/ssh-key/id_rsa:ro
     command:
       - sh
       - -c
       - |
         set -e
         apk add --no-cache openssh-client
-        chmod 600 /root/.ssh/id_rsa
+        cp /mnt/ssh-key/id_rsa /tmp/id_rsa
+        chmod 600 /tmp/id_rsa
         echo "Túnel: localhost:5432 → $${SSH_USER}@$${SSH_HOST}:$${REMOTE_PG_HOST}:$${REMOTE_PG_PORT}"
         exec ssh -N \
           -o StrictHostKeyChecking=accept-new \
           -o ServerAliveInterval=60 \
           -o ServerAliveCountMax=3 \
-          -i /root/.ssh/id_rsa \
+          -i /tmp/id_rsa \
           -p "$${SSH_PORT}" \
           -L "0.0.0.0:5432:$${REMOTE_PG_HOST}:$${REMOTE_PG_PORT}" \
           "$${SSH_USER}@$${SSH_HOST}"

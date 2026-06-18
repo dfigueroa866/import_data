@@ -36,7 +36,10 @@ from data_staging.auth.security import (
     TokenUser,
     get_current_user,
     ensure_organization_id_mapping,
+    require_permission,
 )
+from data_staging.services.connect_roles.constants import CONNECT_ROLE_ADMIN
+from data_staging.services.connect_roles.service import has_permission
 from data_staging.utils.batch_control import (
     collect_batch_file_paths,
     is_safe_sql_identifier,
@@ -51,10 +54,18 @@ from data_staging.utils.batch_control import (
 
 logger = logging.getLogger(__name__)
 
-# Sin actualización de progreso y sin job activo en cola → preview/validación huérfana (p. ej. reinicio del worker).
 PREVIEW_STALE_SECONDS = 600
 VALIDATION_STALE_SECONDS = 600
 PROMOTION_STALE_SECONDS = 600
+
+
+def _assert_upload_type_allowed(user: TokenUser, load_type: Optional[str]) -> None:
+    if user.m8_connect_role == CONNECT_ROLE_ADMIN:
+        return
+    normalized = str(load_type or "history").lower()
+    permission_key = "upload.catalogs" if normalized in {"catalog", "catalogs"} else "upload.history"
+    if not has_permission(user.permissions, permission_key):
+        raise HTTPException(status_code=403, detail=f"Permiso insuficiente: {permission_key}")
 
 
 def _validation_job_active(db: Session, batch_id: str) -> bool:
@@ -1090,7 +1101,7 @@ async def process_batch(
     batch_id: str,
     request: ProcessRequest,
     db: Session = Depends(get_db_session),
-    current_user: TokenUser = Depends(get_current_user),
+    current_user: TokenUser = Depends(require_permission("menus.upload")),
 ):
     """
     Procesa un batch con configuración avanzada.
@@ -1323,7 +1334,7 @@ async def list_batches(
     source_name: Optional[str] = None,
     search: Optional[str] = None,
     db: Session = Depends(get_db_session),
-    current_user: TokenUser = Depends(get_current_user),
+    current_user: TokenUser = Depends(require_permission("menus.batches")),
 ):
     """List uploaded batches with optional filtering and pagination."""
     
@@ -1432,7 +1443,7 @@ async def upload_file_temp(
     load_type: Optional[str] = Form("history"),
     process_type: Optional[str] = Form(None),
     db: Session = Depends(get_db_session),
-    current_user: TokenUser = Depends(get_current_user),
+    current_user: TokenUser = Depends(require_permission("menus.upload")),
 ):
     """
     Upload file for wizard - parses headers but doesn't process yet.
@@ -1444,6 +1455,7 @@ async def upload_file_temp(
     4. Return batch_id + file_headers for Step 2 mapping
     """
     try:
+        _assert_upload_type_allowed(current_user, load_type)
         # 1. Validate file
         validation = upload_service.validate_file(file)
         if not validation["valid"]:
@@ -1625,7 +1637,7 @@ async def save_column_mapping(
     batch_id: str,
     mapping_data: Dict[str, Any],
     db: Session = Depends(get_db_session),
-    current_user: TokenUser = Depends(get_current_user),
+    current_user: TokenUser = Depends(require_permission("menus.upload")),
 ):
     """
     Save column mappings for wizard Step 2.
@@ -1810,7 +1822,7 @@ async def generate_preview(
     batch_id: str,
     force: bool = False,
     db: Session = Depends(get_db_session),
-    current_user: TokenUser = Depends(get_current_user),
+    current_user: TokenUser = Depends(require_permission("menus.upload")),
 ):
     """
     Start preview generation for wizard Step 3 (async).
@@ -2039,7 +2051,7 @@ async def generate_preview(
 async def get_preview_result(
     batch_id: str,
     db: Session = Depends(get_db_session),
-    current_user: TokenUser = Depends(get_current_user),
+    current_user: TokenUser = Depends(require_permission("menus.upload")),
 ):
     """Return preview payload when background generation completes."""
     db.execute(text("SET LOCAL statement_timeout = '15000'"))
@@ -2753,7 +2765,7 @@ async def cancel_batch(
 async def download_rejected_records(
     batch_id: str,
     db: Session = Depends(get_db_session),
-    current_user: TokenUser = Depends(get_current_user),
+    current_user: TokenUser = Depends(require_permission("menus.upload")),
 ):
     """
     Descarga los registros rechazados desde el archivo en disco generado durante la validación.
@@ -2901,7 +2913,7 @@ async def download_valid_records(
 async def delete_batch(
     batch_id: str,
     db: Session = Depends(get_db_session),
-    current_user: TokenUser = Depends(get_current_user),
+    current_user: TokenUser = Depends(require_permission("menus.batches")),
 ):
     """Elimina un batch y todos sus datos relacionados (archivo, jobs, etc.)."""
     try:
@@ -2934,7 +2946,7 @@ async def delete_batch(
 async def bulk_delete_batches(
     body: BulkDeleteRequest,
     db: Session = Depends(get_db_session),
-    current_user: TokenUser = Depends(get_current_user),
+    current_user: TokenUser = Depends(require_permission("menus.batches")),
 ):
     """Elimina varios batches por ID (solo de la organización del usuario)."""
     if not body.batch_ids:
@@ -2979,7 +2991,7 @@ async def bulk_delete_batches(
 async def delete_all_batches(
     body: BulkDeleteFiltersRequest,
     db: Session = Depends(get_db_session),
-    current_user: TokenUser = Depends(get_current_user),
+    current_user: TokenUser = Depends(require_permission("menus.batches")),
 ):
     """Elimina todos los batches que coincidan con filtros (organización del usuario)."""
     try:

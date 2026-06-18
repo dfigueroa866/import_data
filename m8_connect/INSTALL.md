@@ -22,14 +22,36 @@ Ver [Inicio rápido](../README.md#inicio-rápido) en el README raíz.
 alembic upgrade head
 ```
 
-Creates `staging_meta.*` (including `batch_control`, `job_queue`) and `staging_data.template_staging`.
+Creates `staging_meta.*` (including `batch_control`, `job_queue`) and M8 Connect RBAC objects in `m8_schema` (`connect_role`, `connect_user_roles`, `loader_profile`).
 
 **Not managed by Alembic** (must exist in your business DB):
 
 - `public.users`, `public.organizations` — authentication
 - `public.skus`, `public.locations`, `public.sales_history` — production targets
 
-SQL en `migrations/*.sql` superseded by Alembic revision `002_job_queue_and_indexes`.
+SQL en `migrations/*.sql` superseded by Alembic revisions `002_job_queue_and_indexes` and `003_connect_roles`.
+
+## Roles M8 Connect
+
+RBAC de aplicación (solo M8 Connect):
+
+- `admin_m8_connect`
+- `loader`
+
+Estas asignaciones viven en `m8_schema.connect_user_roles` y **no modifican** `public."UserRole"`.
+
+Bootstrap de admin inicial:
+
+- La migración `003_connect_roles` intenta asignar `admin_m8_connect` a `david.figueroa@m8solutions.com.mx` si ese usuario existe en `public.users`.
+- Si el usuario aún no existe, puede asignarse después manualmente:
+
+```sql
+INSERT INTO m8_schema.connect_user_roles (user_id, role, granted_at)
+SELECT id, 'admin_m8_connect'::m8_schema.connect_role, now()
+FROM public.users
+WHERE LOWER(email::text) = LOWER('david.figueroa@m8solutions.com.mx')
+ON CONFLICT (user_id) DO UPDATE SET role = EXCLUDED.role;
+```
 
 ## Platform notes
 

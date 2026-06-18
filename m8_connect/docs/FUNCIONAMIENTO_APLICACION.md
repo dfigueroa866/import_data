@@ -16,10 +16,11 @@
 6. [Procesamiento en el worker (`PROCESS_FILE`)](#6-procesamiento-en-el-worker-process_file)
 7. [Promoción a producción (`PROMOTE_BATCH`)](#7-promoción-a-producción-promote_batch)
 8. [Estados del batch y del job](#8-estados-del-batch-y-del-job)
-9. [Frontend: pantallas y navegación](#9-frontend-pantallas-y-navegación)
-10. [Base de datos y artefactos en disco](#10-base-de-datos-y-artefactos-en-disco)
-11. [Diagramas de flujo](#11-diagramas-de-flujo)
-12. [Glosario](#12-glosario)
+9. [Autenticación y roles (RBAC M8 Connect)](#9-autenticación-y-roles-rbac-m8-connect)
+10. [Frontend: pantallas y navegación](#10-frontend-pantallas-y-navegación)
+11. [Base de datos y artefactos en disco](#11-base-de-datos-y-artefactos-en-disco)
+12. [Diagramas de flujo](#12-diagramas-de-flujo)
+13. [Glosario](#13-glosario)
 
 ---
 
@@ -58,7 +59,7 @@ Secuencia al ejecutar `python run_app.py`:
 
 En el **lifespan** de FastAPI (`api/main.py`):
 
-- Al iniciar: prueba conexión DB y registra routers (`upload`, `monitoring`, `system`, `auth`, `catalogs`).
+- Al iniciar: prueba conexión DB y registra routers (`upload`, `monitoring`, `system`, `auth`, `catalogs`, `history`, `roles`).
 - Al cerrar: log de shutdown.
 
 ### 2.3 Proceso 2 — Workers (`run_workers.py`)
@@ -83,7 +84,7 @@ npm run dev
 ```
 
 - Proxy/API base configurado en `services/api.js` (típicamente `http://localhost:8000`).
-- Rutas protegidas (JWT): `/login`, `/`, `/upload`, `/upload/history`, `/upload/catalog`, `/catalogs`, `/batches`, `/batches/:batchId`, `/monitoring`.
+- Rutas protegidas (JWT + permisos): `/login`, `/`, `/upload`, `/upload/history`, `/upload/catalog`, `/config/catalogs`, `/config/history`, `/config/roles`, `/batches`, `/batches/:batchId`, `/monitoring`.
 
 **Sin workers en ejecución**, los jobs quedan en `PENDING` y el wizard se queda en "Processing" sin avanzar.
 
@@ -614,7 +615,34 @@ Telemetría por fase en `batch_control.metadata.pipeline_timing` (`preview`, `pr
 
 ---
 
-## 9. Frontend: pantallas y navegación
+## 9. Autenticación y roles (RBAC M8 Connect)
+
+La autenticación continúa usando `public.users`, pero los permisos funcionales de la app se resuelven con roles de M8 Connect.
+
+### 9.1 Capas de rol
+
+| Capa | Ubicación | Valores |
+|------|-----------|---------|
+| Plataforma (compartida) | `public.users.role` | `admin`, `manager`, `planner`, `viewer` |
+| M8 Connect (app) | `m8_schema.connect_user_roles` | `admin_m8_connect`, `loader` |
+
+### 9.2 Reglas efectivas
+
+- Si el usuario tiene fila en `m8_schema.connect_user_roles`, se usa ese rol.
+- Si no tiene fila, se considera `loader` por defecto.
+- `admin_m8_connect` tiene acceso total.
+- `loader` usa la matriz de permisos global de `m8_schema.loader_profile`.
+
+### 9.3 Claims JWT
+
+Además de `role` (plataforma), el token incluye:
+
+- `m8_connect_role`
+- `permissions`
+
+Estos claims son los que consumen `PermissionRoute` (frontend) y los guards (`require_m8_connect_admin`, `require_permission`) del backend.
+
+## 10. Frontend: pantallas y navegación
 
 | Ruta | Componente | Función |
 |------|------------|---------|
@@ -623,7 +651,10 @@ Telemetría por fase en `batch_control.metadata.pipeline_timing` (`preview`, `pr
 | `/upload` | `UploadLanding.jsx` | Elegir Historia o Catálogos |
 | `/upload/history` | `UploadWizard.jsx` | Wizard historia (4 pasos) |
 | `/upload/catalog` | `CatalogUploadWizard.jsx` | Wizard catálogos |
-| `/catalogs` | `CatalogAdmin.jsx` | Admin catálogos |
+| `/config/catalogs` | `CatalogAdmin.jsx` | Admin catálogos |
+| `/config/history` | `HistoryAdmin.jsx` | Admin historia |
+| `/config/roles` | `RolesAdmin.jsx` | Admin roles y perfil loader |
+| `/catalogs` | `Navigate -> /config/catalogs` | Redirección de compatibilidad |
 | `/batches` | `Batches.jsx` | Historial de cargas |
 | `/batches/:batchId` | `BatchProgress.jsx` | Detalle de batch |
 | `/monitoring` | `Monitoring.jsx` | Estado del sistema |
@@ -637,13 +668,15 @@ Telemetría por fase en `batch_control.metadata.pipeline_timing` (`preview`, `pr
 | `wizardService.js` | file-temp, mapping, preview, process, progress, promote, download rejected |
 | `systemService.js` | schemas, tables, columns (`/api/v1/system/*`) |
 | `catalogAdminService.js` | Admin catálogos |
+| `historyAdminService.js` | Admin historia |
+| `rolesAdminService.js` | Admin de roles M8 Connect |
 | `monitoringService.js` | Health y métricas |
 
 ---
 
-## 10. Base de datos y artefactos en disco
+## 11. Base de datos y artefactos en disco
 
-### 10.1 Tabla `staging_meta.batch_control`
+### 11.1 Tabla `staging_meta.batch_control`
 
 Campos usados intensivamente:
 
@@ -655,11 +688,18 @@ Campos usados intensivamente:
 - `error_message`
 - timestamps: `created_at`, `started_at`, `completed_at`
 
-### 10.2 Tabla `staging_meta.job_queue`
+### 11.2 Tabla `staging_meta.job_queue`
 
 Ver migración Alembic `002_job_queue_and_indexes`. Trigger `pg_notify` en INSERT (workers con `use_notify=False` no lo usan actualmente).
 
-### 10.3 Archivos en disco
+### 11.3 Tablas RBAC M8 Connect (`m8_schema`)
+
+| Tabla | Propósito |
+|------|-----------|
+| `m8_schema.connect_user_roles` | Asignación explícita de rol M8 Connect por usuario |
+| `m8_schema.loader_profile` | Matriz global de permisos para usuarios loader |
+
+### 11.4 Archivos en disco
 
 | Ruta | Contenido |
 |------|-----------|
@@ -670,9 +710,9 @@ Ver migración Alembic `002_job_queue_and_indexes`. Trigger `pg_notify` en INSER
 
 ---
 
-## 11. Diagramas de flujo
+## 12. Diagramas de flujo
 
-### 11.1 Wizard completo (happy path)
+### 12.1 Wizard completo (happy path)
 
 ```mermaid
 sequenceDiagram
@@ -717,7 +757,7 @@ sequenceDiagram
     UI-->>U: Import Successful
 ```
 
-### 11.2 Decisión de ruta de datos en worker
+### 12.2 Decisión de ruta de datos en worker
 
 ```mermaid
 flowchart TD
@@ -734,7 +774,7 @@ flowchart TD
 
 ---
 
-## 12. Glosario
+## 13. Glosario
 
 | Término | Definición |
 |---------|------------|
@@ -748,6 +788,9 @@ flowchart TD
 | **auto_production** | Encola promoción automática al terminar process |
 | **dedup_columns** | Columnas clave para deduplicación (lógica de pre-check desactivada; puede aplicar constraint DB) |
 | **source_name** | Identificador lógico; en wizard suele coincidir con nombre de tabla destino |
+| **admin_m8_connect** | Rol M8 Connect con acceso total de configuración y administración |
+| **loader** | Rol M8 Connect con permisos definidos por `loader_profile` |
+| **loader_profile** | Matriz de permisos global aplicada a usuarios loader |
 
 ---
 

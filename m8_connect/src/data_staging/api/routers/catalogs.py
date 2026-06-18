@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from data_staging.auth.security import TokenUser, get_current_user
+from data_staging.auth.security import (
+    TokenUser,
+    get_current_user,
+    require_m8_connect_admin,
+)
 from data_staging.services.catalog import catalog_store
 from data_staging.database import get_db_session
 from data_staging.schemas.catalogs import CatalogDefinitionPayload
+from data_staging.services.connect_roles.constants import CONNECT_ROLE_ADMIN
+from data_staging.services.connect_roles.service import has_permission
 from data_staging.utils.pg_schema import fetch_table_columns
 
 logger = logging.getLogger(__name__)
@@ -19,12 +24,17 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/catalogs", tags=["Catalogs"])
 
 
-
+def _require_catalogs_read(current_user: TokenUser = Depends(get_current_user)) -> TokenUser:
+    if current_user.m8_connect_role == CONNECT_ROLE_ADMIN:
+        return current_user
+    if has_permission(current_user.permissions, "config.catalogs_view"):
+        return current_user
+    raise HTTPException(status_code=403, detail="Permiso insuficiente: config.catalogs_view")
 
 
 @router.get("/admin")
 async def list_catalog_definitions_admin(
-  current_user: TokenUser = Depends(get_current_user),
+    current_user: TokenUser = Depends(_require_catalogs_read),
 ):
     """List all catalog definitions (including inactive) for admin UI."""
     return {"catalogs": catalog_store.list_all_catalogs(active_only=False)}
@@ -35,7 +45,7 @@ async def list_target_table_columns(
     schema: str = Query(...),
     table: str = Query(...),
     db: Session = Depends(get_db_session),
-    current_user: TokenUser = Depends(get_current_user),
+    current_user: TokenUser = Depends(_require_catalogs_read),
 ):
     """Columns from information_schema to help configure a catalog."""
     columns = fetch_table_columns(db, schema, table)
@@ -49,7 +59,7 @@ async def list_target_table_columns(
 @router.get("/admin/{name}")
 async def get_catalog_definition_admin(
     name: str,
-    current_user: TokenUser = Depends(get_current_user),
+    current_user: TokenUser = Depends(_require_catalogs_read),
 ):
     entry = catalog_store.get_catalog_by_name(name)
     if not entry:
@@ -60,7 +70,7 @@ async def get_catalog_definition_admin(
 @router.post("/admin", status_code=201)
 async def create_catalog_definition(
     payload: CatalogDefinitionPayload,
-    current_user: TokenUser = Depends(get_current_user),
+    current_user: TokenUser = Depends(require_m8_connect_admin),
 ):
     try:
         entry = catalog_store.create_catalog(payload.model_dump())
@@ -74,7 +84,7 @@ async def create_catalog_definition(
 async def update_catalog_definition(
     name: str,
     payload: CatalogDefinitionPayload,
-    current_user: TokenUser = Depends(get_current_user),
+    current_user: TokenUser = Depends(require_m8_connect_admin),
 ):
     try:
         entry = catalog_store.update_catalog(name, payload.model_dump())
@@ -88,7 +98,7 @@ async def update_catalog_definition(
 async def delete_catalog_definition(
     name: str,
     hard: bool = Query(False),
-    current_user: TokenUser = Depends(get_current_user),
+    current_user: TokenUser = Depends(require_m8_connect_admin),
 ):
     try:
         catalog_store.delete_catalog(name, hard=hard)

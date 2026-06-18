@@ -74,4 +74,8 @@ def golden_fk_sets(golden_aggregated_parquet: Path) -> Dict[str, set]:
     df = pl.read_parquet(golden_aggregated_parquet)
     skus = {str(v).strip().lower() for v in df["sku"].to_list() if v is not None}
     locs = {str(v).strip().lower() for v in df["location_code"].to_list() if v is not None}
-    return {"__valid_skus__": skus, "__valid_locations__": locs}
+    return {
+        "__valid_skus__": skus,
+        "__valid_locations__": locs,
+        "__fk_org_scoped__": True,
+    }

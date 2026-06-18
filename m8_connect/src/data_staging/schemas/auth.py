@@ -1,7 +1,7 @@
 # src/data_staging/schemas/auth.py
 """Authentication related Pydantic schemas."""
 
-from typing import Optional
+from typing import Any, Dict, Optional
 from pydantic import BaseModel
 
 class TokenUser(BaseModel):
@@ -9,6 +9,8 @@ class TokenUser(BaseModel):
     email: str
     role: str
     organization_id: str
+    m8_connect_role: str = "loader"
+    permissions: Dict[str, Any] = {}
 
 class LoginRequest(BaseModel):
     email: str
@@ -21,6 +23,8 @@ class UserResponse(BaseModel):
     role: str
     organization_id: str
     organization_name: Optional[str] = None
+    m8_connect_role: str = "loader"
+    permissions: Dict[str, Any] = {}
 
 class LoginResponse(BaseModel):
     access_token: str

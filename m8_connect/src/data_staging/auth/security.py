@@ -1,14 +1,18 @@
 """Password verification and JWT token helpers."""
 
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Callable, Dict, Optional
 
 import bcrypt
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import jwt, JWTError
+from sqlalchemy.orm import Session
+
 from data_staging.config import settings
 from data_staging.schemas.auth import TokenUser
+from data_staging.services.connect_roles.constants import CONNECT_ROLE_ADMIN
+from data_staging.services.connect_roles.service import has_permission
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -37,12 +41,40 @@ def get_current_user(
     if not user_id or not organization_id:
         raise HTTPException(status_code=401, detail="Token incompleto")
 
+    permissions = payload.get("permissions") or {}
+    if not isinstance(permissions, dict):
+        permissions = {}
+
     return TokenUser(
         id=str(user_id),
         email=str(payload.get("email") or ""),
         role=str(payload.get("role") or ""),
         organization_id=str(organization_id),
+        m8_connect_role=str(payload.get("m8_connect_role") or "loader"),
+        permissions=permissions,
     )
+
+
+def require_m8_connect_admin(
+    current_user: TokenUser = Depends(get_current_user),
+) -> TokenUser:
+    if current_user.m8_connect_role != CONNECT_ROLE_ADMIN:
+        raise HTTPException(status_code=403, detail="Se requiere rol admin_m8_connect")
+    return current_user
+
+
+def require_permission(permission_key: str) -> Callable:
+    def _dependency(current_user: TokenUser = Depends(get_current_user)) -> TokenUser:
+        if current_user.m8_connect_role == CONNECT_ROLE_ADMIN:
+            return current_user
+        if not has_permission(current_user.permissions, permission_key):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Permiso insuficiente: {permission_key}",
+            )
+        return current_user
+
+    return _dependency
 
 
 ORG_MAPPING_KEY = "__fixed_organization_id__"
@@ -92,6 +124,8 @@ def create_access_token(
     email: str,
     role: str,
     organization_id: str,
+    m8_connect_role: str = "loader",
+    permissions: Optional[Dict[str, Any]] = None,
     expires_minutes: int | None = None,
 ) -> str:
     """Create a signed JWT access token."""
@@ -104,6 +138,8 @@ def create_access_token(
         "email": email,
         "role": role,
         "organization_id": organization_id,
+        "m8_connect_role": m8_connect_role,
+        "permissions": permissions or {},
         "typ": "access",
         "exp": expire,
     }
@@ -115,6 +151,8 @@ def create_refresh_token(
     email: str,
     role: str,
     organization_id: str,
+    m8_connect_role: str = "loader",
+    permissions: Optional[Dict[str, Any]] = None,
     expires_days: int | None = None,
 ) -> str:
     """Create a signed JWT refresh token."""
@@ -127,6 +165,8 @@ def create_refresh_token(
         "email": email,
         "role": role,
         "organization_id": organization_id,
+        "m8_connect_role": m8_connect_role,
+        "permissions": permissions or {},
         "typ": "refresh",
         "exp": expire,
     }
@@ -153,3 +193,14 @@ def decode_refresh_token(token: str) -> dict:
         raise HTTPException(status_code=401, detail="Token incompleto")
 
     return payload
+
+
+def resolve_user_connect_context(db: Session, user_id: str) -> tuple[str, Dict[str, Any]]:
+    from data_staging.services.connect_roles.service import (
+        get_effective_permissions,
+        resolve_connect_role,
+    )
+
+    connect_role = resolve_connect_role(db, user_id)
+    permissions = get_effective_permissions(db, connect_role)
+    return connect_role, permissions

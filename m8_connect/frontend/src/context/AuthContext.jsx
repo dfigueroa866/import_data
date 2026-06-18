@@ -78,14 +78,11 @@ export const AuthProvider = ({ children }) => {
             throw new Error('Sin refresh token');
         }
         const data = await refreshAccessToken();
-        const profile = getStoredUser();
+        const profile = await getCurrentUser();
         const remember = isRemembered();
-        if (profile) {
-            setAuthSession(data.access_token, refreshToken, profile, remember);
-        } else {
-            setAuthSession(data.access_token, refreshToken, { email: '' }, remember);
-        }
+        setAuthSession(data.access_token, refreshToken, profile, remember);
         setToken(data.access_token);
+        setUser(profile);
         touchActivity();
         return data.access_token;
     }, [touchActivity]);

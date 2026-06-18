@@ -5,6 +5,18 @@
 1. Abrir la UI (por defecto http://localhost:5173)
 2. Iniciar sesión en `/login` con usuario de `public.users`
 
+## Roles de M8 Connect
+
+M8 Connect usa roles propios de aplicación, **aislados** de `public."UserRole"`:
+
+- `admin_m8_connect`: acceso total a menús, configuración y administración de roles.
+- `loader`: acceso controlado por el perfil global configurado por el admin.
+
+Notas clave:
+
+- Si un usuario no tiene asignación explícita en `m8_schema.connect_user_roles`, se trata como `loader` por defecto.
+- El panel de administración de roles está en `/config/roles` (solo `admin_m8_connect`).
+
 ## Tipos de carga
 
 Desde **`/upload`** elija:
@@ -37,6 +49,14 @@ Para **historia**: agregación semanal/mensual y comprobación de totales. Para 
 - **`/batches`** — historial de cargas
 - **`/batches/{id}`** — progreso detallado
 - **`/monitoring`** — salud del sistema
+
+## Configuración y permisos
+
+- **`/config/catalogs`** — configuración de catálogos (admin o loader con permiso `config.catalogs_view`).
+- **`/config/history`** — configuración de historia (admin o loader con permiso `config.history_view`).
+- **`/config/roles`** — asignación de roles y perfil loader (solo admin).
+
+La visibilidad de menús (`Panel`, `Cargas`, `Lotes`, `Monitoreo`, `Configuración`) y tipos de carga (`history`, `catalogs`) depende del perfil efectivo del usuario.
 
 ## Integración API (sin UI)
 

@@ -31,7 +31,8 @@ def execute_validation_pipeline(batch_id: str, org_id: str) -> None:
         db.execute(text("SET LOCAL statement_timeout = '0'"))
         result = db.execute(
             text("""
-                SELECT batch_id, metadata, source_name, file_path
+                SELECT batch_id, metadata, source_name, file_path,
+                       COALESCE(organization_id, metadata->>'organization_id') AS organization_id
                 FROM staging_meta.batch_control
                 WHERE batch_id = :batch_id
             """),
@@ -44,6 +45,10 @@ def execute_validation_pipeline(batch_id: str, org_id: str) -> None:
         raise_if_batch_cancelled(batch_id)
 
         metadata = normalize_metadata(batch.metadata)
+        resolved_org = str(org_id or getattr(batch, "organization_id", "") or "").strip()
+        if not resolved_org:
+            raise ValueError(f"organization_id is required for VALIDATE_BATCH on batch {batch_id}")
+        org_id = resolved_org
         load_type = metadata.get("load_type", "history")
         if load_type != "history":
             metadata["validation_in_progress"] = False

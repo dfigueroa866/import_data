@@ -118,47 +118,28 @@ def build_history_validation_context(
 
     sku_resolver = None
     resolve_sku_id = False
-    if organization_id:
+    resolved_org = str(organization_id or metadata.get("organization_id") or "").strip()
+    if resolved_org:
         from data_staging.services.history.history_schema import (
             create_sku_resolver,
             sales_history_needs_sku_id_resolution,
         )
+        from data_staging.services.history.org_reference_data import load_org_scoped_fk_sets
 
         resolve_sku_id = sales_history_needs_sku_id_resolution(types, column_mapping)
         sku_resolver = create_sku_resolver(
             cursor,
-            organization_id,
+            resolved_org,
             types,
             column_mapping,
         )
         if sku_resolver is not None:
             sku_resolver.preload()
 
-        try:
-            cursor.execute(
-                "SELECT DISTINCT code FROM public.skus WHERE organization_id = %s AND code IS NOT NULL",
-                (organization_id,),
-            )
-            sku_codes = {
-                str(r[0]).strip().lower() for r in cursor.fetchall()
-            }
-            foreign_keys_data["__valid_skus__"] = sku_codes
-            foreign_keys_data["__valid_skus_list__"] = list(sku_codes)
-        except Exception as exc:
-            logger.error("Failed to load valid SKUs: %s", exc)
-
-        try:
-            cursor.execute(
-                "SELECT DISTINCT code FROM public.locations WHERE organization_id = %s AND code IS NOT NULL",
-                (organization_id,),
-            )
-            loc_codes = {
-                str(r[0]).strip().lower() for r in cursor.fetchall()
-            }
-            foreign_keys_data["__valid_locations__"] = loc_codes
-            foreign_keys_data["__valid_locations_list__"] = list(loc_codes)
-        except Exception as exc:
-            logger.error("Failed to load valid Locations: %s", exc)
+        fk_sets = load_org_scoped_fk_sets(cursor, resolved_org)
+        foreign_keys_data.update(fk_sets)
+    else:
+        logger.error("organization_id missing; SKU/location FK validation will be skipped")
 
     source_file_columns = list(selected_columns)
     if not source_file_columns and file_path.suffix.lower() == ".parquet":
@@ -179,7 +160,7 @@ def build_history_validation_context(
         not_null_columns=not_null_columns,
         foreign_keys_data=foreign_keys_data,
         process_type=process_type,
-        organization_id=organization_id,
+        organization_id=resolved_org or organization_id,
         source_extension=source_extension,
         sku_resolver=sku_resolver,
         resolve_sku_id=resolve_sku_id,

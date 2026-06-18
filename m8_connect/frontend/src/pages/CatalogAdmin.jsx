@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { Settings2 } from 'lucide-react';
 import { Button, PageHeader, LoadingSpinner, Alert, FormField, Input, Select, Textarea } from '../components/ui';
 import { useAuth } from '../context/AuthContext';
+import { canEditConfig } from '../utils/permissions';
 import {
     listCatalogDefinitions,
     getCatalogDefinition,
@@ -25,6 +26,7 @@ import {
 
 const CatalogAdmin = () => {
     const { user } = useAuth();
+    const readOnly = !canEditConfig(user);
     const organizationName = user?.organization_name || '';
 
     const [catalogs, setCatalogs] = useState([]);
@@ -385,13 +387,20 @@ const CatalogAdmin = () => {
                             )}
 
                             <div className="flex flex-wrap gap-3 mt-5">
-                                <Button variant="primary" onClick={handleSave} disabled={saving}>
-                                    {saving ? 'Guardando…' : isNew ? 'Crear catálogo' : 'Guardar cambios'}
-                                </Button>
-                                {!isNew && selectedName && (
-                                    <Button variant="secondary" onClick={handleDeactivate}>
-                                        Desactivar
+                                {!readOnly && (
+                                  <>
+                                    <Button variant="primary" onClick={handleSave} disabled={saving}>
+                                        {saving ? 'Guardando…' : isNew ? 'Crear catálogo' : 'Guardar cambios'}
                                     </Button>
+                                    {!isNew && selectedName && (
+                                        <Button variant="secondary" onClick={handleDeactivate}>
+                                            Desactivar
+                                        </Button>
+                                    )}
+                                  </>
+                                )}
+                                {readOnly && (
+                                  <p className="text-sm text-slate-500">Modo solo lectura</p>
                                 )}
                             </div>
                         </>
