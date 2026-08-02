@@ -28,6 +28,7 @@ const CatalogUploadWizard = () => {
     productionColumns: [],
     previewData: null,
     validationSummary: null,
+    validationComplete: false,
     processing: false,
   });
   const [processingComplete, setProcessingComplete] = useState(false);

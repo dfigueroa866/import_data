@@ -47,7 +47,7 @@
     max-width: 28rem;
     text-align: center;
     font-size: 0.875rem;
-    color: var(--color-text-secondary);
+    color: var(--text-secondary);
 }
 
 .step3-progress {
@@ -67,7 +67,7 @@
 .step3-progress__fill {
     height: 100%;
     border-radius: inherit;
-    background: var(--primary-color, #3b82f6);
+    background: var(--accent-primary, #3b82f6);
     transition: width 0.4s ease;
 }
 
@@ -311,13 +311,11 @@
     box-shadow: 0 2px 6px rgba(15, 23, 42, 0.08);
 }
 
-@media (prefers-color-scheme: dark) {
-    .history-kpi__arrow--prominent {
+    .dark .history-kpi__arrow--prominent {
         color: #e2e8f0;
         background: #334155;
         border-color: #64748b;
     }
-}
 
 .history-kpi__delta {
     display: inline-block;
@@ -568,17 +566,15 @@
     color: #b91c1c;
 }
 
-@media (prefers-color-scheme: dark) {
-    .report-section--validation {
+    .dark .report-section--validation {
         border-color: #f87171;
         background: rgba(239, 68, 68, 0.1);
         box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.12);
     }
 
-    .report-section--validation .report-section__title {
+    .dark .report-section--validation .report-section__title {
         color: #fca5a5;
     }
-}
 
 .step3-prod-summary {
     padding: 0.65rem 0.75rem;
@@ -618,25 +614,23 @@
     color: #047857;
 }
 
-@media (prefers-color-scheme: dark) {
-    .step3-prod-summary--source {
+    .dark .step3-prod-summary--source {
         background: rgba(148, 163, 184, 0.08);
         border-color: rgba(148, 163, 184, 0.3);
     }
 
-    .step3-prod-summary--success {
+    .dark .step3-prod-summary--success {
         background: rgba(16, 185, 129, 0.12);
         border-color: rgba(52, 211, 153, 0.45);
     }
 
-    .step3-prod-summary--success .step3-prod-summary__label {
+    .dark .step3-prod-summary--success .step3-prod-summary__label {
         color: #6ee7b7;
     }
 
-    .step3-prod-summary--success .step3-prod-summary__value strong {
+    .dark .step3-prod-summary--success .step3-prod-summary__value strong {
         color: #6ee7b7;
     }
-}
 
 .step3-prod-summary__hint {
     margin: 0 0 0.4rem;

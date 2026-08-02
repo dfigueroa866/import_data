@@ -41,8 +41,11 @@ import {
 } from '../components/ui';
 import { formatDate, formatNumber, formatDurationSeconds, EMPTY } from '../lib/format';
 import { cn } from '../lib/utils';
+import { BATCH_STATUS_FILTER_OPTIONS } from '../lib/statusLabels';
 import { uploadService } from '../services/uploadService';
 import useSessionLoadGuard from '../hooks/useSessionLoadGuard';
+import { useAuth } from '../context/AuthContext';
+import { isConnectAdmin } from '../utils/permissions';
 
 const ACTIVE_STATUSES = ['PROCESSING', 'PENDING', 'PENDING_PROCESS', 'PENDING_MAPPING', 'PENDING_PREVIEW'];
 const RESUMABLE_STATUSES = ['FAILED', 'PARTIALLY_PROMOTED'];
@@ -62,9 +65,15 @@ const getBatchDateMs = (batch) => {
 
 const PAGE_SIZE = 10;
 
-const SORTABLE_COLUMNS = [
+const BASE_SORTABLE_COLUMNS = [
     { key: 'batch_id', label: 'Batch ID', getValue: (b) => (b.batch_id || '').toLowerCase() },
     { key: 'source_name', label: 'Fuente', getValue: (b) => (b.source_name || '').toLowerCase() },
+    {
+        key: 'organization_name',
+        label: 'Organización',
+        adminOnly: true,
+        getValue: (b) => (b.organization_name || b.organization_id || '').toLowerCase(),
+    },
     { key: 'status', label: 'Estado', getValue: (b) => (b.status || '').toLowerCase() },
     {
         key: 'records_count',
@@ -85,6 +94,9 @@ const SORTABLE_COLUMNS = [
         numeric: true,
     },
 ];
+
+const getVisibleColumns = (isAdmin) =>
+    BASE_SORTABLE_COLUMNS.filter((col) => !col.adminOnly || isAdmin);
 
 const SortableTh = ({ columnKey, label, sortKey, sortDir, onSort, numeric }) => {
     const active = sortKey === columnKey;
@@ -158,10 +170,13 @@ const BatchStatusCell = ({ status, errorMessage }) => {
     const handleLeave = () => setOpen(false);
 
     return (
-        <div className="batch-status-cell">
+        <div className="relative inline-block">
             <div
                 ref={triggerRef}
-                className={`batch-status-trigger${showPopover ? ' batch-status-trigger--interactive' : ''}`}
+                className={cn(
+                    'inline-flex',
+                    showPopover && 'cursor-help rounded-md outline-none focus-visible:ring-2 focus-visible:ring-brand-500'
+                )}
                 onMouseEnter={handleEnter}
                 onMouseLeave={handleLeave}
                 onFocus={handleEnter}
@@ -176,14 +191,18 @@ const BatchStatusCell = ({ status, errorMessage }) => {
                 createPortal(
                     <div
                         id="batch-error-popover"
-                        className="batch-error-popover"
+                        className="fixed z-[3000] rounded-lg border border-[#e2e8f0] bg-white p-3 shadow-lg dark:border-[#334155] dark:bg-slate-800"
                         style={{ top: position.top, left: position.left, width: POPOVER_WIDTH }}
                         role="tooltip"
                         onMouseEnter={handleEnter}
                         onMouseLeave={handleLeave}
                     >
-                        <div className="batch-error-popover__title">Detalle del error</div>
-                        <pre className="batch-error-popover__body">{errorMessage}</pre>
+                        <div className="mb-2 text-xs font-semibold text-slate-700 dark:text-slate-200">
+                            Detalle del error
+                        </div>
+                        <pre className="m-0 max-h-40 overflow-auto whitespace-pre-wrap font-mono text-xs text-slate-600 dark:text-slate-300">
+                            {errorMessage}
+                        </pre>
                     </div>,
                     document.body
                 )}
@@ -193,6 +212,9 @@ const BatchStatusCell = ({ status, errorMessage }) => {
 
 const Batches = () => {
     const navigate = useNavigate();
+    const { user } = useAuth();
+    const isAdmin = isConnectAdmin(user);
+    const sortableColumns = useMemo(() => getVisibleColumns(isAdmin), [isAdmin]);
     const [batches, setBatches] = useState([]);
     const [loading, setLoading] = useState(true);
     const [filter, setFilter] = useState('');
@@ -276,7 +298,7 @@ const Batches = () => {
     };
 
     const sortedBatches = useMemo(() => {
-        const col = SORTABLE_COLUMNS.find((c) => c.key === sortKey);
+        const col = sortableColumns.find((c) => c.key === sortKey);
         if (!col) return batches;
 
         const sorted = [...batches];
@@ -293,7 +315,56 @@ const Batches = () => {
             return 0;
         });
         return sorted;
-    }, [batches, sortKey, sortDir]);
+    }, [batches, sortKey, sortDir, sortableColumns]);
+
+    const renderBatchCell = (batch, columnKey) => {
+        switch (columnKey) {
+            case 'batch_id':
+                return (
+                    <DataTableTd mono className="whitespace-nowrap text-xs">
+                        {batch.batch_id}
+                    </DataTableTd>
+                );
+            case 'source_name':
+                return (
+                    <DataTableTd className="max-w-[140px] truncate font-medium" title={batch.source_name}>
+                        {batch.source_name || EMPTY}
+                    </DataTableTd>
+                );
+            case 'organization_name':
+                return (
+                    <DataTableTd className="max-w-[160px] truncate text-sm" title={batch.organization_name || batch.organization_id}>
+                        {batch.organization_name || batch.organization_id || EMPTY}
+                    </DataTableTd>
+                );
+            case 'status':
+                return (
+                    <DataTableTd>
+                        <BatchStatusCell status={batch.status} errorMessage={batch.error_message} />
+                    </DataTableTd>
+                );
+            case 'records_count':
+                return <DataTableTd numeric>{formatNumber(batch.records_count ?? 0)}</DataTableTd>;
+            case 'created_at':
+                return (
+                    <DataTableTd className="whitespace-nowrap text-xs" title={getBatchDisplayDate(batch) || ''}>
+                        {formatDate(getBatchDisplayDate(batch))}
+                    </DataTableTd>
+                );
+            case 'duration_seconds':
+                return (
+                    <DataTableTd
+                        numeric
+                        className={batch.duration_in_progress ? 'text-brand-600 font-medium' : ''}
+                        title={getBatchDurationTitle(batch)}
+                    >
+                        {getBatchDurationLabel(batch)}
+                    </DataTableTd>
+                );
+            default:
+                return <DataTableTd>{EMPTY}</DataTableTd>;
+        }
+    };
 
     const stats = useMemo(() => {
         const active = batches.filter((b) => ACTIVE_STATUSES.includes(b.status)).length;
@@ -428,7 +499,10 @@ const Batches = () => {
             navigate(`/batches/${batchId}`);
         } catch (err) {
             console.error('API Error resuming batch:', err);
-            alert(err.response?.data?.detail || 'No se pudo reanudar la promoción.');
+            setActionMessage({
+                type: 'error',
+                text: err.response?.data?.detail || 'No se pudo reanudar la promoción.',
+            });
         }
     };
 
@@ -477,11 +551,18 @@ const Batches = () => {
     };
 
     return (
-        <div className="flex flex-1 flex-col gap-5 overflow-y-auto p-8 max-w-6xl mx-auto w-full scrollbar-thin">
+        <div className={cn(
+            'flex flex-1 flex-col gap-5 overflow-y-auto p-8 mx-auto w-full scrollbar-thin',
+            isAdmin ? 'max-w-[1400px]' : 'max-w-6xl',
+        )}>
             <PageHeader
                 icon={Layers}
                 title="Lotes"
-                subtitle="Administra y monitorea las cargas de archivos"
+                subtitle={
+                    isAdmin
+                        ? 'Vista global: todos los lotes de todas las organizaciones'
+                        : 'Lotes de tu organización'
+                }
                 action={
                     <Button icon={RefreshCw} variant="secondary" onClick={loadBatches} loading={loading}>
                         Actualizar
@@ -523,15 +604,11 @@ const Batches = () => {
                             onChange={(e) => setFilter(e.target.value)}
                         />
                         <Select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
-                            <option value="">Todos los estados</option>
-                            <option value="PENDING">Pending</option>
-                            <option value="PENDING_PROCESS">Pending Process</option>
-                            <option value="PROCESSING">Processing</option>
-                            <option value="COMPLETED">Completed</option>
-                            <option value="PARTIALLY_PROMOTED">Partially Promoted</option>
-                            <option value="FAILED">Failed</option>
-                            <option value="CANCELLED">Cancelled</option>
-                            <option value="PROMOTED">Promoted</option>
+                            {BATCH_STATUS_FILTER_OPTIONS.map((opt) => (
+                                <option key={opt.value || 'all'} value={opt.value}>
+                                    {opt.label}
+                                </option>
+                            ))}
                         </Select>
                     </div>
                     <div className="flex flex-wrap gap-4 mt-3 pt-3 border-t border-dashed border-[#e2e8f0] text-xs text-slate-500">
@@ -591,7 +668,7 @@ const Batches = () => {
                                         />
                                     </DataTableTh>
                                     <DataTableTh className="w-10 text-center">#</DataTableTh>
-                                    {SORTABLE_COLUMNS.map((col) => (
+                                    {sortableColumns.map((col) => (
                                         <SortableTh
                                             key={col.key}
                                             columnKey={col.key}
@@ -625,22 +702,11 @@ const Batches = () => {
                                                 />
                                             </DataTableTd>
                                             <DataTableRowNum>{rowNum}</DataTableRowNum>
-                                            <DataTableTd mono className="whitespace-nowrap text-xs">
-                                                {batch.batch_id}
-                                            </DataTableTd>
-                                            <DataTableTd className="max-w-[140px] truncate font-medium" title={batch.source_name}>
-                                                {batch.source_name || EMPTY}
-                                            </DataTableTd>
-                                            <DataTableTd>
-                                                <BatchStatusCell status={batch.status} errorMessage={batch.error_message} />
-                                            </DataTableTd>
-                                            <DataTableTd numeric>{formatNumber(batch.records_count ?? 0)}</DataTableTd>
-                                            <DataTableTd className="whitespace-nowrap text-xs" title={getBatchDisplayDate(batch) || ''}>
-                                                {formatDate(getBatchDisplayDate(batch))}
-                                            </DataTableTd>
-                                            <DataTableTd numeric className={batch.duration_in_progress ? 'text-brand-600 font-medium' : ''} title={getBatchDurationTitle(batch)}>
-                                                {getBatchDurationLabel(batch)}
-                                            </DataTableTd>
+                                            {sortableColumns.map((col) => (
+                                                <React.Fragment key={col.key}>
+                                                    {renderBatchCell(batch, col.key)}
+                                                </React.Fragment>
+                                            ))}
                                             <DataTableTd>
                                                 <div className="flex items-center gap-1">
                                                     {canMonitor && (
@@ -700,7 +766,7 @@ const Batches = () => {
                     </>
                 }
             >
-                <div style={{ padding: '8px 0', fontSize: '15px', color: 'var(--color-text-secondary)', lineHeight: '1.5' }}>
+                <div className="py-2 text-[15px] leading-relaxed text-slate-500 dark:text-slate-400">
                     {confirmModal.message}
                 </div>
             </Modal>

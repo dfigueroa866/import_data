@@ -181,8 +181,9 @@ export const CatalogColumnsEditor = ({
     const defaultFooter = (
         <>
             Las columnas PK, <code className="font-mono">organization_id</code> y auditoría no se configuran:
-            se asignan automáticamente. Las columnas NOT NULL en la BD se marcan obligatorias
-            por defecto; puedes cambiarlo con el toggle.
+            se asignan automáticamente. Lo obligatorio lo define la configuración del catálogo
+            (toggle Obligatorio); al guardar, la validación de carga usa esa lista — no el NOT NULL de la BD.
+            En un catálogo nuevo, se sugiere Obligatorio según NOT NULL de la BD hasta que guardes.
         </>
     );
 

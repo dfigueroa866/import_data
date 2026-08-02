@@ -28,7 +28,7 @@ Documento de referencia para homologar otras aplicaciones con el look & feel de 
 | **Lucide React** | Iconografía lineal, trazo fino, tamaño habitual `h-4 w-4` |
 | **clsx + tailwind-merge** | Composición de clases (`cn()` en `web/lib/utils.ts`) |
 | **Google Fonts (Next.js)** | Inter, Hanken Grotesk, JetBrains Mono |
-| **Dark mode** | `prefers-color-scheme: media` — sin toggle manual |
+| **Dark mode** | `class` en `<html>` — toggle manual (`ThemeToggle`) + script anti-flash en `index.html` |
 
 No hay librería de componentes externa (shadcn, MUI, etc.): los patrones viven en componentes propios bajo `web/components/ui/` y `web/components/data-grid/`.
 
@@ -369,9 +369,11 @@ Body global: `antialiased`.
 
 ## 11. Modo oscuro
 
-- Activación: `@media (prefers-color-scheme: dark)` (`darkMode: "media"` en Tailwind)
+- Activación: clase `dark` en `<html>` (`darkMode: "class"` en Tailwind)
+- Toggle: componente `ThemeToggle` (FAB esquina inferior derecha); preferencia en `localStorage` (`m8-theme`)
+- Anti-flash: script inline en `index.html` aplica `dark` antes del primer paint
 - Patrón: cada superficie light tiene su par `dark:bg-slate-*`, `dark:text-slate-*`, `dark:border-[#334155]`
-- No hay switch de tema en UI; respeta preferencia del SO
+- El wizard legacy (`Step1Upload.css`, etc.) usa `.dark` (no `prefers-color-scheme`) y variables `--border-color`, `--accent-primary` de `index.css`
 
 ---
 

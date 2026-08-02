@@ -376,6 +376,7 @@ const Step4Process = ({
     const [promoting, setPromoting] = useState(false);
     const [promoteSuccess, setPromoteSuccess] = useState(false);
     const [promoteError, setPromoteError] = useState('');
+    const [downloadError, setDownloadError] = useState('');
     const [pollWarning, setPollWarning] = useState('');
 
     useSessionLoadGuard(processing || promoting);
@@ -953,7 +954,8 @@ const Step4Process = ({
     const handleNewUpload = async () => {
         stopAllPolling();
         try {
-            if (wizardData.batchId) {
+            // Catálogos: conservar batch y archivos en disco tras promover a producción
+            if (wizardData.batchId && wizardData.loadMode !== 'catalog') {
                 await deleteBatch(wizardData.batchId);
             }
         } catch (err) {
@@ -1005,10 +1007,13 @@ const Step4Process = ({
 
     const handleDownloadRejected = async () => {
         try {
+            setDownloadError('');
             await downloadRejectedRecords(wizardData.batchId);
         } catch (err) {
             console.error('Download failed', err);
-            alert('No se pudo descargar rechazados: ' + (err.response?.data?.detail || err.message));
+            setDownloadError(
+                'No se pudo descargar rechazados: ' + (err.response?.data?.detail || err.message)
+            );
         }
     };
 
@@ -1205,6 +1210,11 @@ const Step4Process = ({
 
         return (
             <div className="step4-process">
+                {downloadError && (
+                    <Alert variant="error" className="mb-4" onClose={() => setDownloadError('')}>
+                        {downloadError}
+                    </Alert>
+                )}
                 <ValidationCompletePanel
                     totalRows={totalRows}
                     validRows={actualPassed}

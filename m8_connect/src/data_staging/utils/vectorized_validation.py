@@ -338,14 +338,15 @@ def validate_chunk_vectorized(
         df = df.with_columns(history_errors_expr.alias("_errors"))
 
     if catalog_table:
-        from data_staging.services.catalog.catalog_registry import get_catalog_table
+        from data_staging.services.catalog.catalog_registry import (
+            catalog_required_targets,
+            get_catalog_table,
+        )
         from data_staging.services.catalog.catalog_transforms import validate_catalog_row_enums
 
         catalog_def = get_catalog_table(catalog_table)
         if catalog_def:
-            for col in catalog_def.get("required_columns") or []:
-                if not col or col == "organization_id":
-                    continue
+            for col in catalog_required_targets(catalog_def):
                 resolved = _resolve_row_column_name(df.columns, col)
                 if not resolved:
                     df = df.with_columns(

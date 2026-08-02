@@ -1,6 +1,0 @@
-customer_id,name,email,phone,registration_date,status,city
-1,Alice Johnson,alice@example.com,+1-555-0001,2023-01-15,active,New York
-2,Bob Smith,bob@example.com,+1-555-0002,2023-02-20,active,Los Angeles
-3,Charlie Brown,charlie@example.com,+1-555-0003,2023-03-10,inactive,Chicago
-4,Diana Prince,diana@example.com,+1-555-0004,2023-04-05,active,Houston
-5,Eve Davis,eve@example.com,+1-555-0005,2023-05-30,active,Phoenix

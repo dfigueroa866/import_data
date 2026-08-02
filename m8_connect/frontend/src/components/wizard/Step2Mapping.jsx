@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { Trash2 } from 'lucide-react';
 import { getTableColumns } from '../../services/systemService';
 import { saveColumnMapping, waitForMappingValidation } from '../../services/wizardService';
 import { useAuth } from '../../context/AuthContext';
@@ -311,8 +312,7 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                 );
 
             if (
-                wizardData.loadMode === 'history'
-                && !mappingChanged
+                !mappingChanged
                 && wizardData.validationComplete
             ) {
                 updateWizardData({
@@ -346,8 +346,7 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                     : {}),
             };
 
-            const triggerValidation =
-                wizardData.loadMode === 'history' && mappingChanged;
+            const triggerValidation = mappingChanged;
 
             await saveColumnMapping(
                 wizardData.batchId,
@@ -579,9 +578,10 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                                         type="button"
                                         className="btn-icon danger"
                                         title="Eliminar columna manual"
+                                        aria-label="Eliminar columna manual"
                                         onClick={() => handleRemoveManualColumn(manualKey)}
                                     >
-                                        ×
+                                        <Trash2 className="h-4 w-4" aria-hidden="true" />
                                     </button>
                                 </div>
                             </div>

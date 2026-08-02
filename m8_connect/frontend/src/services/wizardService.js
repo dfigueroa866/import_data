@@ -68,6 +68,12 @@ export const getHistoryTable = async () => {
     return { table: HISTORY_TABLE_META, fromFallback: true };
 };
 
+/** Whether promoted catalog batches exist before history upload. */
+export const getHistoryCatalogReadiness = async () => {
+    const response = await api.get('/api/v1/upload/history/readiness');
+    return response.data;
+};
+
 export const uploadFileTemp = async (
     file,
     targetSchema = null,
@@ -394,6 +400,25 @@ export const downloadValidRecords = async (batchId) => {
         throw error;
     }
 };
+
+export const downloadUploadLayouts = async () => {
+    const response = await api.get('/api/v1/upload/layouts/download', {
+        responseType: 'blob',
+    });
+
+    const contentType = String(response.headers?.['content-type'] || '');
+    if (contentType.includes('application/json')) {
+        const detail = await parseBlobErrorDetail(response.data);
+        throw new Error(detail || 'No se pudieron generar los layouts.');
+    }
+
+    const disposition = String(response.headers?.['content-disposition'] || '');
+    const match = disposition.match(/filename="?([^"]+)"?/i);
+    const filename = match?.[1] || 'm8_connect_layouts.zip';
+    triggerBlobDownload(response.data, filename);
+    return true;
+};
+
 /**
  * Delete a batch and all associated data
  * For cleaning up failed attempts

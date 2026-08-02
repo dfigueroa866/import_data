@@ -117,6 +117,13 @@ except Exception as e:
     logger.error(f"Could not import roles router: {e}", exc_info=True)
 
 try:
+    from data_staging.api.routers.incremental import router as incremental_router
+    app.include_router(incremental_router, prefix="/api/v1")
+    logger.info("Incremental router included")
+except Exception as e:
+    logger.warning(f"Could not import incremental router: {e}")
+
+try:
     from data_staging.api.v1.environments import router as environments_router
     app.include_router(environments_router, prefix="/api/v1", tags=["Environments"])
     logger.info("Environments router included")

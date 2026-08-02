@@ -8,6 +8,7 @@ export const DEFAULT_PERMISSIONS = {
     batches: true,
     monitoring: false,
     config: false,
+    incremental: false,
   },
   upload: {
     history: true,
@@ -17,6 +18,7 @@ export const DEFAULT_PERMISSIONS = {
     catalogs_view: false,
     history_view: false,
     roles: false,
+    incremental_view: false,
   },
 };
 
@@ -60,6 +62,7 @@ export const PERMISSION_GROUPS = [
       { key: 'upload', label: 'Cargas' },
       { key: 'batches', label: 'Lotes' },
       { key: 'monitoring', label: 'Monitoreo' },
+      { key: 'incremental', label: 'Incremental' },
       { key: 'config', label: 'Configuración' },
     ],
   },
@@ -77,6 +80,7 @@ export const PERMISSION_GROUPS = [
     items: [
       { key: 'catalogs_view', label: 'Ver catálogos (solo lectura)' },
       { key: 'history_view', label: 'Ver historia (solo lectura)' },
+      { key: 'incremental_view', label: 'Ver incremental (solo lectura)' },
     ],
   },
 ];

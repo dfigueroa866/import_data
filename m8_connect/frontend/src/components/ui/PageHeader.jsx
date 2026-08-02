@@ -3,7 +3,9 @@ import { Link } from 'react-router-dom';
 import { ArrowLeft } from 'lucide-react';
 import { cn } from '../../lib/utils';
 
-const PageHeader = ({ icon: Icon, title, subtitle, action, backTo, backLabel, className }) => (
+const PageHeader = ({ icon: Icon, title, subtitle, action, actions, backTo, backLabel, className }) => {
+  const headerAction = action ?? actions;
+  return (
   <header className={cn('mb-5', className)}>
     {backTo && (
       <Link
@@ -30,9 +32,10 @@ const PageHeader = ({ icon: Icon, title, subtitle, action, backTo, backLabel, cl
           )}
         </div>
       </div>
-      {action && <div className="flex-shrink-0">{action}</div>}
+      {headerAction && <div className="flex-shrink-0">{headerAction}</div>}
     </div>
   </header>
-);
+  );
+};
 
 export default PageHeader;

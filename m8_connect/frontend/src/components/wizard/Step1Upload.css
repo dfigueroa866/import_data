@@ -93,7 +93,7 @@
     min-height: 220px;
     padding: 2.5rem 1.5rem;
     text-align: center;
-    border: 2px dashed #94a3b8;
+    border: 2px dashed var(--border-color, #e2e8f0);
     border-radius: 12px;
     background: var(--bg-card, #ffffff);
     box-shadow:
@@ -106,49 +106,49 @@
     cursor: pointer;
 }
 
-@media (prefers-color-scheme: dark) {
-    .drop-zone {
+.dark .drop-zone {
         border-color: #64748b;
         background: var(--bg-card, #1e293b);
         box-shadow:
             0 1px 3px 0 rgba(0, 0, 0, 0.35),
             0 0 0 1px rgba(148, 163, 184, 0.12);
     }
-}
 
 .drop-zone:hover,
 .drop-zone.active {
-    border-color: #2563eb;
+    border-color: var(--accent-primary, #2563eb);
     background: #eff6ff;
     box-shadow:
         0 1px 3px 0 rgba(37, 99, 235, 0.12),
         0 0 0 3px rgba(37, 99, 235, 0.18);
 }
 
-@media (prefers-color-scheme: dark) {
-    .drop-zone:hover,
-    .drop-zone.active {
+.dark .drop-zone:hover,
+.dark .drop-zone.active {
         border-color: #3b82f6;
         background: rgba(37, 99, 235, 0.14);
         box-shadow:
             0 1px 3px 0 rgba(0, 0, 0, 0.4),
             0 0 0 3px rgba(59, 130, 246, 0.25);
     }
-}
 
 .drop-zone.has-file {
     padding: 1.5rem;
     border-style: solid;
-    border-color: #2563eb;
+    border-color: var(--accent-primary, #2563eb);
     background: #f8fafc;
     cursor: default;
 }
 
-@media (prefers-color-scheme: dark) {
-    .drop-zone.has-file {
+.dark .drop-zone.has-file {
         border-color: #3b82f6;
         background: #0f172a;
     }
+
+.drop-zone--disabled {
+    opacity: 0.55;
+    pointer-events: none;
+    cursor: not-allowed;
 }
 
 .drop-icon {
@@ -167,7 +167,7 @@
 .browse-button {
     display: inline-block;
     padding: 0.625rem 1.25rem;
-    background: #2563eb;
+    background: var(--accent-primary, #2563eb);
     color: #ffffff;
     border-radius: 8px;
     font-size: 0.875rem;

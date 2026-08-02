@@ -164,7 +164,7 @@ python scripts/setup/init_database.py
 alembic upgrade head
 ```
 
-Ya **no** hace falta ejecutar manualmente `migrations/create_job_queue.sql` en instalaciones nuevas (incluido en Alembic 002).
+La cola de jobs se crea con `alembic upgrade head` (revisión `002_job_queue_and_indexes`).
 
 ### Verificación rápida
 

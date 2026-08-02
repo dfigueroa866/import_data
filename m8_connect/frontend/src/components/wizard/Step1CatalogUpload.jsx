@@ -1,9 +1,21 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { uploadFileTemp, getCatalogTables } from '../../services/wizardService';
+import {
+    uploadFileTemp,
+    getCatalogTables,
+    saveColumnMapping,
+    waitForMappingValidation,
+} from '../../services/wizardService';
+import { getTableColumns } from '../../services/systemService';
 import { useAuth } from '../../context/AuthContext';
 import useSessionLoadGuard from '../../hooks/useSessionLoadGuard';
-import { Button, Alert, FormField, Select } from '../ui';
+import { Button, LoadingSpinner, Alert, FormField, Select } from '../ui';
+import { formatNumber } from '../../lib/format';
+import {
+    appendFixedOrganizationMapping,
+    buildAutoColumnMappings,
+    buildMappingContext,
+} from '../../utils/wizardColumnMapping';
 import './Step1Upload.css';
 
 const formatCatalogDestination = (catalog) => {
@@ -14,6 +26,7 @@ const formatCatalogDestination = (catalog) => {
 
 const Step1CatalogUpload = ({ wizardData, updateWizardData, nextStep }) => {
     const { user } = useAuth();
+    const organizationId = user?.organization_id || wizardData.organizationId || '';
     const organizationName = user?.organization_name || wizardData.organizationName || '';
 
     const [file, setFile] = useState(wizardData.file || null);
@@ -24,10 +37,12 @@ const Step1CatalogUpload = ({ wizardData, updateWizardData, nextStep }) => {
     const [tableMeta, setTableMeta] = useState(wizardData.catalogTableMeta || null);
     const [loading, setLoading] = useState(false);
     const [uploading, setUploading] = useState(false);
+    const [validating, setValidating] = useState(false);
+    const [validationProgress, setValidationProgress] = useState(null);
     const [error, setError] = useState('');
     const [dragActive, setDragActive] = useState(false);
 
-    useSessionLoadGuard(uploading);
+    useSessionLoadGuard(uploading || validating);
 
     useEffect(() => {
         loadCatalogTables();
@@ -112,35 +127,129 @@ const Step1CatalogUpload = ({ wizardData, updateWizardData, nextStep }) => {
                 'catalog'
             );
 
+            const batchId = response.batch_id;
+            const fileHeaders = response.file_headers || [];
+
+            const colsData = await getTableColumns(targetSchema, physicalTable);
+            const productionColumns = colsData.columns || [];
+            const mappingCtx = buildMappingContext({
+                loadMode: 'catalog',
+                selectedSchema: targetSchema,
+                selectedTable: physicalTable,
+                catalogTableMeta: tableMeta,
+            });
+
+            let { mappings, toggles } = buildAutoColumnMappings(
+                fileHeaders,
+                productionColumns,
+                mappingCtx,
+            );
+
+            const tableHasOrganizationId = productionColumns.some(
+                (col) => col.name === 'organization_id',
+            );
+            const withOrg = appendFixedOrganizationMapping(mappings, toggles, {
+                organizationId,
+                tableHasOrganizationId,
+            });
+            mappings = withOrg.mappings;
+            toggles = withOrg.toggles;
+
+            await saveColumnMapping(
+                batchId,
+                {
+                    target_schema: targetSchema,
+                    target_table: tableMeta.name,
+                    production_table: physicalTable,
+                    column_mappings: mappings,
+                    column_toggles: toggles,
+                },
+                null,
+                'catalog',
+                { triggerValidation: true },
+            );
+
+            setUploading(false);
+            setValidating(true);
+            setValidationProgress(null);
+
+            await waitForMappingValidation(batchId, {
+                onProgress: (p) => setValidationProgress(p),
+                estimatedRows: response.estimated_rows,
+            });
+
             updateWizardData({
                 file,
                 fileName: response.file_name,
-                fileHeaders: response.file_headers || [],
+                fileHeaders,
                 selectedSchema: targetSchema,
                 selectedTable: physicalTable,
                 catalogTable: tableMeta.name,
                 sourceName: response.source_name,
-                batchId: response.batch_id,
+                batchId,
                 processType: '',
                 loadMode: 'catalog',
                 catalogTableMeta: tableMeta,
                 organizationName,
+                organizationId,
                 estimatedRows: response.estimated_rows,
                 fileType: response.file_type,
+                columnMappings: mappings,
+                columnToggles: toggles,
+                productionColumns,
+                validationComplete: true,
             });
 
             nextStep();
         } catch (err) {
             const detail = err.response?.data?.detail;
-            setError(
-                typeof detail === 'string'
-                    ? detail
-                    : 'No se pudo subir el archivo. Verifica que el API esté en ejecución.'
-            );
+            if (typeof detail === 'string') {
+                setError(
+                    detail === 'Not Found'
+                        ? 'Servicio de carga no disponible. Reinicia el backend (python run_app.py).'
+                        : detail
+                );
+            } else {
+                setError('No se pudo subir el archivo. Verifica que el API esté en ejecución.');
+            }
         } finally {
             setUploading(false);
+            setValidating(false);
         }
     };
+
+    if (validating) {
+        const pct = Math.min(100, Math.max(0, Number(validationProgress?.progress_percentage) || 0));
+        const operation = validationProgress?.current_operation || 'Validando filas con el mapeo…';
+        const processed = validationProgress?.processed_rows ?? 0;
+        const total = validationProgress?.total_rows ?? 0;
+        const showRowCounts = total > 0;
+
+        return (
+            <div className="step1-upload">
+                <div className="step2-loading">
+                    <LoadingSpinner />
+                    <p>{operation}</p>
+                    <div className="step2-progress">
+                        <div className="step2-progress__bar">
+                            <div
+                                className="step2-progress__fill"
+                                style={{ width: `${pct}%` }}
+                            />
+                        </div>
+                        {showRowCounts && (
+                            <p className="step2-progress__rows">
+                                {formatNumber(processed)} de {formatNumber(total)} filas
+                            </p>
+                        )}
+                    </div>
+                    <p className="step2-loading__hint">
+                        No cierres esta ventana hasta que termine la validación.
+                    </p>
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div className="step1-upload">
@@ -278,7 +387,7 @@ const Step1CatalogUpload = ({ wizardData, updateWizardData, nextStep }) => {
                     variant="primary"
                     onClick={handleSubmit}
                     loading={uploading}
-                    loadingLabel="Subiendo archivo…"
+                    loadingLabel="Subiendo y validando…"
                     disabled={!file || !selectedCatalog}
                 >
                     Siguiente: mapear columnas →

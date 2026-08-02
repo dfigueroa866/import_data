@@ -4,6 +4,7 @@ export { default as Alert } from './Alert';
 export { default as Badge } from './Badge';
 export { default as Card } from './Card';
 export { default as Modal } from './Modal';
+export { default as ConfirmDialog } from './ConfirmDialog';
 export { default as PageHeader } from './PageHeader';
 export { default as WizardStepper } from './WizardStepper';
 export { default as EmptyState } from './EmptyState';
@@ -21,3 +22,4 @@ export {
   DataTablePagination,
 } from './DataTable';
 export { default as SummaryGrid, SummaryBlock, StatItem } from './SummaryGrid';
+export { default as ThemeToggle } from './ThemeToggle';

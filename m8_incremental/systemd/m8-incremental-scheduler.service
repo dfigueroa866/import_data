@@ -1,0 +1,14 @@
+[Unit]
+Description=M8 Incremental Scheduler
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/m8_incremental
+EnvironmentFile=/etc/m8_incremental.env
+ExecStart=/opt/venv/bin/python run_scheduler.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

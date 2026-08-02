@@ -1,7 +1,31 @@
 import React from 'react';
 import { cn } from '../../lib/utils';
 
-export const SummaryBlock = ({ title, children, className, accent }) => (
+export const SummaryBlock = ({
+  title,
+  label,
+  value,
+  hint,
+  children,
+  className,
+  accent,
+}) => {
+  const blockTitle = title ?? label;
+  const hasValue = value !== undefined && value !== null && value !== '';
+  const content = hasValue ? (
+    <>
+      <p className="m-0 text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-100">
+        {value}
+      </p>
+      {hint && (
+        <p className="m-0 mt-1 text-xs text-slate-500 dark:text-slate-400">{hint}</p>
+      )}
+    </>
+  ) : (
+    children
+  );
+
+  return (
   <div
     className={cn(
       'rounded-md border border-[#e2e8f0] bg-white p-4 shadow-sm dark:border-[#334155] dark:bg-slate-800',
@@ -9,14 +33,15 @@ export const SummaryBlock = ({ title, children, className, accent }) => (
       className
     )}
   >
-    {title && (
+    {blockTitle && (
       <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400 block mb-3">
-        {title}
+        {blockTitle}
       </span>
     )}
-    {children}
+    {content}
   </div>
-);
+  );
+};
 
 export const SummaryGrid = ({ children, columns = 4, className }) => (
   <div

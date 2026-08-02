@@ -1,36 +1,46 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Activity, TrendingUp, Clock } from 'lucide-react';
-import { PageHeader, Card, Badge, LoadingSpinner } from '../components/ui';
+import { PageHeader, Card, Badge, LoadingSpinner, Alert, Button } from '../components/ui';
 import { formatPercent, formatTime } from '../lib/format';
 import { monitoringService } from '../services/monitoringService';
 
 const Monitoring = () => {
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [loadError, setLoadError] = useState('');
   const [systemStatus, setSystemStatus] = useState(null);
   const [health, setHealth] = useState(null);
 
-  useEffect(() => {
-    const load = async () => {
-      try {
+  const loadData = useCallback(async (isRefresh = false) => {
+    try {
+      if (isRefresh) {
+        setRefreshing(true);
+      } else {
         setLoading(true);
-        const [statusData, healthData] = await Promise.all([
-          monitoringService.getSystemStatus(),
-          monitoringService.getHealth(),
-        ]);
-        setSystemStatus(statusData);
-        setHealth(healthData);
-      } catch (error) {
-        console.error('Error loading monitoring data:', error);
-      } finally {
-        setLoading(false);
       }
-    };
-    load();
-    const interval = setInterval(load, 30000);
-    return () => clearInterval(interval);
+      setLoadError('');
+      const [statusData, healthData] = await Promise.all([
+        monitoringService.getSystemStatus(),
+        monitoringService.getHealth(),
+      ]);
+      setSystemStatus(statusData);
+      setHealth(healthData);
+    } catch (error) {
+      console.error('Error loading monitoring data:', error);
+      setLoadError('No se pudo cargar el monitoreo. Comprueba que el servidor esté en marcha.');
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
   }, []);
 
-  if (loading) {
+  useEffect(() => {
+    loadData(false);
+    const interval = setInterval(() => loadData(true), 30000);
+    return () => clearInterval(interval);
+  }, [loadData]);
+
+  if (loading && !systemStatus && !loadError) {
     return (
       <div className="flex-1 overflow-y-auto p-8 scrollbar-thin">
         <LoadingSpinner size="lg" message="Cargando monitoreo…" />
@@ -48,7 +58,27 @@ const Monitoring = () => {
 
   return (
     <div className="flex flex-1 flex-col gap-5 overflow-y-auto p-8 scrollbar-thin">
-      <PageHeader icon={Activity} title="Monitoreo" subtitle="Salud del sistema y métricas de rendimiento" />
+      <PageHeader
+        icon={Activity}
+        title="Monitoreo"
+        subtitle="Salud del sistema y métricas de rendimiento"
+        action={
+          refreshing ? (
+            <span className="text-xs text-slate-500">Actualizando…</span>
+          ) : null
+        }
+      />
+
+      {loadError && (
+        <Alert variant="error">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <span>{loadError}</span>
+            <Button variant="secondary" size="sm" onClick={() => loadData(false)} loading={loading}>
+              Reintentar
+            </Button>
+          </div>
+        </Alert>
+      )}
 
       <Card title="Salud del sistema" indicatorColor="#34d399">
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">

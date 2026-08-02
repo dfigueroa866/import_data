@@ -76,6 +76,25 @@ class DatabaseConfig(BaseSettings):
     POOL_TIMEOUT: int = Field(30, description="Timeout del pool en segundos")
     POOL_RECYCLE: int = Field(3600, description="Tiempo de reciclaje de conexiones en segundos")
 
+def _is_local_database_url(database_url: str) -> bool:
+    """True cuando la URL apunta a localhost (túnel SSH o Postgres local)."""
+    hostname = (urlparse(database_url).hostname or "").lower()
+    return hostname in {"localhost", "127.0.0.1", "::1"}
+
+
+def _build_database_config() -> DatabaseConfig:
+    """Construye DatabaseConfig desde settings (fuente única de verdad)."""
+    from data_staging.config import settings
+
+    database_url = str(settings.DATABASE_URL)
+    return DatabaseConfig(
+        DATABASE_URL=database_url,
+        POOL_SIZE=settings.API_DB_POOL_SIZE,
+        MAX_OVERFLOW=settings.API_DB_MAX_OVERFLOW,
+        SSL_REQUIRE=not _is_local_database_url(database_url),
+    )
+
+
 class DatabaseManager:
     """Gestor de base de datos que maneja PostgreSQL y Supabase"""
     
@@ -232,13 +251,7 @@ def get_database_manager() -> DatabaseManager:
     global _database_manager
     
     if _database_manager is None:
-        from data_staging.config import settings
-
-        config = DatabaseConfig(
-            POOL_SIZE=settings.API_DB_POOL_SIZE,
-            MAX_OVERFLOW=settings.API_DB_MAX_OVERFLOW,
-        )
-        _database_manager = DatabaseManager(config)
+        _database_manager = DatabaseManager(_build_database_config())
     
     return _database_manager
 

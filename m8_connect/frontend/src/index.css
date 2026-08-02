@@ -14,16 +14,16 @@
     --bg-card: #ffffff;
     --accent-primary: #2563eb;
     --danger-color: #dc2626;
+    color-scheme: light;
   }
 
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --text-primary: #f1f5f9;
-      --text-secondary: #94a3b8;
-      --text-tertiary: #64748b;
-      --border-color: #334155;
-      --bg-card: #1e293b;
-    }
+  .dark {
+    --text-primary: #f1f5f9;
+    --text-secondary: #94a3b8;
+    --text-tertiary: #64748b;
+    --border-color: #334155;
+    --bg-card: #1e293b;
+    color-scheme: dark;
   }
 
   * {
@@ -40,10 +40,8 @@
     @apply antialiased font-sans text-body-md text-slate-900 bg-[#f1f5f9];
   }
 
-  @media (prefers-color-scheme: dark) {
-    body {
-      @apply text-slate-100 bg-[#0f172a];
-    }
+  html.dark body {
+    @apply text-slate-100 bg-[#0f172a];
   }
 
   h1, h2, h3, h4, h5, h6 {
@@ -54,10 +52,8 @@
     @apply font-mono text-data-mono font-medium text-brand-700 bg-brand-50 px-1.5 py-0.5 rounded;
   }
 
-  @media (prefers-color-scheme: dark) {
-    code {
-      @apply bg-blue-950/40 text-blue-300;
-    }
+  .dark code {
+    @apply bg-blue-950/40 text-blue-300;
   }
 }
 
@@ -69,10 +65,8 @@
     @apply disabled:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed;
   }
 
-  @media (prefers-color-scheme: dark) {
-    .input-field {
-      @apply bg-slate-800 border-[#334155] text-slate-100 placeholder:text-slate-500 disabled:bg-slate-900;
-    }
+  .dark .input-field {
+    @apply bg-slate-800 border-[#334155] text-slate-100 placeholder:text-slate-500 disabled:bg-slate-900;
   }
 
   /**
@@ -83,10 +77,8 @@
     color-scheme: light;
   }
 
-  @media (prefers-color-scheme: dark) {
-    .nc-select {
-      color-scheme: dark;
-    }
+  .dark .nc-select {
+    color-scheme: dark;
   }
 
   .nc-select option {
@@ -94,11 +86,9 @@
     color: #0f172a;
   }
 
-  @media (prefers-color-scheme: dark) {
-    .nc-select option {
-      background-color: #1e293b;
-      color: #f1f5f9;
-    }
+  .dark .nc-select option {
+    background-color: #1e293b;
+    color: #f1f5f9;
   }
 
   .nc-select option:disabled {
@@ -125,13 +115,11 @@
     background: #94a3b8;
   }
 
-  @media (prefers-color-scheme: dark) {
-    .scrollbar-thin::-webkit-scrollbar-thumb {
-      background: #475569;
-    }
+  .dark .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: #475569;
+  }
 
-    .scrollbar-thin::-webkit-scrollbar-thumb:hover {
-      background: #64748b;
-    }
+  .dark .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    background: #64748b;
   }
 }

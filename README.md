@@ -26,7 +26,9 @@ Los permisos de la UI y del API de M8 Connect **no dependen** del rol de platafo
 Reglas:
 
 - Sin fila en `m8_schema.connect_user_roles` → el usuario se trata como **loader** por defecto.
-- La migración `003_connect_roles` asigna `admin_m8_connect` a `david.figueroa@m8solutions.com.mx` si existe en `public.users`.
+- La migración `005_bootstrap_admin_user` crea el usuario bootstrap
+  `david.figueroa@m8solutions.com.mx` (pwd `Admin123`) con rol `admin_m8_connect`.
+  Cambia la contraseña tras el primer login en entornos compartidos.
 
 Detalle de instalación y SQL de bootstrap: [`m8_connect/INSTALL.md`](m8_connect/INSTALL.md#roles-m8-connect).
 
@@ -49,13 +51,17 @@ alembic upgrade head
 cd frontend && npm install
 ```
 
-Ejecutar **3 procesos** en terminales separadas:
+Ejecutar **4 procesos** en terminales separadas (carga incremental opcional):
 
 ```bash
-python run_app.py         # API :8000
-python run_workers.py     # cola de jobs
-cd frontend && npm run dev   # UI :5173
+python run_app.py              # API :8000
+python run_workers.py          # cola de jobs wizard
+cd ../m8_incremental && python run_workers.py    # workers incremental (opcional)
+cd ../m8_incremental && python run_scheduler.py # scheduler domingo 22:00 (opcional)
+cd frontend && npm run dev       # UI :5173
 ```
+
+Carga incremental automatizada: instalar `pip install -e ../m8_incremental` y `alembic upgrade head` (migración `004_incremental_tables`). Configuración en menú **Incremental** (`/incremental`).
 
 Instalación detallada, migraciones y troubleshooting: [`m8_connect/INSTALL.md`](m8_connect/INSTALL.md).
 
@@ -77,6 +83,10 @@ Guía de usuario: [`m8_connect/MANUAL_DE_USO.md`](m8_connect/MANUAL_DE_USO.md).
 | `/upload/history`, `/upload/catalog` | Wizards de carga | `upload.history` / `upload.catalogs` |
 | `/batches` | Historial de cargas | `menus.batches` |
 | `/monitoring` | Salud del sistema | `menus.monitoring` |
+| `/incremental` | Cargas automáticas semanales/mensuales | `menus.incremental` |
+| `/incremental/schedule` | Cron y retención | admin o `config.incremental_view` |
+| `/incremental/organizations` | Rutas y tablas por org | admin o `config.incremental_view` |
+| `/incremental/runs` | Historial de ejecuciones | `menus.incremental` |
 | `/config/catalogs` | Admin catálogos | admin o `config.catalogs_view` |
 | `/config/history` | Admin historia | admin o `config.history_view` |
 | `/config/roles` | Roles y perfil loader | solo `admin_m8_connect` |
@@ -101,7 +111,9 @@ cd m8_connect
 alembic upgrade head
 ```
 
-Crea objetos de staging (`staging_meta`, `staging_data`) y RBAC de app en `m8_schema` (`connect_user_roles`, `loader_profile`). Revisión relevante: `003_connect_roles`.
+Crea objetos de staging (`staging_meta`, `staging_data`), RBAC de app en `m8_schema`
+(`connect_user_roles`, `loader_profile`) y el usuario bootstrap admin
+(`005_bootstrap_admin_user`).
 
 Requiere `public.users` y tablas de negocio preexistentes para auth y FK (ver [`INSTALL.md`](m8_connect/INSTALL.md)).
 

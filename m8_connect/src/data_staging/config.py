@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     )
     
     # === CONFIGURACIÓN DE VALIDACIÓN ===
+    HISTORY_REQUIRE_PROMOTED_CATALOGS: bool = Field(
+        True,
+        description="Bloquear carga de historia sin batches PROMOTED de SKUs y ubicaciones",
+    )
     MAX_ERROR_RATE: float = Field(0.05, description="Tasa máxima de errores permitida")
     MIN_QUALITY_SCORE: int = Field(95, description="Score mínimo de calidad de datos")
     VALIDATION_TIMEOUT: int = Field(300, description="Timeout de validación en segundos")
@@ -167,10 +171,6 @@ class Settings(BaseSettings):
     AWS_S3_BUCKET: Optional[str] = Field(None, description="Bucket S3 para backups")
     BACKUP_S3_BUCKET: Optional[str] = Field(None, description="Bucket S3 para backups")
     
-    # === CONFIGURACIÓN DE PREFECT ===
-    PREFECT_API_URL: Optional[AnyHttpUrl] = Field(None, description="URL de la API de Prefect")
-    PREFECT_WORKSPACE: Optional[str] = Field(None, description="Workspace de Prefect")
-    
     # === CONFIGURACIÓN DE SEGURIDAD ===
     SECRET_KEY: str = Field("development-secret-key-must-be-at-least-32-characters-long", description="Clave secreta para tokens")
     ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(15, description="Minutos de expiración del access token")
@@ -190,8 +190,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = True
-        
-
+        extra = "ignore"
     
     @validator('UPLOAD_PATH', 'TEMP_PATH', 'BACKUP_PATH')
     def create_directories(cls, v):

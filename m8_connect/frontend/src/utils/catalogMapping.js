@@ -1,23 +1,12 @@
 /** Shared rules for catalog/history column mapping in Step 2. */
 
-import {
-    AUDIT_COLUMN_NAMES,
-    getCatalogRequiredMappingColumnNames,
-} from './catalogColumnRules';
-
-const SKUS_PK_NAMES = new Set(['sku_id', 'id']);
-const LOCATION_NON_MAPPABLE = new Set(['location_id', 'id']);
-
-const IGNORED_FILE_HEADERS_BY_TABLE = {
-    skus: new Set(['sku_id']),
-    location: new Set(['location_id', 'organization_id']),
-};
-
+import { AUDIT_COLUMN_NAMES } from './catalogColumnRules';
 const normalizeHeader = (s) =>
     String(s || '')
         .toLowerCase()
         .replace(/[^a-z0-9]/g, '');
 
+export { normalizeHeader };
 function isCatalogLoad({ loadMode, catalogMeta } = {}) {
     return loadMode === 'catalog' && Boolean(catalogMeta?.name);
 }
@@ -25,6 +14,28 @@ function isCatalogLoad({ loadMode, catalogMeta } = {}) {
 /** True when the catalog definition explicitly defines this list (even if empty). */
 function catalogDefinesList(catalogMeta, key) {
     return Boolean(catalogMeta && Array.isArray(catalogMeta[key]));
+}
+
+/**
+ * Required destination columns from catalog config (union of required_* lists).
+ * Excludes organization_id and non_mappable_targets.
+ */
+export function getCatalogConfigRequiredTargets(catalogMeta) {
+    if (!catalogMeta) return [];
+    const skip = new Set(catalogMeta.non_mappable_targets || []);
+    skip.add('organization_id');
+    const seen = new Set();
+    const out = [];
+    for (const col of [
+        ...(catalogMeta.required_columns || []),
+        ...(catalogMeta.required_mapping_columns || []),
+    ]) {
+        const name = String(col || '').trim();
+        if (!name || skip.has(name) || seen.has(name)) continue;
+        seen.add(name);
+        out.push(name);
+    }
+    return out;
 }
 
 /**
@@ -58,13 +69,6 @@ export function isIgnoredFileHeader(fileCol, { targetTable, catalogMeta, loadMod
         return true;
     }
 
-    const table = String(targetTable || catalogMeta?.name || '').toLowerCase();
-    const tableIgnored = IGNORED_FILE_HEADERS_BY_TABLE[table];
-    if (tableIgnored?.has(lower)) return true;
-    if (table === 'skus' && (lower === 'sku_id' || norm === 'skuid')) return true;
-    if (table === 'location' && (lower === 'location_id' || norm === 'locationid')) {
-        return true;
-    }
     if (lower === 'organization_id' || norm === 'organizationid') return true;
     return false;
 }
@@ -92,22 +96,12 @@ export function isSystemManagedTargetColumn(col, { targetTable, catalogMeta, loa
     if (col.name === 'organization_id') return true;
     if (AUDIT_COLUMN_NAMES.has(col.name)) return true;
 
-    const table = String(targetTable || catalogMeta?.name || '').toLowerCase();
-    if (table === 'skus' && SKUS_PK_NAMES.has(col.name)) return true;
-    if (table === 'location' && LOCATION_NON_MAPPABLE.has(col.name)) return true;
-
-    const colType = String(col.type || '').toLowerCase();
-    if (colType.includes('uuid')) {
-        if (table === 'skus' && SKUS_PK_NAMES.has(col.name)) return true;
-        if (table === 'location' && LOCATION_NON_MAPPABLE.has(col.name)) return true;
-    }
-
     return false;
 }
 
 export function getCatalogRequiredMappingColumns(targetTable, catalogMeta, loadMode) {
     if (isCatalogLoad({ loadMode, catalogMeta })) {
-        return getCatalogRequiredMappingColumnNames(catalogMeta);
+        return getCatalogConfigRequiredTargets(catalogMeta);
     }
     if (catalogDefinesList(catalogMeta, 'required_mapping_columns')) {
         return catalogMeta.required_mapping_columns;
@@ -115,15 +109,13 @@ export function getCatalogRequiredMappingColumns(targetTable, catalogMeta, loadM
     if (catalogMeta?.required_mapping_columns?.length) {
         return catalogMeta.required_mapping_columns;
     }
-    const table = String(targetTable || '').toLowerCase();
-    if (table === 'skus') return ['status'];
     return [];
 }
 
 /** Required destination columns for catalog mapping validation (step 2). */
 export function getCatalogRequiredTargetColumns(targetTable, catalogMeta, loadMode) {
     if (isCatalogLoad({ loadMode, catalogMeta })) {
-        return getCatalogRequiredMappingColumnNames(catalogMeta);
+        return getCatalogConfigRequiredTargets(catalogMeta);
     }
 
     const names = new Set();
@@ -139,7 +131,7 @@ export function getCatalogRequiredTargetColumns(targetTable, catalogMeta, loadMo
             names.add(name)
         );
     }
-    return [...names];
+    return [...names].filter((n) => n !== 'organization_id');
 }
 
 export function isRequiredMappingTargetColumn(col, { targetTable, catalogMeta, loadMode } = {}) {
@@ -148,7 +140,7 @@ export function isRequiredMappingTargetColumn(col, { targetTable, catalogMeta, l
     }
 
     if (isCatalogLoad({ loadMode, catalogMeta })) {
-        return getCatalogRequiredMappingColumnNames(catalogMeta).includes(col.name);
+        return getCatalogConfigRequiredTargets(catalogMeta).includes(col.name);
     }
 
     if (catalogDefinesList(catalogMeta, 'required_mapping_columns')) {
@@ -179,23 +171,7 @@ export function isExcludedMappingTarget(
     productionColumns,
     { targetTable, catalogMeta, loadMode } = {}
 ) {
-    if (!targetName) return true;
-    if (isCatalogLoad({ loadMode, catalogMeta })) {
-        if ((catalogMeta.non_mappable_targets || []).includes(targetName)) return true;
-        if (targetName === 'organization_id') return true;
-        return false;
-    }
-    if (catalogDefinesList(catalogMeta, 'non_mappable_targets')) {
-        if (catalogMeta.non_mappable_targets.includes(targetName)) return true;
-        if (targetName === 'organization_id') return true;
-        if (targetName === 'granularity' || targetName === 'source' || targetName === 'sales_channel') return true;
-        const col = productionColumns.find((c) => c.name === targetName);
-        return col ? isSystemManagedTargetColumn(col, { targetTable, catalogMeta, loadMode }) : false;
-    }
-    if (catalogMeta?.non_mappable_targets?.includes(targetName)) return true;
     const col = productionColumns.find((c) => c.name === targetName);
-    if (col && isSystemManagedTargetColumn(col, { targetTable, catalogMeta, loadMode })) return true;
-    return AUDIT_COLUMN_NAMES.has(targetName);
+    if (!col) return false;
+    return isSystemManagedTargetColumn(col, { targetTable, catalogMeta, loadMode });
 }
-
-export { normalizeHeader };

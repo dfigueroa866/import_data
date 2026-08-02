@@ -238,7 +238,7 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                 setPreviewProgress(null);
                 stopPreviewPoll();
 
-                if (wizardData.loadMode === 'history' && !wizardData.validationComplete) {
+                if (!wizardData.validationComplete) {
                     await waitForMappingValidation(batchId, {
                         onProgress: (p) => setPreviewProgress(p),
                         estimatedRows: wizardData.estimatedRows,
@@ -296,8 +296,7 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
         const batchId = wizardData?.batchId;
         if (!batchId) return undefined;
 
-        const forceCatalog = wizardData?.loadMode === 'catalog';
-        loadPreview(batchId, { force: forceCatalog });
+        loadPreview(batchId, { force: false });
 
         return () => {
             stopPreviewPoll();
@@ -369,7 +368,7 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
         } catch (err) {
             console.error('Download failed', err);
             const message = err?.message || err.response?.data?.detail || 'Error desconocido';
-            alert(`No se pudo descargar rechazados: ${message}`);
+            setError(`No se pudo descargar rechazados: ${message}`);
         } finally {
             setDownloadingRejected(false);
         }
@@ -392,12 +391,26 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
 
     const renderCatalogPreviewSummary = () => (
         <>
+            {val.has_error && (
+                <div className="validation-alert error">
+                    ⚠ {val.error_detail || 'La validación no dejó filas válidas.'}
+                </div>
+            )}
             <div className="history-metrics-panel">
                 <div className="history-metrics-panel__header">
-                    <h3 className="history-metrics-panel__title">Resumen de vista previa</h3>
+                    <h3 className="history-metrics-panel__title">Resumen de validación</h3>
                     <div className="history-metrics-panel__badges">
                         <span className="metric-chip metric-chip--info">
                             {targetTableName}
+                        </span>
+                        <span
+                            className={`metric-chip ${
+                                rejectedRows > 0 ? 'metric-chip--danger' : 'metric-chip--success'
+                            }`}
+                        >
+                            {rejectedRows > 0
+                                ? `${formatMetric(rejectedRows)} rechazadas`
+                                : 'Sin rechazos'}
                         </span>
                     </div>
                 </div>
@@ -423,11 +436,11 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                             </span>
                             <div className="step3-prod-summary step3-prod-summary--inline step3-prod-summary--success">
                                 <p className="step3-prod-summary__hint">
-                                    Muestra de filas tras aplicar el mapeo del paso 2.
+                                    Filas que pasaron la validación y podrán cargarse a producción.
                                 </p>
                                 <div className="step3-prod-summary__value">
-                                    <span className="step3-prod-summary__label">Vista previa</span>
-                                    <strong>{formatMetric(displayPreviewRows.length)}</strong>
+                                    <span className="step3-prod-summary__label">Válidas</span>
+                                    <strong>{formatMetric(validRows)}</strong>
                                 </div>
                             </div>
                         </div>
@@ -437,17 +450,25 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
 
             <div className="validation-report validation-report--compact">
                 <div className="validation-report__header">
-                    <h4 className="validation-report__title">Detalle de vista previa</h4>
+                    <h4 className="validation-report__title">Detalle de validación</h4>
                     <span className="validation-report__subtitle">{targetTableName}</span>
                 </div>
 
                 <div className="validation-report__sections">
-                    <section className="report-section">
-                        <h5 className="report-section__title">Archivo</h5>
+                    <section className="report-section report-section--validation">
+                        <h5 className="report-section__title">Validación</h5>
                         <dl className="report-dl">
                             <div className="report-dl__row">
-                                <dt>Filas</dt>
+                                <dt>En archivo</dt>
                                 <dd>{formatMetric(val.total_rows)}</dd>
+                            </div>
+                            <div className="report-dl__row report-dl__row--success">
+                                <dt>Válidas</dt>
+                                <dd>{formatMetric(validRows)}</dd>
+                            </div>
+                            <div className="report-dl__row report-dl__row--rejected">
+                                <dt>Rechazadas</dt>
+                                <dd>{formatMetric(rejectedRows)}</dd>
                             </div>
                             {sourceExtension ? (
                                 <div className="report-dl__row">
@@ -456,6 +477,21 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                                 </div>
                             ) : null}
                         </dl>
+                        {rejectedRows > 0 && (
+                            <div className="step3-rejected-download">
+                                <Button
+                                    variant="danger"
+                                    size="sm"
+                                    onClick={handleDownloadRejected}
+                                    disabled={downloadingRejected}
+                                    className="step3-rejected-download__btn"
+                                >
+                                    {downloadingRejected
+                                        ? 'Preparando descarga…'
+                                        : 'Descargar rechazados (.csv)'}
+                                </Button>
+                            </div>
+                        )}
                     </section>
 
                     <section className="report-section">
@@ -464,6 +500,12 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                             <div className="report-dl__row">
                                 <dt>Tabla</dt>
                                 <dd>{targetTableName}</dd>
+                            </div>
+                            <div className="report-dl__row">
+                                <dt>Muestra en tabla</dt>
+                                <dd>
+                                    {formatMetric(displayPreviewRows.length)} de hasta 20
+                                </dd>
                             </div>
                         </dl>
                     </section>
@@ -746,10 +788,10 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
 
     return (
         <div className="step3-preview">
-            <h2>{isCatalog ? 'Paso 3: Vista previa del mapeo' : 'Paso 3: Vista previa y agregación'}</h2>
+            <h2>{isCatalog ? 'Paso 3: Vista previa y validación' : 'Paso 3: Vista previa y agregación'}</h2>
             <p className="step-description">
                 {isCatalog
-                    ? 'Revisa cómo quedarán los datos tras el mapeo. La validación contra la tabla destino se hará en el siguiente paso, antes de promover a producción.'
+                    ? 'Validación completa sobre todas las filas del archivo, descarga de rechazados y muestra de filas válidas antes de cargar a producción.'
                     : 'Validación completa sobre todas las filas del archivo, descarga de rechazados, agregación weekly/monthly y vista previa del resultado.'}
             </p>
 
@@ -758,7 +800,7 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
             {/* Preview Table */}
             {displayPreviewRows.length > 0 ? (
                 <DataTableShell
-                    title={isCatalog ? 'Vista previa (primeras 20 filas mapeadas)' : 'Vista previa (primeras 20 filas agregadas)'}
+                    title={isCatalog ? 'Muestra de filas válidas (hasta 20)' : 'Vista previa (primeras 20 filas agregadas)'}
                     meta={`${displayPreviewRows.length} filas · ${previewColumnKeys.length} columnas`}
                     maxHeight="400px"
                 >
@@ -794,7 +836,11 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                 <DataTableShell
                     empty
                     emptyTitle="Vista previa no disponible"
-                    emptyDescription={`Tipo de preview_data: ${typeof previewData?.preview_data}`}
+                    emptyDescription={
+                        rejectedRows > 0 && validRows === 0
+                            ? 'Ninguna fila pasó la validación. Descarga los rechazados para corregir el archivo.'
+                            : `Tipo de preview_data: ${typeof previewData?.preview_data}`
+                    }
                 />
             )}
 
@@ -805,7 +851,7 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                 <Button
                     variant="primary"
                     onClick={nextStep}
-                    disabled={catalogBlocked || (!isCatalog && !canContinue)}
+                    disabled={catalogBlocked || !canContinue}
                     title={
                         catalogBlocked
                             ? 'Corrige los errores de validación antes de continuar'
@@ -816,9 +862,7 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                 >
                     {catalogBlocked
                         ? 'Corrija errores para continuar'
-                        : isCatalog
-                          ? 'Procesar y validar →'
-                          : 'Cargar a producción →'}
+                        : 'Cargar a producción →'}
                 </Button>
             </div>
         </div>

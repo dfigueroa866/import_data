@@ -15,9 +15,11 @@ from data_staging.utils.load_storage_paths import (
     format_load_timestamp,
     load_storage_metadata_fields,
     resolve_batch_work_dir,
+    sanitize_organization_folder_name,
 )
 
 ORG_ID = "34b43c21-7aac-4f1c-b6b4-df8d29f7b091"
+ORG_NAME = "M8 Solutions"
 
 
 def test_format_load_timestamp():
@@ -26,6 +28,18 @@ def test_format_load_timestamp():
 
 
 def test_build_history_storage_dir(tmp_path: Path):
+    ts = datetime(2026, 6, 12, 14, 30, 52)
+    path = build_load_storage_dir(
+        ORG_ID,
+        "history",
+        organization_name=ORG_NAME,
+        load_timestamp=ts,
+        upload_root=tmp_path,
+    )
+    assert path == tmp_path / ORG_NAME / HISTORIA_DIR / "2026-06-12_143052"
+
+
+def test_build_history_storage_dir_falls_back_to_org_id(tmp_path: Path):
     ts = datetime(2026, 6, 12, 14, 30, 52)
     path = build_load_storage_dir(
         ORG_ID,
@@ -41,11 +55,17 @@ def test_build_catalog_storage_dir(tmp_path: Path):
     path = build_load_storage_dir(
         ORG_ID,
         "catalog",
+        organization_name=ORG_NAME,
         catalog_name="skus",
         load_timestamp=ts,
         upload_root=tmp_path,
     )
-    assert path == tmp_path / ORG_ID / CATALOGOS_DIR / "skus" / "2026-06-12_143052"
+    assert path == tmp_path / ORG_NAME / CATALOGOS_DIR / "skus" / "2026-06-12_143052"
+
+
+def test_sanitize_organization_folder_name():
+    assert sanitize_organization_folder_name("  M8 Solutions  ") == "M8 Solutions"
+    assert sanitize_organization_folder_name("Org/Name:Test") == "Org_Name_Test"
 
 
 def test_ensure_load_storage_dir_creates_directories(tmp_path: Path):
@@ -53,12 +73,13 @@ def test_ensure_load_storage_dir_creates_directories(tmp_path: Path):
     path = ensure_load_storage_dir(
         ORG_ID,
         "catalog",
+        organization_name=ORG_NAME,
         catalog_name="location",
         load_timestamp=ts,
         upload_root=tmp_path,
     )
     assert path.is_dir()
-    assert (tmp_path / ORG_ID / CATALOGOS_DIR / "location").is_dir()
+    assert (tmp_path / ORG_NAME / CATALOGOS_DIR / "location").is_dir()
 
 
 def test_resolve_batch_work_dir_uses_metadata(tmp_path: Path, monkeypatch):

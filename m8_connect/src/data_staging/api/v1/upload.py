@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 import uuid
 import os
+import io
 import shutil
 import asyncio
 from pathlib import Path
@@ -46,6 +47,7 @@ from data_staging.utils.batch_control import (
     normalize_metadata,
     resolve_effective_file_path,
     resolve_original_file_path,
+    should_preserve_upload_files,
     staging_table_for_source,
     with_file_path,
 )
@@ -66,6 +68,18 @@ def _assert_upload_type_allowed(user: TokenUser, load_type: Optional[str]) -> No
     permission_key = "upload.catalogs" if normalized in {"catalog", "catalogs"} else "upload.history"
     if not has_permission(user.permissions, permission_key):
         raise HTTPException(status_code=403, detail=f"Permiso insuficiente: {permission_key}")
+
+
+def _assert_history_catalog_ready(db: Session, organization_id: Optional[str]) -> None:
+    if not settings.HISTORY_REQUIRE_PROMOTED_CATALOGS:
+        return
+    from data_staging.services.history.history_catalog_prerequisites import (
+        check_history_catalog_readiness,
+    )
+
+    readiness = check_history_catalog_readiness(db, organization_id)
+    if not readiness.get("ready"):
+        raise HTTPException(status_code=409, detail=readiness.get("message"))
 
 
 def _validation_job_active(db: Session, batch_id: str) -> bool:
@@ -390,8 +404,20 @@ def _staging_table_exists(db: Session, table_name: str) -> bool:
     )
 
 
-def _delete_batch_files(batch_id: str, row_metadata: Any, file_path_column: Optional[str]) -> None:
+def _delete_batch_files(
+    batch_id: str,
+    row_metadata: Any,
+    file_path_column: Optional[str],
+    *,
+    batch_status: Optional[str] = None,
+) -> None:
     meta = normalize_metadata(row_metadata)
+    if should_preserve_upload_files(meta, batch_status=batch_status):
+        logger.info(
+            "Conservando archivos en disco para batch %s (catálogo promovido)",
+            batch_id,
+        )
+        return
     paths = collect_batch_file_paths(meta, file_path_column)
     load_storage_dir = meta.get("load_storage_dir")
 
@@ -535,7 +561,12 @@ def _purge_batches_bulk(db: Session, rows: list) -> int:
     )
 
     for row in rows:
-        _delete_batch_files(str(row.batch_id), row.metadata, row.file_path)
+        _delete_batch_files(
+            str(row.batch_id),
+            row.metadata,
+            row.file_path,
+            batch_status=getattr(row, "status", None),
+        )
 
     return len(batch_ids)
 
@@ -573,6 +604,13 @@ def _batch_filters_where(
     return where_clause, params
 
 
+def _batch_scope_organization_id(user: TokenUser) -> Optional[str]:
+    """Admin ve todos los lotes; el resto solo los de su organización."""
+    if user.m8_connect_role == CONNECT_ROLE_ADMIN:
+        return None
+    return user.organization_id
+
+
 def _batch_id_exists_clause(where_clause: str) -> str:
     return (
         " AND bc.batch_id = :batch_id"
@@ -585,7 +623,7 @@ def _delete_batch_record(db: Session, batch_id: str) -> bool:
     """Elimina batch, staging, jobs y archivos en disco."""
     row = db.execute(
         text("""
-            SELECT batch_id, source_name, file_path, metadata
+            SELECT batch_id, source_name, file_path, metadata, status
             FROM staging_meta.batch_control
             WHERE batch_id = :batch_id
         """),
@@ -940,10 +978,10 @@ async def upload_file(
         db.execute(text("""
             INSERT INTO staging_meta.batch_control 
             (batch_id, source_name, source_type, file_name, file_path, file_size,
-             status, metadata, created_at, updated_at)
+             status, metadata, retry_count, max_retries, created_at, updated_at)
             VALUES (
                 :batch_id, :source_name, 'file', :file_name, :file_path, :file_size,
-                'UPLOADED', :metadata, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                'UPLOADED', :metadata, 0, 3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
             )
         """), {
             "batch_id": batch_id,
@@ -1149,6 +1187,9 @@ async def process_batch(
         metadata["column_toggles"] = toggles
         metadata["organization_id"] = org_id
 
+        if metadata.get("load_type", "history") == "history":
+            _assert_history_catalog_ready(db, org_id)
+
         effective_path = resolve_effective_file_path(
             metadata, file_path_column=getattr(batch, "file_path", None)
         )
@@ -1346,7 +1387,7 @@ async def list_batches(
             status=status,
             source_name=source_name,
             search=search,
-            organization_id=current_user.organization_id,
+            organization_id=_batch_scope_organization_id(current_user),
         )
         params["limit"] = limit
         params["offset"] = offset
@@ -1424,6 +1465,7 @@ async def list_batches(
             "offset": offset,
             "page": page,
             "total_pages": total_pages,
+            "scope": "all" if _batch_scope_organization_id(current_user) is None else "organization",
         }
         
     except Exception as e:
@@ -1434,6 +1476,48 @@ async def list_batches(
 # ============================================================================
 # UPLOAD WIZARD ENDPOINTS
 # ============================================================================
+
+@router.get("/history/readiness")
+async def get_history_catalog_readiness(
+    db: Session = Depends(get_db_session),
+    current_user: TokenUser = Depends(require_permission("menus.upload")),
+):
+    """Indica si la organización puede cargar historia (catálogos PROMOTED)."""
+    _assert_upload_type_allowed(current_user, "history")
+    from data_staging.services.history.history_catalog_prerequisites import (
+        check_history_catalog_readiness,
+    )
+
+    return check_history_catalog_readiness(db, current_user.organization_id)
+
+
+@router.get("/layouts/download")
+async def download_upload_layouts(
+    db: Session = Depends(get_db_session),
+    current_user: TokenUser = Depends(require_permission("menus.upload")),
+):
+    """
+    ZIP with CSV layouts for catalogs (skus, locations) and history (sales_history).
+    Columns and example row come from the live database schema/data.
+    """
+    from data_staging.services.layout_templates import build_layout_zip
+
+    try:
+        payload = build_layout_zip(db)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to build upload layouts")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+    filename = f"m8_connect_layouts_{stamp}.zip"
+    return StreamingResponse(
+        io.BytesIO(payload),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
 
 @router.post("/file-temp")
 async def upload_file_temp(
@@ -1523,11 +1607,19 @@ async def upload_file_temp(
         if not org_id:
             raise HTTPException(status_code=400, detail="organization_id is required")
 
+        if normalized_load_type == "history":
+            _assert_history_catalog_ready(db, org_id)
+
+        from data_staging.utils.organization import fetch_organization_name
+
+        org_name = fetch_organization_name(db, org_id)
+
         load_timestamp = datetime.now()
         try:
             storage_dir = ensure_load_storage_dir(
                 org_id,
                 normalized_load_type,  # type: ignore[arg-type]
+                organization_name=org_name,
                 catalog_name=catalog_name,
                 load_timestamp=load_timestamp,
             )
@@ -1593,10 +1685,11 @@ async def upload_file_temp(
         db.execute(text("""
             INSERT INTO staging_meta.batch_control 
             (batch_id, source_name, source_type, file_name, file_path, file_size,
-             status, metadata, organization_id, created_at, updated_at)
+             status, metadata, organization_id, retry_count, max_retries,
+             created_at, updated_at)
             VALUES (
                 :batch_id, :source_name, 'file', :file_name, :file_path, :file_size,
-                'PENDING_MAPPING', :metadata, :organization_id,
+                'PENDING_MAPPING', :metadata, :organization_id, 0, 3,
                 CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
             )
         """), {
@@ -1691,18 +1784,42 @@ async def save_column_mapping(
             "wizard_step": 2
         })
         if load_type == "catalog":
+            from data_staging.services.catalog.catalog_registry import (
+                catalog_required_targets,
+                get_catalog_table,
+            )
+
             production_table = mapping_data.get("production_table")
             catalog_slug = mapping_data.get("target_table")
+            catalog_entry = get_catalog_table(catalog_slug) if catalog_slug else None
             if catalog_slug:
                 metadata["catalog_name"] = catalog_slug
             if production_table:
                 metadata["production_table"] = production_table
-            elif catalog_slug:
-                from data_staging.services.catalog.catalog_registry import get_catalog_table
+            elif catalog_entry:
+                metadata["production_table"] = (
+                    catalog_entry.get("target_table") or catalog_slug
+                )
 
-                entry = get_catalog_table(catalog_slug)
-                if entry:
-                    metadata["production_table"] = entry.get("target_table") or catalog_slug
+            required_targets = catalog_required_targets(catalog_entry)
+            if required_targets:
+                mapped_targets = {
+                    str(cfg.get("target")).strip()
+                    for fc, cfg in column_mappings.items()
+                    if column_toggles.get(fc, True)
+                    and isinstance(cfg, dict)
+                    and cfg.get("target")
+                    and cfg.get("target") != "__new__"
+                }
+                missing = [c for c in required_targets if c not in mapped_targets]
+                if missing:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "Debes mapear las columnas obligatorias de destino: "
+                            + ", ".join(missing)
+                        ),
+                    )
         elif load_type == "history":
             from data_staging.services.history.history_config import (
                 HISTORY_SOURCE_NAME,
@@ -1718,23 +1835,23 @@ async def save_column_mapping(
             mapping_data["target_schema"] = HISTORY_TARGET_SCHEMA
             mapping_data["target_table"] = HISTORY_TARGET_TABLE
 
-            trigger_validation = mapping_data.get("trigger_validation", True)
-            if trigger_validation:
-                for key in (
-                    "validation_complete",
-                    "validated_temp_file",
-                    "rejected_temp_file",
-                    "preview_result",
-                    "preview_generated",
-                    "aggregated_file_path",
-                    "valid_temp_file",
-                    "validation_error",
-                    "preview_error",
-                ):
-                    metadata.pop(key, None)
-                metadata["validation_in_progress"] = True
-                metadata["preview_in_progress"] = False
-                metadata["validated_in_preview"] = False
+        trigger_validation = mapping_data.get("trigger_validation", True)
+        if load_type in ("history", "catalog") and trigger_validation:
+            for key in (
+                "validation_complete",
+                "validated_temp_file",
+                "rejected_temp_file",
+                "preview_result",
+                "preview_generated",
+                "aggregated_file_path",
+                "valid_temp_file",
+                "validation_error",
+                "preview_error",
+            ):
+                metadata.pop(key, None)
+            metadata["validation_in_progress"] = True
+            metadata["preview_in_progress"] = False
+            metadata["validated_in_preview"] = False
 
         # 4. Update source_name if target_table changed
         target_table = mapping_data.get("target_table")
@@ -1790,7 +1907,7 @@ async def save_column_mapping(
         db.commit()
 
         trigger_validation = mapping_data.get("trigger_validation", True)
-        if load_type == "history" and trigger_validation:
+        if load_type in ("history", "catalog") and trigger_validation:
             from data_staging.workers.job_queue import create_job as enqueue_job
 
             enqueue_job(
@@ -1798,7 +1915,7 @@ async def save_column_mapping(
                 "VALIDATE_BATCH",
                 {"batch_id": batch_id, "organization_id": org_id},
             )
-            logger.info("Validation job queued for batch %s (initial mapping)", batch_id)
+            logger.info("Validation job queued for batch %s (mapping save)", batch_id)
         
         logger.info(f"Mappings saved for batch {batch_id}")
         
@@ -1807,7 +1924,7 @@ async def save_column_mapping(
             "batch_id": batch_id,
             "message": "Column mappings saved successfully",
             "next_step": "preview",
-            "validation_started": load_type == "history" and trigger_validation,
+            "validation_started": load_type in ("history", "catalog") and trigger_validation,
         }
         
     except HTTPException:
@@ -1916,6 +2033,7 @@ async def generate_preview(
                     detail=f"Tipo de proceso inválido. Debe ser uno de: {valid}.",
                 )
 
+        if load_type in ("history", "catalog"):
             if metadata.get("validation_error"):
                 raise HTTPException(
                     status_code=400,
@@ -1937,82 +2055,6 @@ async def generate_preview(
                     "Preview requested for batch %s without step-2 validation; running legacy pipeline",
                     batch_id,
                 )
-
-        if load_type == "catalog":
-            if metadata.get("preview_result") and metadata.get("preview_generated") and not force:
-                return JSONResponse(content=metadata["preview_result"])
-
-            if force or metadata.get("preview_error"):
-                metadata.pop("preview_error", None)
-                metadata.pop("preview_result", None)
-                metadata["preview_generated"] = False
-
-            column_mappings, column_toggles = ensure_organization_id_mapping(
-                metadata.get("column_mappings", {}),
-                metadata.get("column_toggles", {}),
-                org_id,
-            )
-            metadata["column_mappings"] = column_mappings
-            metadata["column_toggles"] = column_toggles
-            metadata["organization_id"] = org_id
-            file_analysis = metadata.get("file_analysis", {}) or {}
-            encoding = _resolve_preview_encoding(file_path, file_analysis)
-
-            from data_staging.services.catalog_preview_service import (
-                CatalogPreviewError,
-                run_catalog_wizard_preview,
-            )
-
-            try:
-                agg_stats, _agg_path = run_catalog_wizard_preview(
-                    file_path,
-                    metadata,
-                    organization_id=org_id,
-                    encoding=encoding,
-                    delimiter=file_analysis.get("delimiter", ","),
-                )
-            except CatalogPreviewError as exc:
-                metadata["preview_in_progress"] = False
-                metadata["preview_error"] = str(exc)
-                db.execute(
-                    text("""
-                        UPDATE staging_meta.batch_control
-                        SET metadata = :metadata, updated_at = CURRENT_TIMESTAMP
-                        WHERE batch_id = :batch_id
-                    """),
-                    {"metadata": json.dumps(metadata), "batch_id": batch_id},
-                )
-                db.commit()
-                raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-            metadata["wizard_step"] = 3
-            metadata["preview_generated"] = True
-            metadata["preview_in_progress"] = False
-            metadata.pop("preview_error", None)
-
-            response_payload = _build_preview_response_payload(
-                batch_id=batch_id,
-                batch_source_name=getattr(batch, "source_name", "") or "",
-                metadata=metadata,
-                agg_stats=agg_stats,
-                org_id=org_id,
-                load_type="catalog",
-                process_type="Catalog",
-            )
-            metadata["preview_result"] = response_payload
-            db.execute(
-                text("""
-                    UPDATE staging_meta.batch_control
-                    SET metadata = :metadata,
-                        status = 'PENDING_PROCESS',
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE batch_id = :batch_id
-                """),
-                {"metadata": json.dumps(metadata), "batch_id": batch_id},
-            )
-            db.commit()
-            logger.info("Catalog preview generated synchronously for batch %s", batch_id)
-            return JSONResponse(content=response_payload)
 
         metadata["preview_in_progress"] = True
         metadata.pop("preview_error", None)
@@ -2917,7 +2959,9 @@ async def delete_batch(
 ):
     """Elimina un batch y todos sus datos relacionados (archivo, jobs, etc.)."""
     try:
-        where_clause, params = _batch_filters_where(organization_id=current_user.organization_id)
+        where_clause, params = _batch_filters_where(
+            organization_id=_batch_scope_organization_id(current_user),
+        )
         params["batch_id"] = batch_id
         exists = db.execute(
             text(f"""
@@ -2955,7 +2999,7 @@ async def bulk_delete_batches(
     not_found: List[str] = []
     try:
         where_clause, params = _batch_filters_where(
-            organization_id=current_user.organization_id
+            organization_id=_batch_scope_organization_id(current_user),
         )
         params["ids"] = body.batch_ids
         id_clause = (
@@ -2965,7 +3009,7 @@ async def bulk_delete_batches(
         )
         rows = db.execute(
             text(f"""
-                SELECT bc.batch_id, bc.source_name, bc.file_path, bc.metadata
+                SELECT bc.batch_id, bc.source_name, bc.file_path, bc.metadata, bc.status
                 FROM staging_meta.batch_control bc
                 {where_clause}{id_clause}
             """),
@@ -2998,11 +3042,11 @@ async def delete_all_batches(
         where_clause, params = _batch_filters_where(
             status=body.status,
             search=body.search,
-            organization_id=current_user.organization_id,
+            organization_id=_batch_scope_organization_id(current_user),
         )
         rows = db.execute(
             text(f"""
-                SELECT bc.batch_id, bc.source_name, bc.file_path, bc.metadata
+                SELECT bc.batch_id, bc.source_name, bc.file_path, bc.metadata, bc.status
                 FROM staging_meta.batch_control bc
                 {where_clause}
             """),

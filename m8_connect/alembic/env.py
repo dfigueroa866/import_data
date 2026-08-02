@@ -2,21 +2,22 @@ import os
 import sys
 from logging.config import fileConfig
 from pathlib import Path
+from urllib.parse import urlparse
 
-from sqlalchemy import engine_from_config
-from sqlalchemy import pool
+from sqlalchemy import create_engine, pool, text
 
 from alembic import context
 
 
 # Add the project root to the Python path
 project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root / "src"))
 sys.path.insert(0, str(project_root))
 
-# Load environment variables from .env
+# Load environment variables from .env (override stale shell vars)
 try:
     from dotenv import load_dotenv
-    load_dotenv(project_root / ".env")
+    load_dotenv(project_root / ".env", override=True)
 except ImportError:
     pass
 
@@ -47,14 +48,35 @@ target_metadata = Base.metadata
 
 
 def get_url():
-    """Get database URL from environment or config"""
-    # Try to get from environment first
-    database_url = os.getenv("DATABASE_URL")
-    if database_url:
-        return database_url
-    
-    # Fall back to config file
-    return config.get_main_option("sqlalchemy.url")
+    """Get database URL from app settings or environment."""
+    try:
+        from data_staging.config import settings
+        return str(settings.DATABASE_URL)
+    except Exception:
+        database_url = os.getenv("DATABASE_URL")
+        if database_url:
+            return database_url
+
+    raise RuntimeError(
+        "DATABASE_URL no configurada. Verifica m8_connect/.env o exporta la variable."
+    )
+
+
+def _is_local_database_url(database_url: str) -> bool:
+    hostname = (urlparse(database_url).hostname or "").lower()
+    return hostname in {"localhost", "127.0.0.1", "::1"}
+
+
+def _create_connectable(database_url: str):
+    """Engine de migraciones alineado con database.py (sin SSL en túnel local)."""
+    connect_args = {"connect_timeout": 10}
+    if _is_local_database_url(database_url):
+        connect_args["sslmode"] = "disable"
+    return create_engine(
+        database_url,
+        poolclass=pool.NullPool,
+        connect_args=connect_args,
+    )
 
 
 def run_migrations_offline() -> None:
@@ -90,16 +112,12 @@ def run_migrations_online() -> None:
 
     """
     configuration = config.get_section(config.config_ini_section)
-    configuration["sqlalchemy.url"] = get_url()
-    
-    connectable = engine_from_config(
-        configuration,
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
+    database_url = get_url()
+    configuration["sqlalchemy.url"] = database_url
+
+    connectable = _create_connectable(database_url)
 
     with connectable.connect() as connection:
-        from sqlalchemy import text
         connection.execute(text("CREATE SCHEMA IF NOT EXISTS staging_meta"))
         connection.commit()
 

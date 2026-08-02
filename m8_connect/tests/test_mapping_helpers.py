@@ -7,7 +7,9 @@ from datetime import date
 
 from data_staging.services.history.history_validation import convert_wizard_column_mapping
 from data_staging.utils.mapping_helpers import (
+    apply_chunk_column_mapping,
     apply_worker_mapping_defaults,
+    inject_session_organization_id,
     is_metadata_driven_fixed_key,
     is_virtual_mapping_key,
     is_wizard_virtual_mapping,
@@ -97,6 +99,37 @@ def test_convert_wizard_column_mapping_manual_pieces():
 
     assert selected == ["location", "sku_col", "date_col", "qty_col"]
     assert column_mapping["pieces"] == {"source": None, "default": "1"}
+
+
+def test_inject_session_organization_id_overwrites_empty_default():
+    mapping = {
+        "code": {"source": "code_col"},
+        "organization_id": {"source": None, "default": ""},
+    }
+    out = inject_session_organization_id(mapping, "org-session-123")
+    assert out["organization_id"] == {"source": None, "default": "org-session-123"}
+
+
+def test_apply_chunk_column_mapping_skips_null_organization_id_without_default():
+    df = pl.DataFrame({"code": ["A"], "name": ["Loc A"]})
+    mapping = {
+        "code": {"source": "code"},
+        "name": {"source": "name"},
+        "organization_id": {"source": None, "default": ""},
+    }
+    out = apply_chunk_column_mapping(df, column_mapping=mapping)
+    assert "organization_id" not in out.columns
+    assert out["code"].to_list() == ["A"]
+
+
+def test_apply_chunk_column_mapping_injects_organization_id_from_default():
+    df = pl.DataFrame({"code": ["A"]})
+    mapping = {
+        "code": {"source": "code"},
+        "organization_id": {"source": None, "default": "org-99"},
+    }
+    out = apply_chunk_column_mapping(df, column_mapping=mapping)
+    assert out["organization_id"].to_list() == ["org-99"]
 
 
 def test_apply_worker_mapping_defaults_fills_missing_column():

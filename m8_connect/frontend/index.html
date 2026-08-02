@@ -6,6 +6,22 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="M8 Connect — Gestión de pipelines ETL y cadena de suministro" />
     <title>M8 Connect</title>
+    <script>
+      (function () {
+        try {
+          var key = 'm8_connect_theme';
+          var stored = localStorage.getItem(key);
+          var dark =
+            stored === 'dark' ||
+            (stored !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+          var root = document.documentElement;
+          if (dark) root.classList.add('dark');
+          else root.classList.remove('dark');
+          root.setAttribute('data-theme', dark ? 'dark' : 'light');
+          root.style.colorScheme = dark ? 'dark' : 'light';
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

@@ -13,8 +13,8 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -57,24 +57,23 @@ Desktop.ini
 # Logs
 logs/
 *.log
-data-staging-system/logs/
+m8_connect/logs/
 log_staging_data.log
 
-# Project Specific Data
-data-staging-system/data/uploads/*
-!data-staging-system/data/uploads/.gitkeep
-data-staging-system/data/staging/*
-!data-staging-system/data/staging/.gitkeep
-data-staging-system/data/temp/*
-!data-staging-system/data/temp/.gitkeep
-data-staging-system/data/archive/*
-!data-staging-system/data/archive/.gitkeep
-data-staging-system/backups/*
-!data-staging-system/backups/.gitkeep
+# Runtime data (uploads, staging, temp)
+m8_connect/data/uploads/*
+!m8_connect/data/uploads/.gitkeep
+m8_connect/data/staging/*
+!m8_connect/data/staging/.gitkeep
+m8_connect/data/temp/*
+!m8_connect/data/temp/.gitkeep
+m8_connect/data/archive/*
+!m8_connect/data/archive/.gitkeep
+m8_connect/backups/*
+!m8_connect/backups/.gitkeep
+m8_connect/temp_uploads/
 
 # Other temp files
 *.tmp
 *.temp
-temp_uploads/
-data-staging-system/temp_uploads/
 validation_output.txt

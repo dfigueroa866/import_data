@@ -56,7 +56,8 @@ def start_workers(num_workers: int = 3):
             database_url=str(settings.DATABASE_URL),
             worker_id=worker_id,
             poll_interval=5,
-            use_notify=False  # Disabled LISTEN/NOTIFY string connection tie for Supabase pooler
+            use_notify=False,  # Disabled LISTEN/NOTIFY string connection tie for Supabase pooler
+            exclude_job_types=["RUN_INCREMENTAL_LOAD"],
         )
         
         # Registrar handlers

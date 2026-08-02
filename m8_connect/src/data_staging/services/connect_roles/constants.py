@@ -17,6 +17,7 @@ DEFAULT_LOADER_PERMISSIONS: Dict[str, Any] = {
         "batches": True,
         "monitoring": False,
         "config": False,
+        "incremental": False,
     },
     "upload": {
         "history": True,
@@ -25,6 +26,7 @@ DEFAULT_LOADER_PERMISSIONS: Dict[str, Any] = {
     "config": {
         "catalogs_view": False,
         "history_view": False,
+        "incremental_view": False,
     },
 }
 
@@ -35,6 +37,7 @@ ADMIN_PERMISSIONS: Dict[str, Any] = {
         "batches": True,
         "monitoring": True,
         "config": True,
+        "incremental": True,
     },
     "upload": {
         "history": True,
@@ -44,6 +47,7 @@ ADMIN_PERMISSIONS: Dict[str, Any] = {
         "catalogs_view": True,
         "history_view": True,
         "roles": True,
+        "incremental_view": True,
     },
 }
 

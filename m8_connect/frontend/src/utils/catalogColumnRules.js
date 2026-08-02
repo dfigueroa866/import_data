@@ -137,25 +137,37 @@ export function deriveHistoryMappingFields(schemaColumns, columnRequiredMap = {}
     };
 }
 
-/** Mappable columns with NOT NULL in DB default to required when no mapping config exists yet. */
+/** Mappable columns with NOT NULL in DB default to required only when no catalog lists exist yet. */
 export function isCatalogColumnRequiredBySchema(col) {
     return isCatalogColumnMappable(col) && col.nullable === false;
 }
 
-/** Build { [columnName]: boolean } from saved lists; NOT NULL defaults to true if unset. */
+/**
+ * Build { [columnName]: boolean } from saved catalog lists.
+ * Config is the source of truth: once required/optional lists exist, do not infer from DB NOT NULL.
+ * When both lists are empty (new catalog / table just selected), seed from DB nullable.
+ */
 export function buildColumnRequiredMap(
     schemaColumns,
     requiredMappingColumns = [],
-    optionalColumns = []
+    optionalColumns = [],
+    requiredColumns = []
 ) {
-    const requiredSet = new Set(requiredMappingColumns || []);
+    const requiredSet = new Set([
+        ...(requiredColumns || []),
+        ...(requiredMappingColumns || []),
+    ]);
+    requiredSet.delete('organization_id');
     const optionalSet = new Set(optionalColumns || []);
+    const hasSavedLists = requiredSet.size > 0 || optionalSet.size > 0;
     const map = {};
     (schemaColumns || []).forEach((col) => {
         if (!isCatalogColumnMappable(col)) return;
         if (requiredSet.has(col.name)) {
             map[col.name] = true;
         } else if (optionalSet.has(col.name)) {
+            map[col.name] = false;
+        } else if (hasSavedLists) {
             map[col.name] = false;
         } else {
             map[col.name] = col.nullable === false;
@@ -213,8 +225,18 @@ export function deriveCatalogMappingFields(schemaColumns, columnRequiredMap = {}
 
 export function getCatalogRequiredMappingColumnNames(catalogMeta) {
     if (!catalogMeta) return [];
-    if (Array.isArray(catalogMeta.required_mapping_columns)) {
-        return catalogMeta.required_mapping_columns;
+    const skip = new Set(catalogMeta.non_mappable_targets || []);
+    skip.add('organization_id');
+    const seen = new Set();
+    const out = [];
+    for (const col of [
+        ...(catalogMeta.required_columns || []),
+        ...(catalogMeta.required_mapping_columns || []),
+    ]) {
+        const name = String(col || '').trim();
+        if (!name || skip.has(name) || seen.has(name)) continue;
+        seen.add(name);
+        out.push(name);
     }
-    return [];
+    return out;
 }

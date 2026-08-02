@@ -9,7 +9,6 @@ description = "M8 Connect — plataforma de ingesta, validación y promoción de
 authors = [
     {name = "Data Team", email = "data@company.com"}
 ]
-readme = "../README.md"
 requires-python = ">=3.9"
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -50,8 +49,8 @@ dev = [
     "pre-commit>=3.5.0",
 ]
 
-[project.scripts]
-data-staging = "data_staging.cli:main"
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.black]
 line-length = 88

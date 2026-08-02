@@ -13,11 +13,26 @@
   },
   "validation_rules": {
     "not_null": {
-      "columns": ["organization_id", "code", "name"],
+      "columns": [
+        "organization_id",
+        "sku",
+        "name",
+        "status",
+        "subcategory",
+        "class",
+        "subclass",
+        "attr_1",
+        "attr_2",
+        "attr_3",
+        "attr_4",
+        "attr_5",
+        "attr_6",
+        "vendor_id"
+      ],
       "severity": "critical"
     },
     "unique": {
-      "columns": ["code"],
+      "columns": ["sku"],
       "severity": "critical"
     },
     "lookup_validation": {
@@ -34,7 +49,23 @@
   "transformation_rules": [
     {
       "name": "clean_whitespace",
-      "columns": ["code", "name", "category", "family", "brand", "status"]
+      "columns": [
+        "sku",
+        "name",
+        "category",
+        "brand",
+        "status",
+        "subcategory",
+        "class",
+        "subclass",
+        "attr_1",
+        "attr_2",
+        "attr_3",
+        "attr_4",
+        "attr_5",
+        "attr_6",
+        "vendor_id"
+      ]
     }
   ],
   "target_table": "stage_skus",
@@ -50,8 +81,23 @@
   },
   "metadata": {
     "catalog_table": "skus",
-    "unique_keys": ["organization_id", "code"],
-    "required_columns": ["organization_id", "code", "name", "status"],
-    "optional_columns": ["category", "family", "brand", "attributes"]
+    "unique_keys": ["organization_id", "sku"],
+    "required_columns": [
+      "organization_id",
+      "sku",
+      "name",
+      "status",
+      "subcategory",
+      "class",
+      "subclass",
+      "attr_1",
+      "attr_2",
+      "attr_3",
+      "attr_4",
+      "attr_5",
+      "attr_6",
+      "vendor_id"
+    ],
+    "optional_columns": ["category", "brand"]
   }
 }

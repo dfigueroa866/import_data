@@ -16,6 +16,12 @@ import CatalogUploadWizard from './components/wizard/CatalogUploadWizard';
 import Batches from './pages/Batches';
 import BatchProgress from './pages/BatchProgress';
 import Monitoring from './pages/Monitoring';
+import IncrementalDashboard from './pages/IncrementalDashboard';
+import IncrementalSchedule from './pages/IncrementalSchedule';
+import IncrementalOrganizations from './pages/IncrementalOrganizations';
+import IncrementalRuns from './pages/IncrementalRuns';
+import IncrementalRunDetail from './pages/IncrementalRunDetail';
+import ThemeToggle from './components/ui/ThemeToggle';
 
 function AppLayout() {
   return (
@@ -100,6 +106,46 @@ function AppLayout() {
                 )}
               />
               <Route
+                path="/incremental"
+                element={(
+                  <PermissionRoute permission="menus.incremental">
+                    <IncrementalDashboard />
+                  </PermissionRoute>
+                )}
+              />
+              <Route
+                path="/incremental/schedule"
+                element={(
+                  <PermissionRoute permission="config.incremental_view" adminOnly={false}>
+                    <IncrementalSchedule />
+                  </PermissionRoute>
+                )}
+              />
+              <Route
+                path="/incremental/organizations"
+                element={(
+                  <PermissionRoute permission="config.incremental_view" adminOnly={false}>
+                    <IncrementalOrganizations />
+                  </PermissionRoute>
+                )}
+              />
+              <Route
+                path="/incremental/runs"
+                element={(
+                  <PermissionRoute permission="menus.incremental">
+                    <IncrementalRuns />
+                  </PermissionRoute>
+                )}
+              />
+              <Route
+                path="/incremental/runs/:runId"
+                element={(
+                  <PermissionRoute permission="menus.incremental">
+                    <IncrementalRunDetail />
+                  </PermissionRoute>
+                )}
+              />
+              <Route
                 path="/monitoring"
                 element={(
                   <PermissionRoute permission="menus.monitoring">
@@ -120,6 +166,7 @@ function App() {
   return (
     <AuthProvider>
       <Router>
+        <ThemeToggle />
         <Routes>
           <Route path="/login" element={<Login />} />
           <Route path="/*" element={<AppLayout />} />

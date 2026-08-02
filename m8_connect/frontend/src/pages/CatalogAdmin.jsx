@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { Settings2 } from 'lucide-react';
-import { Button, PageHeader, LoadingSpinner, Alert, FormField, Input, Select, Textarea } from '../components/ui';
+import { Button, PageHeader, LoadingSpinner, Alert, FormField, Input, Select, Textarea, ConfirmDialog } from '../components/ui';
 import { useAuth } from '../context/AuthContext';
 import { canEditConfig } from '../utils/permissions';
 import {
@@ -44,9 +44,17 @@ const CatalogAdmin = () => {
     const [dbSchemas, setDbSchemas] = useState([]);
     const [dbTables, setDbTables] = useState([]);
     const [loadingDbMeta, setLoadingDbMeta] = useState(false);
+    const [confirmDeactivateOpen, setConfirmDeactivateOpen] = useState(false);
 
-    const syncColumnRequiredFromForm = useCallback((cols, mappingRequired, optionalCols) => {
-        setColumnRequired(buildColumnRequiredMap(cols, mappingRequired, optionalCols));
+    const syncColumnRequiredFromForm = useCallback((cols, mappingRequired, optionalCols, requiredCols) => {
+        setColumnRequired(
+            buildColumnRequiredMap(
+                cols,
+                mappingRequired || [],
+                optionalCols || [],
+                requiredCols || []
+            )
+        );
     }, []);
 
     const loadList = useCallback(async () => {
@@ -103,7 +111,7 @@ const CatalogAdmin = () => {
         }
     }, [form.target_schema]);
 
-    const fetchSchemaColumns = useCallback(async (schema, table, mappingRequired, optionalCols) => {
+    const fetchSchemaColumns = useCallback(async (schema, table, mappingRequired, optionalCols, requiredCols) => {
         if (!schema || !table) {
             setSchemaColumns([]);
             setColumnRequired({});
@@ -112,7 +120,12 @@ const CatalogAdmin = () => {
         try {
             const cols = await fetchTargetTableColumns(schema, table);
             setSchemaColumns(cols);
-            syncColumnRequiredFromForm(cols, mappingRequired || [], optionalCols || []);
+            syncColumnRequiredFromForm(
+                cols,
+                mappingRequired || [],
+                optionalCols || [],
+                requiredCols || []
+            );
             return cols;
         } catch {
             setSchemaColumns([]);
@@ -126,7 +139,8 @@ const CatalogAdmin = () => {
             form.target_schema,
             form.target_table,
             form.required_mapping_columns,
-            form.optional_columns
+            form.optional_columns,
+            form.required_columns
         );
     }, [form.target_schema, form.target_table, fetchSchemaColumns]);
 
@@ -144,7 +158,8 @@ const CatalogAdmin = () => {
                 f.target_schema,
                 f.target_table,
                 f.required_mapping_columns,
-                f.optional_columns
+                f.optional_columns,
+                f.required_columns
             );
             setTab('general');
         } catch (err) {
@@ -207,7 +222,7 @@ const CatalogAdmin = () => {
     };
 
     const handleDeactivate = async () => {
-        if (!selectedName || !window.confirm(`¿Desactivar catálogo "${selectedName}"?`)) return;
+        if (!selectedName) return;
         try {
             await deleteCatalogDefinition(selectedName, false);
             await loadList();
@@ -216,6 +231,8 @@ const CatalogAdmin = () => {
             setColumnRequired({});
         } catch (err) {
             setError(err.response?.data?.detail || 'Error al desactivar');
+        } finally {
+            setConfirmDeactivateOpen(false);
         }
     };
 
@@ -393,7 +410,7 @@ const CatalogAdmin = () => {
                                         {saving ? 'Guardando…' : isNew ? 'Crear catálogo' : 'Guardar cambios'}
                                     </Button>
                                     {!isNew && selectedName && (
-                                        <Button variant="secondary" onClick={handleDeactivate}>
+                                        <Button variant="secondary" onClick={() => setConfirmDeactivateOpen(true)}>
                                             Desactivar
                                         </Button>
                                     )}
@@ -407,6 +424,17 @@ const CatalogAdmin = () => {
                     )}
                 </section>
             </div>
+
+            <ConfirmDialog
+                isOpen={confirmDeactivateOpen}
+                onClose={() => setConfirmDeactivateOpen(false)}
+                onConfirm={handleDeactivate}
+                title="Desactivar catálogo"
+                message={`¿Desactivar catálogo "${selectedName || ''}"?`}
+                confirmText="Desactivar"
+                cancelText="Cancelar"
+                variant="danger"
+            />
         </div>
     );
 };

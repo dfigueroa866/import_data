@@ -214,12 +214,20 @@ def test_database():
             db_url = str(settings.DATABASE_URL or "")
             host_port = db_url.split("@")[-1] if "@" in db_url else db_url
             print("\n💡 PostgreSQL no está accesible en", host_port)
-            print("   1. Abre Docker Desktop (si usas Postgres en Docker)")
-            print("   2. Levanta la base de datos:")
+            print("   1. Mantén abierto el túnel SSH:")
+            print("      ssh -i m8-steiner-key.pem -L 5432:172.18.0.3:5432 ubuntu@100.59.255.31")
+            print("   2. O levanta Postgres local:")
             print("      docker compose -f docker/docker-compose.local.yml up -d")
-            print("      # o el contenedor/túnel que usabas antes")
             print("   3. Prueba: python scripts/test_postgres_connection.py")
             print("   4. Vuelve a ejecutar: python run_app.py")
+        elif "password authentication failed" in err_lower:
+            from data_staging.config import settings
+            db_url = str(settings.DATABASE_URL or "")
+            host_port = db_url.split("@")[-1] if "@" in db_url else db_url
+            print("\n💡 Autenticación fallida en", host_port)
+            print("   1. Verifica usuario y contraseña en DATABASE_URL (.env)")
+            print("   2. Confirma que el túnel apunta al Postgres correcto (no a otra instancia local)")
+            print("   3. Prueba: python scripts/test_postgres_connection.py")
         return False
             
     except Exception as e:

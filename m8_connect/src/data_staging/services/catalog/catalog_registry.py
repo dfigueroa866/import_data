@@ -45,6 +45,30 @@ def get_catalog_table(table_name: str) -> Optional[Dict[str, Any]]:
     return entry
 
 
+def catalog_required_targets(entry: Optional[Dict[str, Any]]) -> List[str]:
+    """
+    Columns that must be mapped and non-empty for a catalog load.
+
+    Union of required_columns + required_mapping_columns from catalog config,
+    excluding organization_id (session-injected) and non_mappable_targets.
+    """
+    if not entry:
+        return []
+    skip = set(entry.get("non_mappable_targets") or [])
+    skip.add("organization_id")
+    seen: set[str] = set()
+    out: List[str] = []
+    for col in list(entry.get("required_columns") or []) + list(
+        entry.get("required_mapping_columns") or []
+    ):
+        name = str(col or "").strip()
+        if not name or name in skip or name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+    return out
+
+
 def resolve_catalog_db_target(
     catalog_slug: str,
     target_schema: Optional[str] = None,
@@ -62,7 +86,12 @@ def resolve_catalog_db_target(
 
 
 def load_validation_rules(table_name: str) -> Dict[str, Any]:
-    """Load validation_rules from the JSON config for a catalog table."""
+    """
+    Load validation_rules from the JSON config for a catalog table.
+
+    Overlay not_null.columns from catalog store required targets so the admin
+    definition remains the source of truth for null rejection.
+    """
     entry = get_catalog_table(table_name)
     if not entry:
         raise ValueError(f"Unknown catalog table: {table_name}")
@@ -71,7 +100,23 @@ def load_validation_rules(table_name: str) -> Dict[str, Any]:
         raise FileNotFoundError(f"Catalog config not found: {config_path}")
     with open(config_path, "r", encoding="utf-8") as f:
         config = json.load(f)
-    return config.get("validation_rules", {})
+    rules = dict(config.get("validation_rules") or {})
+    required = catalog_required_targets(entry)
+    if required:
+        not_null = dict(rules.get("not_null") or {})
+        # Keep organization_id in not_null if the JSON listed it; always include config requireds.
+        existing = [str(c) for c in (not_null.get("columns") or []) if str(c).strip()]
+        merged: List[str] = []
+        seen: set[str] = set()
+        for col in existing + required:
+            if col in seen:
+                continue
+            seen.add(col)
+            merged.append(col)
+        not_null["columns"] = merged
+        not_null.setdefault("severity", "critical")
+        rules["not_null"] = not_null
+    return rules
 
 
 def load_full_config(table_name: str) -> Dict[str, Any]:

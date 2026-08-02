@@ -281,10 +281,14 @@
     width: 100%;
 }
 
-/* Toggle Switch - Red/Green Pill */
+/* Toggle Switch — alto contraste en claro y oscuro */
+.toggle-wrapper {
+    flex-shrink: 0;
+}
+
 .toggle-switch {
-    width: 60px;
-    height: 30px;
+    width: 52px;
+    height: 28px;
     position: relative;
     display: inline-block;
 }
@@ -293,69 +297,89 @@
     opacity: 0;
     width: 0;
     height: 0;
+    position: absolute;
 }
 
 .toggle-slider {
     position: absolute;
     cursor: pointer;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background-color: var(--color-danger);
-    /* Red for OFF */
-    transition: .4s;
-    border-radius: 34px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0 8px;
-    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.2);
+    inset: 0;
+    background-color: #dc2626;
+    border: 2px solid #b91c1c;
+    transition: background-color 0.25s ease, border-color 0.25s ease;
+    border-radius: 9999px;
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.18);
 }
 
-.toggle-slider:before {
-    position: absolute;
+.toggle-slider::before {
     content: "";
-    height: 22px;
-    width: 22px;
-    left: 4px;
-    /* Start at left for OFF */
-    bottom: 4px;
-    background-color: white;
-    transition: .4s;
+    position: absolute;
+    height: 18px;
+    width: 18px;
+    left: 3px;
+    top: 50%;
+    transform: translateY(-50%);
+    background-color: #ffffff;
+    transition: transform 0.25s ease;
     border-radius: 50%;
-    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
     z-index: 2;
 }
 
-/* ON State */
-input:checked+.toggle-slider {
-    background-color: var(--color-success);
-    /* Green for ON */
+.toggle-switch input:focus-visible + .toggle-slider {
+    outline: 2px solid var(--accent-primary, #2563eb);
+    outline-offset: 2px;
 }
 
-input:checked+.toggle-slider:before {
-    transform: translateX(30px);
-    /* Move circle to right */
+input:checked + .toggle-slider {
+    background-color: #16a34a;
+    border-color: #15803d;
 }
 
-/* Text Labels */
-.toggle-slider:after {
+input:checked + .toggle-slider::before {
+    transform: translate(22px, -50%);
+}
+
+.toggle-slider::after {
     content: 'OFF';
-    color: white;
-    font-size: 10px;
+    color: #ffffff;
+    font-size: 9px;
     font-weight: 700;
+    letter-spacing: 0.04em;
     position: absolute;
-    right: 8px;
-    opacity: 1;
-    transition: opacity 0.3s;
+    top: 50%;
+    right: 7px;
+    transform: translateY(-50%);
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+    pointer-events: none;
+    z-index: 1;
 }
 
-input:checked+.toggle-slider:after {
+input:checked + .toggle-slider::after {
     content: 'ON';
     left: 8px;
     right: auto;
-    text-align: left;
+}
+
+.dark .toggle-slider {
+    background-color: #ef4444;
+    border-color: #f87171;
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+.dark .toggle-slider::before {
+    background-color: #f8fafc;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+}
+
+.dark input:checked + .toggle-slider {
+    background-color: #22c55e;
+    border-color: #4ade80;
+}
+
+.dark .toggle-slider::after {
+    color: #ffffff;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
 }
 
 /* Floating Production Columns Panel */
@@ -404,15 +428,30 @@ input:checked+.toggle-slider:after {
 }
 
 .btn-icon.danger {
-    color: var(--color-danger);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-secondary, #64748b);
     background: transparent;
     border: none;
-    font-size: 1.25rem;
+    border-radius: 0.375rem;
+    padding: 0.35rem;
     cursor: pointer;
+    transition: color 0.15s ease, background-color 0.15s ease, transform 0.15s ease;
 }
 
-.btn-icon.danger:hover {
-    transform: scale(1.1);
+.btn-icon.danger:hover,
+.btn-icon.danger:focus-visible {
+    color: #dc2626;
+    background: rgba(220, 38, 38, 0.12);
+    transform: scale(1.08);
+    outline: none;
+}
+
+.dark .btn-icon.danger:hover,
+.dark .btn-icon.danger:focus-visible {
+    color: #f87171;
+    background: rgba(248, 113, 113, 0.15);
 }
 
 .mapping-target select {

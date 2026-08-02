@@ -1,7 +1,0 @@
-sale_id,customer_id,product,quantity,price,sale_date,email
-1,1.0,Laptop,1,999.99,2023-06-01,alice@example.com
-2,2.0,Mouse,2,29.99,2023-06-02,bob@example.com
-3,3.0,Keyboard,1,79.99,2023-06-03,invalid-email
-4,1.0,Monitor,1,299.99,invalid-date,alice@example.com
-5,,Headphones,3,149.99,2023-06-05,eve@example.com
-6,2.0,Tablet,1,399.99,2023-06-06,bob@example.com

@@ -4,12 +4,8 @@ Revision ID: 003_connect_roles
 Revises: 002_job_queue_and_indexes
 Create Date: 2026-06-18
 
-Bootstrap admin: david.figueroa@m8solutions.com.mx
-If user does not exist yet, run manually:
-  INSERT INTO m8_schema.connect_user_roles (user_id, role, granted_at)
-  SELECT id, 'admin_m8_connect'::m8_schema.connect_role, now()
-  FROM public.users WHERE LOWER(email::text) = LOWER('david.figueroa@m8solutions.com.mx')
-  ON CONFLICT (user_id) DO UPDATE SET role = EXCLUDED.role;
+Bootstrap admin role for david.figueroa@m8solutions.com.mx when the user already
+exists. User creation itself lives in 005_bootstrap_admin_user.
 """
 
 from alembic import op

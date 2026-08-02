@@ -47,6 +47,17 @@ def is_wizard_virtual_mapping(
     return source is None or str(source).strip() == ""
 
 
+def inject_session_organization_id(
+    column_mapping: Optional[Dict[str, Dict[str, Any]]],
+    organization_id: Optional[str],
+) -> Dict[str, Dict[str, Any]]:
+    """Ensure organization_id is always populated from the authenticated user's org."""
+    out = dict(column_mapping or {})
+    if organization_id:
+        out["organization_id"] = {"source": None, "default": organization_id}
+    return out
+
+
 def apply_worker_mapping_defaults(
     df: pl.DataFrame,
     column_mapping: Optional[Dict[str, Dict[str, Any]]],
@@ -147,8 +158,17 @@ def apply_chunk_column_mapping(
                 chunk_df = chunk_df.rename({source_col: target_col})
             elif target_col in chunk_df.columns:
                 pass
+            elif target_col == "organization_id":
+                logger.warning(
+                    "organization_id has no source/default in mapping; "
+                    "omitting null column (expected session injection upstream)"
+                )
             else:
-                chunk_df = chunk_df.with_columns(pl.lit(None).alias(target_col))
+                # Omit unmapped targets so DB defaults can apply; do not force NULL.
+                logger.debug(
+                    "Omitting target column %s (no source/default in mapping)",
+                    target_col,
+                )
 
     target_cols = list(column_mapping.keys())
     available_targets = [c for c in target_cols if c in chunk_df.columns]

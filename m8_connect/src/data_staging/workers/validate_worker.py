@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 def execute_validation_pipeline(batch_id: str, org_id: str) -> None:
     """Validate all rows after mapping (Step 2); writes validated + rejected files."""
     from data_staging.api.v1.upload import _resolve_preview_encoding
+    from data_staging.services.catalog.catalog_preview_pipeline import run_catalog_validation_only
     from data_staging.services.history.history_preview_pipeline import run_history_validation_only
     from data_staging.services.history.history_preview_pipeline import validated_intermediate_path
     from data_staging.utils.batch_staging_files import rejected_records_path
@@ -50,7 +51,7 @@ def execute_validation_pipeline(batch_id: str, org_id: str) -> None:
             raise ValueError(f"organization_id is required for VALIDATE_BATCH on batch {batch_id}")
         org_id = resolved_org
         load_type = metadata.get("load_type", "history")
-        if load_type != "history":
+        if load_type not in ("history", "catalog"):
             metadata["validation_in_progress"] = False
             metadata["validation_complete"] = True
             db.execute(
@@ -102,18 +103,31 @@ def execute_validation_pipeline(batch_id: str, org_id: str) -> None:
             metadata["file_analysis"] = file_analysis
 
         try:
-            validation_stats = run_history_validation_only(
-                batch_id=batch_id,
-                file_path=file_path,
-                column_mappings=column_mappings,
-                column_toggles=column_toggles,
-                process_type=process_type,
-                encoding=encoding,
-                delimiter=delimiter,
-                organization_id=org_id,
-                metadata=metadata,
-                file_name=getattr(batch, "source_name", "") or "",
-            )
+            if load_type == "catalog":
+                validation_stats = run_catalog_validation_only(
+                    batch_id=batch_id,
+                    file_path=file_path,
+                    column_mappings=column_mappings,
+                    column_toggles=column_toggles,
+                    encoding=encoding,
+                    delimiter=delimiter,
+                    organization_id=org_id,
+                    metadata=metadata,
+                    file_name=getattr(batch, "source_name", "") or "",
+                )
+            else:
+                validation_stats = run_history_validation_only(
+                    batch_id=batch_id,
+                    file_path=file_path,
+                    column_mappings=column_mappings,
+                    column_toggles=column_toggles,
+                    process_type=process_type,
+                    encoding=encoding,
+                    delimiter=delimiter,
+                    organization_id=org_id,
+                    metadata=metadata,
+                    file_name=getattr(batch, "source_name", "") or "",
+                )
         except BatchCancelledError:
             raise
         except Exception as exc:

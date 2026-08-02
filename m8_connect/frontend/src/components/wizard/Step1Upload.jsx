@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import {
     uploadFileTemp,
     getHistoryTable,
+    getHistoryCatalogReadiness,
     saveColumnMapping,
     waitForMappingValidation,
 } from '../../services/wizardService';
@@ -16,6 +18,7 @@ import {
     FALLBACK_PROCESS_TYPES,
 } from '../../constants/historyConfig';
 import { formatNumber } from '../../lib/format';
+import { formatMissingCatalogs } from '../../lib/statusLabels';
 import {
     appendFixedHistoryAutoMappings,
     appendFixedOrganizationMapping,
@@ -38,9 +41,35 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
         wizardData.historyTableMeta || HISTORY_TABLE_META
     );
     const [metaLoading, setMetaLoading] = useState(!wizardData.historyTableMeta?.process_types?.length);
+    const [readinessLoading, setReadinessLoading] = useState(true);
+    const [catalogReadiness, setCatalogReadiness] = useState(null);
 
     useSessionLoadGuard(uploading || validating);
     const [dragActive, setDragActive] = useState(false);
+
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            try {
+                setReadinessLoading(true);
+                const readiness = await getHistoryCatalogReadiness();
+                if (!cancelled) {
+                    setCatalogReadiness(readiness);
+                }
+            } catch {
+                if (!cancelled) {
+                    setCatalogReadiness(null);
+                }
+            } finally {
+                if (!cancelled) {
+                    setReadinessLoading(false);
+                }
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, []);
 
     useEffect(() => {
         let cancelled = false;
@@ -74,7 +103,12 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
         ? historyMeta.validation_hints
         : HISTORY_TABLE_META.validation_hints;
 
+    const catalogBlocked = catalogReadiness != null && catalogReadiness.ready === false;
+    const uploadDisabled = catalogBlocked || readinessLoading || metaLoading;
+    const missingCatalogsLabel = formatMissingCatalogs(catalogReadiness?.missing);
+
     const handleDrag = (e) => {
+        if (uploadDisabled) return;
         e.preventDefault();
         e.stopPropagation();
         if (e.type === 'dragenter' || e.type === 'dragover') {
@@ -85,6 +119,7 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
     };
 
     const handleDrop = (e) => {
+        if (uploadDisabled) return;
         e.preventDefault();
         e.stopPropagation();
         setDragActive(false);
@@ -96,6 +131,7 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
     };
 
     const handleFileSelect = (e) => {
+        if (uploadDisabled) return;
         if (e.target.files && e.target.files[0]) {
             setFile(e.target.files[0]);
             setError('');
@@ -103,6 +139,10 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
     };
 
     const handleSubmit = async () => {
+        if (catalogBlocked) {
+            setError(catalogReadiness?.message || 'Debes promover catálogos antes de cargar historia.');
+            return;
+        }
         if (!file) {
             setError('Selecciona un archivo');
             return;
@@ -265,14 +305,36 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
     return (
         <div className="step1-upload">
             <div className="step1-content">
+                {catalogBlocked && (
+                    <Alert variant="warning">
+                        <p>{catalogReadiness.message}</p>
+                        {missingCatalogsLabel && (
+                            <p className="mt-2">Faltan: {missingCatalogsLabel}</p>
+                        )}
+                        <p className="mt-2">
+                            <Link to="/upload/catalog" className="text-brand-600 hover:underline font-semibold">
+                                Ir a carga de catálogos →
+                            </Link>
+                        </p>
+                    </Alert>
+                )}
+
                 <div className="upload-section">
                     <h3>Archivo</h3>
                     <div
-                        className={`drop-zone ${dragActive ? 'active' : ''} ${file ? 'has-file' : ''}`}
+                        className={[
+                            'drop-zone',
+                            dragActive ? 'active' : '',
+                            file ? 'has-file' : '',
+                            uploadDisabled ? 'drop-zone--disabled' : '',
+                        ]
+                            .filter(Boolean)
+                            .join(' ')}
                         onDragEnter={handleDrag}
                         onDragLeave={handleDrag}
                         onDragOver={handleDrag}
                         onDrop={handleDrop}
+                        aria-disabled={uploadDisabled}
                     >
                         {file ? (
                             <div className="file-info">
@@ -331,7 +393,7 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
                             id="processType"
                             value={processType}
                             onChange={(e) => setProcessType(e.target.value)}
-                            disabled={metaLoading}
+                            disabled={uploadDisabled}
                         >
                             <option value="">
                                 {metaLoading ? 'Cargando opciones…' : '-- Seleccionar --'}
@@ -370,7 +432,7 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
                     onClick={handleSubmit}
                     loading={uploading}
                     loadingLabel="Subiendo archivo…"
-                    disabled={!file || !processType || validating || metaLoading}
+                    disabled={!file || !processType || validating || uploadDisabled}
                 >
                     Siguiente: mapear columnas →
                 </Button>

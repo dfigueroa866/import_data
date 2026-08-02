@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any, Dict
 
 import polars as pl
 import pytest
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_INCREMENTAL_SRC = _REPO_ROOT / "m8_incremental" / "src"
+if _INCREMENTAL_SRC.is_dir() and str(_INCREMENTAL_SRC) not in sys.path:
+    sys.path.insert(0, str(_INCREMENTAL_SRC))
 
 GOLDEN_BATCH_ID = "7cd1ffb6-71a7-48e2-80c1-f38d25667342"
 GOLDEN_SHORT_ID = "7cd1ffb6"

@@ -111,19 +111,6 @@ def report_promotion_progress(
         chunks_total=chunks_total,
     )
 
-# Fallback si el catálogo no define unique_keys (nombres = columnas físicas en BD)
-_CATALOG_UPSERT_KEYS_FALLBACK = {
-    "skus": ["organization_id", "code"],
-    "location": ["organization_id", "code"],
-}
-
-# Claves legacy en configs viejos → nombre real en tabla locations
-_CONFLICT_KEY_ALIASES = {
-    "location_code": "code",
-    "location_name": "name",
-}
-
-
 def _resolve_db_column_name(
     key: str,
     db_columns: Dict[str, str],
@@ -134,12 +121,6 @@ def _resolve_db_column_name(
     lower = key.lower()
     if lower in db_columns_lower:
         return db_columns_lower[lower]
-    alias = _CONFLICT_KEY_ALIASES.get(key) or _CONFLICT_KEY_ALIASES.get(lower)
-    if alias:
-        if alias in db_columns:
-            return alias
-        if alias.lower() in db_columns_lower:
-            return db_columns_lower[alias.lower()]
     return None
 
 
@@ -181,7 +162,7 @@ def _resolve_catalog_conflict_columns(
     insert_columns: Set[str],
     unique_indexes: List[List[str]],
 ) -> List[str]:
-    """UPSERT: claves del catálogo alineadas a un índice único real en la tabla destino."""
+    """UPSERT: claves del catálogo (unique_keys en config) alineadas a un índice único real."""
     from data_staging.services.history.history_schema import pick_upsert_conflict_columns
     from data_staging.services.catalog.catalog_registry import get_catalog_table
 
@@ -194,8 +175,11 @@ def _resolve_catalog_conflict_columns(
     if not keys:
         keys = list(metadata.get("unique_keys") or [])
 
-    if not keys and catalog_slug:
-        keys = list(_CATALOG_UPSERT_KEYS_FALLBACK.get(catalog_slug.lower(), []))
+    if not keys:
+        raise ValueError(
+            f"Catálogo '{catalog_slug or '?'}' no define unique_keys en la configuración; "
+            "no se puede promover con UPSERT."
+        )
 
     picked = pick_upsert_conflict_columns(
         keys,
@@ -205,7 +189,7 @@ def _resolve_catalog_conflict_columns(
     )
     if picked:
         logger.info("Catalog UPSERT ON CONFLICT (%s)", ", ".join(picked))
-    elif keys:
+    else:
         logger.warning(
             "No hay índice único compatible para catálogo %s (preferido: %s)",
             catalog_slug,
@@ -213,6 +197,34 @@ def _resolve_catalog_conflict_columns(
         )
     return picked
 
+
+def _assert_catalog_required_columns_present(
+    catalog_slug: Optional[str],
+    available_columns: Set[str],
+) -> None:
+    """Fail before INSERT if config-required columns are missing from the temp file."""
+    if not catalog_slug:
+        return
+    from data_staging.services.catalog.catalog_registry import (
+        catalog_required_targets,
+        get_catalog_table,
+    )
+
+    entry = get_catalog_table(catalog_slug)
+    required = catalog_required_targets(entry)
+    if not required:
+        return
+    available_lower = {str(c).lower(): str(c) for c in available_columns}
+    missing = [
+        col
+        for col in required
+        if col not in available_columns and col.lower() not in available_lower
+    ]
+    if missing:
+        raise ValueError(
+            "Faltan columnas obligatorias del catálogo en el archivo validado: "
+            + ", ".join(missing)
+        )
 
 def _catalog_upsert_clause(
     load_type: str,
@@ -429,6 +441,9 @@ def _prepare_insert_query(
     db_columns_lower: Optional[Dict[str, str]] = None,
     unique_indexes: Optional[List[List[str]]] = None,
 ) -> Tuple[str, str, List[int], List[str]]:
+    if load_type == "catalog":
+        _assert_catalog_required_columns_present(catalog_slug, set(file_columns))
+
     insert_cols: List[str] = []
     file_col_indices: List[int] = []
 
@@ -1535,6 +1550,9 @@ def promote_batch_job(payload: Dict[str, Any]):
             )
 
         if total_inserted == 0:
+            zero_payload: Dict[str, Any] = {"promoted_at": "NOW()", "promoted_count": 0}
+            if load_type == "catalog":
+                zero_payload["preserve_upload_files"] = True
             cursor.execute(
                 f"""
                 UPDATE staging_meta.batch_control
@@ -1545,7 +1563,7 @@ def promote_batch_job(payload: Dict[str, Any]):
                     updated_at = CURRENT_TIMESTAMP
                 WHERE batch_id = %s
                 """,
-                (json.dumps({"promoted_at": "NOW()", "promoted_count": 0}), batch_id),
+                (json.dumps(zero_payload), batch_id),
             )
             conn.commit()
             return
@@ -1558,6 +1576,8 @@ def promote_batch_job(payload: Dict[str, Any]):
         )
         promotion_payload["promoted_at"] = "NOW()"
         promotion_payload.update(promo_timer.snapshot())
+        if load_type == "catalog":
+            promotion_payload["preserve_upload_files"] = True
 
         cursor.execute(
             f"""

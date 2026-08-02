@@ -42,6 +42,8 @@ def sync_batch_on_job_failure(
         label = "Vista previa"
     elif job_type == "VALIDATE_BATCH":
         label = "Validación de mapeo"
+    elif job_type == "RUN_INCREMENTAL_LOAD":
+        label = "Carga incremental"
     elif job_type == "PROCESS_FILE":
         label = "Procesamiento"
     else:
@@ -101,16 +103,20 @@ class PostgresQueueWorker:
     """Worker que procesa jobs desde PostgreSQL."""
     
     def __init__(
-        self, 
+        self,
         database_url: str,
         worker_id: str,
         poll_interval: int = 5,
-        use_notify: bool = True
+        use_notify: bool = True,
+        job_types: Optional[List[str]] = None,
+        exclude_job_types: Optional[List[str]] = None,
     ):
         self.database_url = database_url
         self.worker_id = worker_id
         self.poll_interval = poll_interval
         self.use_notify = use_notify
+        self.job_types = job_types
+        self.exclude_job_types = exclude_job_types or []
         self.running = False
         self.handlers: Dict[str, Callable] = {}
         
@@ -122,7 +128,13 @@ class PostgresQueueWorker:
     def start(self):
         """Inicia el worker."""
         self.running = True
-        logger.info(f"Worker {self.worker_id}: Starting...")
+        filters = []
+        if self.job_types:
+            filters.append(f"only={self.job_types}")
+        if self.exclude_job_types:
+            filters.append(f"exclude={self.exclude_job_types}")
+        filter_msg = f" ({', '.join(filters)})" if filters else ""
+        logger.info(f"Worker {self.worker_id}: Starting...{filter_msg}")
         
         if self.use_notify:
             self._work_loop_with_notify()
@@ -205,9 +217,21 @@ class PostgresQueueWorker:
         
         try:
             cursor = conn.cursor()
-            
+
+            conditions = ["status = 'PENDING'"]
+            where_params: List[Any] = []
+            if self.job_types:
+                conditions.append("job_type = ANY(%s)")
+                where_params.append(self.job_types)
+            if self.exclude_job_types:
+                conditions.append("NOT (job_type = ANY(%s))")
+                where_params.append(self.exclude_job_types)
+            where_clause = " AND ".join(conditions)
+            # SET worker_id = %s aparece antes que los placeholders del WHERE
+            params: List[Any] = [self.worker_id, *where_params]
+
             # Usar FOR UPDATE SKIP LOCKED es crucial para evitar bloqueos
-            cursor.execute("""
+            cursor.execute(f"""
                 UPDATE staging_meta.job_queue
                 SET status = 'PROCESSING',
                     started_at = CURRENT_TIMESTAMP,
@@ -215,13 +239,13 @@ class PostgresQueueWorker:
                 WHERE job_id = (
                     SELECT job_id
                     FROM staging_meta.job_queue
-                    WHERE status = 'PENDING'
+                    WHERE {where_clause}
                     ORDER BY priority DESC, created_at ASC
                     FOR UPDATE SKIP LOCKED
                     LIMIT 1
                 )
                 RETURNING job_id, job_type, payload, retry_count, max_retries
-            """, (self.worker_id,))
+            """, params)
             
             job = cursor.fetchone()
             conn.commit()

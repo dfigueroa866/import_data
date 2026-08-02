@@ -354,7 +354,11 @@ def process_catalog_preview(
     db_table = catalog.get("target_table") or target_table
 
     extra_issues: List[Dict[str, Any]] = []
-    extra_issues.extend(_check_required_mapped(pdf, catalog["required_columns"]))
+    from data_staging.services.catalog.catalog_registry import catalog_required_targets
+
+    extra_issues.extend(
+        _check_required_mapped(pdf, catalog_required_targets(catalog))
+    )
     extra_issues.extend(_check_composite_unique(pdf, catalog["unique_keys"]))
 
     not_null_cols = load_db_not_null_columns(

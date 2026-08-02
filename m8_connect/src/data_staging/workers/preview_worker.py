@@ -89,23 +89,69 @@ def execute_preview_pipeline(batch_id: str, org_id: str) -> None:
         agg_file_path: Path
 
         if load_type == "catalog":
-            from data_staging.services.catalog_preview_service import (
-                CatalogPreviewError,
-                run_catalog_wizard_preview,
+            from data_staging.services.catalog.catalog_preview_pipeline import (
+                process_catalog_preview_with_validation,
+                run_catalog_preview_from_validated,
             )
+            from data_staging.services.history.history_preview_pipeline import (
+                validated_intermediate_path,
+            )
+            from data_staging.utils.batch_staging_files import rejected_records_path
 
             try:
-                agg_stats, agg_file_path = run_catalog_wizard_preview(
-                    file_path,
-                    metadata,
-                    organization_id=org_id,
-                    encoding=encoding,
-                    delimiter=delimiter,
-                )
+                pre_stats = metadata.get("processing_stats") or {}
+                if metadata.get("validation_complete") and int(
+                    pre_stats.get("total_inserted") or 0
+                ) == 0:
+                    agg_stats = {
+                        "has_error": True,
+                        "error_detail": (
+                            "Ningún registro pasó la validación. "
+                            "Descarga los rechazados para corregir."
+                        ),
+                        "total_rows": int(pre_stats.get("total_inserted") or 0)
+                        + int(pre_stats.get("total_rejected") or 0),
+                        "rejected_rows": int(pre_stats.get("total_rejected") or 0),
+                        "valid_rows": 0,
+                        "grouped_rows": 0,
+                        "dropped_rows": 0,
+                        "preview_data": [],
+                    }
+                    agg_file_path = Path(file_path)
+                elif metadata.get("validation_complete") and (
+                    metadata.get("validated_temp_file")
+                    or validated_intermediate_path(batch_id, metadata).is_file()
+                ):
+                    validated_path = validated_intermediate_path(batch_id, metadata)
+                    stored = metadata.get("validated_temp_file")
+                    if stored and Path(stored).is_file():
+                        validated_path = Path(stored)
+                    agg_stats, agg_file_path = run_catalog_preview_from_validated(
+                        batch_id=batch_id,
+                        validated_path=validated_path,
+                        valid_rows=int(pre_stats.get("total_inserted") or 0) or None,
+                        rejected_rows=int(pre_stats.get("total_rejected") or 0) or None,
+                        metadata=metadata,
+                    )
+                else:
+                    agg_stats, agg_file_path = process_catalog_preview_with_validation(
+                        batch_id=batch_id,
+                        file_path=file_path,
+                        column_mappings=column_mappings,
+                        column_toggles=column_toggles,
+                        encoding=encoding,
+                        delimiter=delimiter,
+                        organization_id=org_id,
+                        metadata=metadata,
+                        file_name=getattr(batch, "source_name", "") or "",
+                    )
                 process_type = "Catalog"
-            except CatalogPreviewError as ce:
+            except BatchCancelledError:
+                raise
+            except Exception as exc:
+                logger.exception("Catalog preview pipeline failed for batch %s", batch_id)
                 metadata["preview_in_progress"] = False
-                metadata["preview_error"] = str(ce)
+                metadata["preview_error"] = str(exc)
                 db.execute(
                     text("""
                         UPDATE staging_meta.batch_control
@@ -116,7 +162,32 @@ def execute_preview_pipeline(batch_id: str, org_id: str) -> None:
                 )
                 db.commit()
                 return
-        else:
+
+            rejected_path = str(rejected_records_path(batch_id, metadata).resolve())
+            metadata["rejected_temp_file"] = rejected_path
+            metadata["validated_in_preview"] = True
+            ctx_cols = metadata.get("column_mappings") or {}
+            source_cols = [
+                fc for fc, cfg in ctx_cols.items()
+                if isinstance(cfg, dict) and cfg.get("target") and not str(fc).startswith("__")
+            ]
+            if source_cols:
+                metadata["source_file_columns"] = source_cols
+
+            valid_rows = int(agg_stats.get("valid_rows") or 0)
+            rejected_rows = int(agg_stats.get("rejected_rows") or 0)
+            metadata["processing_stats"] = {
+                "total_inserted": valid_rows,
+                "total_rejected": rejected_rows,
+            }
+
+            if not agg_stats.get("has_error"):
+                valid_path = str(agg_file_path)
+                metadata["valid_temp_file"] = valid_path
+                metadata["valid_file_format"] = "parquet"
+                metadata = with_file_path(metadata, valid_path)
+                metadata.pop("validated_temp_file", None)
+        elif load_type == "history":
             from data_staging.services.history.history_preview_pipeline import (
                 process_history_preview_with_validation,
                 run_history_aggregation_from_validated,
@@ -226,7 +297,7 @@ def execute_preview_pipeline(batch_id: str, org_id: str) -> None:
 
         batch_status = "PENDING_PROCESS"
         records_count = None
-        if load_type == "history" and metadata.get("validated_in_preview"):
+        if metadata.get("validated_in_preview"):
             if not agg_stats.get("has_error"):
                 batch_status = "COMPLETED"
                 records_count = int(
@@ -289,6 +360,9 @@ def execute_preview_pipeline(batch_id: str, org_id: str) -> None:
         if metadata.get("aggregated_file_path"):
             update_sql += ", file_path = :file_path"
             update_params["file_path"] = metadata["aggregated_file_path"]
+        elif metadata.get("valid_temp_file"):
+            update_sql += ", file_path = :file_path"
+            update_params["file_path"] = metadata["valid_temp_file"]
         update_sql += " WHERE batch_id = :batch_id AND status != 'CANCELLED'"
 
         db.execute(text(update_sql), update_params)

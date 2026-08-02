@@ -1,38 +1,43 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { LayoutDashboard, Database, TrendingUp, Activity, Upload as UploadIcon } from 'lucide-react';
-import { PageHeader, Card, Badge, LoadingSpinner, Button } from '../components/ui';
+import { PageHeader, Card, Badge, LoadingSpinner, Button, Alert } from '../components/ui';
 import { formatNumber, formatPercent, formatDateShort } from '../lib/format';
 import { monitoringService } from '../services/monitoringService';
 import { uploadService } from '../services/uploadService';
 
 const Dashboard = () => {
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [systemStatus, setSystemStatus] = useState(null);
   const [recentBatches, setRecentBatches] = useState([]);
   const [health, setHealth] = useState(null);
 
-  useEffect(() => {
-    (async () => {
-      try {
-        setLoading(true);
-        const [statusData, batchesData, healthData] = await Promise.all([
-          monitoringService.getSystemStatus(),
-          uploadService.listBatches({ limit: 5 }),
-          monitoringService.getHealth(),
-        ]);
-        setSystemStatus(statusData);
-        setRecentBatches(batchesData.batches || []);
-        setHealth(healthData);
-      } catch (error) {
-        console.error('Error loading dashboard:', error);
-      } finally {
-        setLoading(false);
-      }
-    })();
+  const loadData = useCallback(async () => {
+    try {
+      setLoading(true);
+      setLoadError('');
+      const [statusData, batchesData, healthData] = await Promise.all([
+        monitoringService.getSystemStatus(),
+        uploadService.listBatches({ limit: 5 }),
+        monitoringService.getHealth(),
+      ]);
+      setSystemStatus(statusData);
+      setRecentBatches(batchesData.batches || []);
+      setHealth(healthData);
+    } catch (error) {
+      console.error('Error loading dashboard:', error);
+      setLoadError('No se pudo cargar el panel. Comprueba que el servidor esté en marcha.');
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
-  if (loading) {
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  if (loading && !systemStatus && !loadError) {
     return (
       <div className="flex-1 overflow-y-auto p-4 scrollbar-thin">
         <LoadingSpinner size="lg" message="Cargando panel…" />
@@ -52,6 +57,17 @@ const Dashboard = () => {
   return (
     <div className="flex flex-1 flex-col gap-5 overflow-y-auto p-4 scrollbar-thin">
       <PageHeader icon={LayoutDashboard} title="Panel" subtitle="Resumen del sistema y actividad reciente" />
+
+      {loadError && (
+        <Alert variant="error">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <span>{loadError}</span>
+            <Button variant="secondary" size="sm" onClick={loadData} loading={loading}>
+              Reintentar
+            </Button>
+          </div>
+        </Alert>
+      )}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
         {statCards.map((s) => (

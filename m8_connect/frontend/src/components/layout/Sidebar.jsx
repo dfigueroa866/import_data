@@ -13,6 +13,7 @@ import {
   History,
   ChevronDown,
   Shield,
+  TrendingUp,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { cn } from '../../lib/utils';
@@ -21,6 +22,7 @@ import { canAccessMenu, isConnectAdmin } from '../../utils/permissions';
 const navItems = [
   { path: '/', icon: LayoutDashboard, label: 'Panel', menuKey: 'panel' },
   { path: '/upload', icon: Upload, label: 'Cargas', menuKey: 'upload' },
+  { path: '/incremental', icon: TrendingUp, label: 'Incremental', menuKey: 'incremental' },
   { path: '/batches', icon: Layers, label: 'Lotes', menuKey: 'batches' },
   { path: '/monitoring', icon: Activity, label: 'Monitoreo', menuKey: 'monitoring' },
 ];

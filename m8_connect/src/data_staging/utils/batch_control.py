@@ -9,6 +9,8 @@ from typing import Any, Dict, Optional, Union
 
 PathLike = Union[str, Path]
 
+_PROMOTED_STATUSES = frozenset({"PROMOTED", "PARTIALLY_PROMOTED"})
+
 
 def normalize_metadata(metadata: Any) -> Dict[str, Any]:
     if metadata is None:
@@ -85,6 +87,20 @@ def resolve_original_file_path(
         return str(file_path_column)
 
     return None
+
+
+def should_preserve_upload_files(
+    metadata: Any,
+    *,
+    batch_status: Optional[str] = None,
+) -> bool:
+    """True when upload artifacts must stay on disk (catalog promoted to production)."""
+    meta = normalize_metadata(metadata)
+    if meta.get("preserve_upload_files"):
+        return True
+    if meta.get("load_type") == "catalog" and batch_status in _PROMOTED_STATUSES:
+        return True
+    return False
 
 
 def collect_batch_file_paths(

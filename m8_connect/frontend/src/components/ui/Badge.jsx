@@ -1,25 +1,29 @@
 import React from 'react';
 import { cn } from '../../lib/utils';
+import { getStatusLabel } from '../../lib/statusLabels';
 
 const STATUS_MAP = {
-  completed: { variant: 'success', label: 'completed' },
-  success: { variant: 'success', label: 'success' },
-  passed: { variant: 'success', label: 'passed' },
-  promoted: { variant: 'success', label: 'promoted' },
-  healthy: { variant: 'success', label: 'healthy' },
-  connected: { variant: 'success', label: 'connected' },
-  failed: { variant: 'error', label: 'failed' },
-  error: { variant: 'error', label: 'error' },
-  rejected: { variant: 'error', label: 'rejected' },
-  disconnected: { variant: 'error', label: 'disconnected' },
-  pending: { variant: 'pending', label: 'pending' },
-  queued: { variant: 'pending', label: 'queued' },
-  waiting: { variant: 'pending', label: 'waiting' },
-  processing: { variant: 'processing', label: 'processing' },
-  in_progress: { variant: 'processing', label: 'in_progress' },
-  running: { variant: 'processing', label: 'running' },
-  partially_promoted: { variant: 'warning', label: 'partially_promoted' },
-  cancelled: { variant: 'default', label: 'cancelled' },
+  completed: { variant: 'success' },
+  success: { variant: 'success' },
+  passed: { variant: 'success' },
+  promoted: { variant: 'success' },
+  healthy: { variant: 'success' },
+  connected: { variant: 'success' },
+  failed: { variant: 'error' },
+  error: { variant: 'error' },
+  rejected: { variant: 'error' },
+  disconnected: { variant: 'error' },
+  pending: { variant: 'pending' },
+  queued: { variant: 'pending' },
+  waiting: { variant: 'pending' },
+  processing: { variant: 'processing' },
+  in_progress: { variant: 'processing' },
+  running: { variant: 'processing' },
+  partially_promoted: { variant: 'warning' },
+  cancelled: { variant: 'default' },
+  pending_process: { variant: 'pending' },
+  pending_mapping: { variant: 'pending' },
+  pending_preview: { variant: 'pending' },
 };
 
 const variantStyles = {
@@ -42,8 +46,8 @@ const dotStyles = {
 
 const Badge = ({ status, label, className }) => {
   const key = status?.toLowerCase() || '';
-  const info = STATUS_MAP[key] || { variant: 'default', label: status };
-  const displayLabel = label ?? info.label;
+  const info = STATUS_MAP[key] || { variant: 'default' };
+  const displayLabel = label ?? getStatusLabel(status);
   const variant = info.variant;
 
   return (

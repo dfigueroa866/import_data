@@ -15,7 +15,11 @@ from pathlib import Path
 import polars as pl
 import psycopg2
 from data_staging.config import settings
-from data_staging.utils.mapping_helpers import is_wizard_virtual_mapping
+from data_staging.utils.mapping_helpers import (
+    inject_session_organization_id,
+    is_metadata_driven_fixed_key,
+    is_wizard_virtual_mapping,
+)
 from data_staging.utils.batch_staging_files import (
     HISTORY_CAST_EXCLUDE_COLUMNS,
     ValidRecordsParquetWriter,
@@ -289,6 +293,8 @@ def process_file_job(payload: Dict[str, Any]):
                 target = mapping_config.get("target")
                 if target and target != "__new__":
                     if is_wizard_virtual_mapping(file_col, mapping_config):
+                        if is_metadata_driven_fixed_key(file_col):
+                            continue
                         default_val = mapping_config.get("default_value", "")
                         column_mapping[target] = {
                             "source": None,
@@ -465,6 +471,8 @@ def process_file_job(payload: Dict[str, Any]):
             or metadata.get("organization_id")
             or ""
         ).strip() or None
+        if metadata.get("load_type") == "catalog":
+            column_mapping = inject_session_organization_id(column_mapping, organization_id)
         source_extension = metadata.get("source_extension")
         if history_mode and not source_extension:
             from data_staging.services.history.history_config import source_from_filename
@@ -505,12 +513,21 @@ def process_file_job(payload: Dict[str, Any]):
                     load_db_system_managed_columns_psycopg2,
                     load_db_validation_excluded_columns_psycopg2,
                 )
+                from data_staging.services.catalog.catalog_registry import (
+                    catalog_required_targets,
+                    get_catalog_table,
+                )
+
                 validation_excluded = load_db_validation_excluded_columns_psycopg2(
                     cursor, target_schema, target_table
                 )
                 for col in validation_excluded:
                     if col in not_null_columns:
                         not_null_columns[col] = False
+                # Config is the bible for null rejection (even if DB has a default).
+                entry = get_catalog_table(catalog_table) if catalog_table else None
+                for col in catalog_required_targets(entry):
+                    not_null_columns[col] = True
                 system_managed = load_db_system_managed_columns_psycopg2(
                     cursor, target_schema, target_table
                 )
