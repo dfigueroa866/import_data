@@ -67,8 +67,15 @@ describe('catalogColumnRules', () => {
         expect(derived.optional_columns).toEqual(['code', 'city', 'attr_1']);
     });
 
-    it('restores optional NOT NULL from saved optional_columns', () => {
-        const map = buildColumnRequiredMap(schemaColumns, [], ['code']);
-        expect(map).toEqual({ code: false, city: false, attr_1: false });
+    it('persists defaults only when enabled with non-empty value', () => {
+        const map = { code: true, city: false, attr_1: false };
+        const derived = deriveCatalogMappingFields(
+            schemaColumns,
+            map,
+            { code: false, city: false, attr_1: true },
+            { attr_1: 'N/A', city: 'ignored' }
+        );
+        expect(derived.defaults).toEqual({ attr_1: 'N/A' });
+        expect(derived.required_mapping_columns).toEqual(['code']);
     });
 });

@@ -81,7 +81,7 @@
   },
   "metadata": {
     "catalog_table": "skus",
-    "unique_keys": ["organization_id", "sku"],
+    "unique_keys": ["sku"],
     "required_columns": [
       "organization_id",
       "sku",

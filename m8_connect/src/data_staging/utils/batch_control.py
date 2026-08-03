@@ -125,6 +125,7 @@ def collect_batch_file_paths(
     add(meta.get("original_file_path"))
     add(meta.get("aggregated_file_path"))
     add(meta.get("valid_temp_file"))
+    add(meta.get("validated_temp_file"))
     add(meta.get("rejected_temp_file"))
     add(meta.get("load_storage_dir"))
     return paths

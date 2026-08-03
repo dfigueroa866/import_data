@@ -22,6 +22,7 @@ import {
     enrichHistoryPreviewRows,
     getHistoryPreviewColumnKeys,
 } from '../../constants/historyConfig';
+import { getCatalogPreviewColumnKeys } from '../../utils/catalogMapping';
 import './Step3Preview.css';
 
 /** Evita doble init en Strict Mode (misma pestaña). */
@@ -329,10 +330,20 @@ const Step3Preview = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
 
     const previewColumnKeys = useMemo(() => {
         if (!displayPreviewRows.length) return [];
-        return isCatalog
-            ? Object.keys(displayPreviewRows[0])
-            : getHistoryPreviewColumnKeys(displayPreviewRows);
-    }, [displayPreviewRows, isCatalog]);
+        if (isCatalog) {
+            return getCatalogPreviewColumnKeys(
+                displayPreviewRows,
+                wizardData.columnMappings,
+                wizardData.columnToggles,
+            );
+        }
+        return getHistoryPreviewColumnKeys(displayPreviewRows);
+    }, [
+        displayPreviewRows,
+        isCatalog,
+        wizardData.columnMappings,
+        wizardData.columnToggles,
+    ]);
 
     const formatPreviewColumnLabel = (key) => {
         if (key === 'organization_id') {

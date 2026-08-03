@@ -9,58 +9,55 @@
       "config_file": "skus_config.json",
       "is_active": true,
       "required_columns": [
-        "organization_id",
         "sku",
         "name",
+        "category",
+        "brand",
         "status",
         "subcategory",
         "class",
         "subclass",
         "attr_1",
         "attr_2",
+        "vendor_id",
         "attr_3",
         "attr_4",
         "attr_5",
-        "attr_6",
-        "vendor_id"
+        "attr_6"
       ],
-      "optional_columns": [
-        "category",
-        "brand"
-      ],
+      "optional_columns": [],
       "required_mapping_columns": [
         "sku",
         "name",
+        "category",
+        "brand",
         "status",
         "subcategory",
         "class",
         "subclass",
         "attr_1",
         "attr_2",
+        "vendor_id",
         "attr_3",
         "attr_4",
         "attr_5",
-        "attr_6",
-        "vendor_id"
+        "attr_6"
       ],
       "unique_keys": [
-        "organization_id",
         "sku"
       ],
       "ignored_file_headers": [
         "sku_id",
+        "skuid",
         "organization_id",
         "created_at",
-        "updated_at",
-        "imported_at"
+        "updated_at"
       ],
       "non_mappable_targets": [
         "sku_id",
-        "id",
         "organization_id",
         "created_at",
-        "updated_at",
-        "imported_at"
+        "updated_at"
       ],
       "column_aliases": {
         "organization_id": [
@@ -101,8 +98,20 @@
           "new_launch"
         ]
       },
+      "defaults": {
+        "brand": "N/A",
+        "class": "N/A",
+        "subclass": "N/A",
+        "attr_1": "N/A",
+        "attr_2": "N/A",
+        "vendor_id": "N/A",
+        "attr_3": "N/A",
+        "attr_4": "N/A",
+        "attr_5": "N/A",
+        "attr_6": "N/A"
+      },
       "validation_hints": [
-        "Clave única: (organization_id, sku)",
+        "Clave única (PK): sku",
         "sku es el código de producto (en archivo puede venir como code); sku_id lo genera la BD",
         "sku_id, created_at y updated_at los genera la base de datos",
         "status es obligatorio en el mapping (active, inactive, discontinued o new_launch)",
@@ -215,7 +224,9 @@
           "inactive"
         ]
       },
-      "defaults": {},
+      "defaults": {
+        "city": "N/A"
+      },
       "validation_hints": [
         "Clave única: (organization_id, code)",
         "code es el código de negocio (no uses location_id del archivo; es el UUID de la BD)",

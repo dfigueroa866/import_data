@@ -69,6 +69,37 @@ def catalog_required_targets(entry: Optional[Dict[str, Any]]) -> List[str]:
     return out
 
 
+def catalog_column_defaults(entry: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """
+    Configured fill defaults for mappable catalog columns.
+
+    Excludes organization_id and non_mappable_targets; ignores empty values.
+    """
+    if not entry:
+        return {}
+    skip = set(entry.get("non_mappable_targets") or [])
+    skip.add("organization_id")
+    out: Dict[str, str] = {}
+    raw = entry.get("defaults") or {}
+    if not isinstance(raw, dict):
+        return {}
+    for key, value in raw.items():
+        name = str(key or "").strip()
+        if not name or name in skip:
+            continue
+        text = "" if value is None else str(value).strip()
+        if not text:
+            continue
+        out[name] = text
+    return out
+
+
+def catalog_required_targets_needing_mapping(entry: Optional[Dict[str, Any]]) -> List[str]:
+    """Required targets that still need a wizard mapping (no config default)."""
+    defaults = catalog_column_defaults(entry)
+    return [c for c in catalog_required_targets(entry) if c not in defaults]
+
+
 def resolve_catalog_db_target(
     catalog_slug: str,
     target_schema: Optional[str] = None,

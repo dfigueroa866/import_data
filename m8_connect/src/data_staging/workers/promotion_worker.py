@@ -7,7 +7,7 @@ import psycopg2
 import psycopg2.extras
 import itertools
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Set, Tuple
+from typing import Dict, Any, List, Optional, Sequence, Set, Tuple
 
 import pandas as pd
 
@@ -342,26 +342,71 @@ def _parquet_promotion_columns(
     ]
 
 
+def _staging_file_column_names(path: Optional[Path]) -> Optional[List[str]]:
+    """Header/schema names from a validated staging file (parquet or TSV)."""
+    if path is None or not path.is_file():
+        return None
+    if is_parquet_valid_file(path):
+        import pyarrow.parquet as pq
+
+        return list(pq.ParquetFile(path).schema_arrow.names)
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            header = handle.readline().strip()
+    except OSError:
+        return None
+    if not header:
+        return None
+    return header.split("\t")
+
+
+def catalog_targets_from_validated_file(
+    file_columns: Optional[Sequence[str]],
+) -> List[str]:
+    """
+    Promotion targets for catalogs: columns already present in the validated file.
+
+    Excludes batch bookkeeping columns (names starting with '_').
+    """
+    if not file_columns:
+        return []
+    out: List[str] = []
+    seen: Set[str] = set()
+    for col in file_columns:
+        name = str(col).strip() if col is not None else ""
+        if not name or name.startswith("_") or name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+    return out
+
+
 def _build_insert_context(
     cursor,
     metadata: Dict[str, Any],
     target_schema: str,
     target_table: str,
+    file_columns: Optional[Sequence[str]] = None,
 ) -> Tuple[List[str], Dict[str, str], Dict[str, str], Dict[str, str], List[List[str]]]:
+    load_type = metadata.get("load_type", "history")
     wizard_mappings = metadata.get("column_mappings", {})
     target_columns: List[str] = []
-    for _file_col, config in wizard_mappings.items():
-        if config.get("target") and config.get("target") != "__new__":
-            target_columns.append(config.get("target"))
 
-    if not target_columns:
-        old_mapping = metadata.get("column_mapping", {})
-        if old_mapping:
-            target_columns = list(old_mapping.keys())
+    # Catalogs: validated file is the source of truth (defaults already applied).
+    if load_type == "catalog" and file_columns is not None:
+        target_columns = catalog_targets_from_validated_file(file_columns)
+    else:
+        for _file_col, config in wizard_mappings.items():
+            if config.get("target") and config.get("target") != "__new__":
+                target_columns.append(config.get("target"))
 
-    target_columns = list(set(target_columns))
+        if not target_columns:
+            old_mapping = metadata.get("column_mapping", {})
+            if old_mapping:
+                target_columns = list(old_mapping.keys())
 
-    load_type = metadata.get("load_type", "history")
+        target_columns = list(set(target_columns))
+
     history_promotion = _is_history_promotion(
         metadata, target_schema, target_table, load_type
     )
@@ -409,8 +454,13 @@ def _build_insert_context(
             valid_db_target_cols.append(real_col_name)
 
     if not valid_db_target_cols:
+        source = (
+            "validated file"
+            if load_type == "catalog" and file_columns is not None
+            else "mapping"
+        )
         raise ValueError(
-            f"No columns matched between mapping and target table {target_schema}.{target_table}. "
+            f"No columns matched between {source} and target table {target_schema}.{target_table}. "
             f"Available columns in DB: {list(db_columns.keys())}. Requested columns: {target_columns}"
         )
 
@@ -1442,8 +1492,15 @@ def promote_batch_job(payload: Dict[str, Any]):
         elif not valid_path.is_file():
             logger.warning(f"Valid records file missing on disk: {valid_path}")
 
+        staging_columns = _staging_file_column_names(valid_path)
         valid_db_target_cols, db_columns, db_columns_lower, db_udt_names, unique_indexes = (
-            _build_insert_context(cursor, metadata, target_schema, target_table)
+            _build_insert_context(
+                cursor,
+                metadata,
+                target_schema,
+                target_table,
+                file_columns=staging_columns,
+            )
         )
 
         total_inserted = int(metadata.get("promoted_rows") or 0)

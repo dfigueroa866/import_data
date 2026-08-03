@@ -54,7 +54,7 @@ _BUILTIN_CATALOGS: List[Dict[str, Any]] = [
             "attr_6",
             "vendor_id",
         ],
-        "unique_keys": ["organization_id", "sku"],
+        "unique_keys": ["sku"],
         "ignored_file_headers": ["sku_id", "organization_id", "created_at", "updated_at", "imported_at"],
         "non_mappable_targets": [
             "sku_id",
@@ -74,7 +74,7 @@ _BUILTIN_CATALOGS: List[Dict[str, Any]] = [
         },
         "enums": {"status": ["active", "inactive", "discontinued", "new_launch"]},
         "validation_hints": [
-            "Clave única: (organization_id, sku)",
+            "Clave única (PK): sku",
             "sku es el código de producto (en archivo puede venir como code); sku_id lo genera la BD",
             "sku_id, created_at y updated_at los genera la base de datos",
             "status es obligatorio en el mapping (active, inactive, discontinued o new_launch)",

@@ -10,7 +10,9 @@ from data_staging.utils.mapping_helpers import apply_chunk_column_mapping
 from data_staging.utils.vectorized_validation import validate_chunk_vectorized
 from data_staging.workers.promotion_worker import (
     _assert_catalog_required_columns_present,
+    _parquet_promotion_columns,
     _resolve_catalog_conflict_columns,
+    catalog_targets_from_validated_file,
 )
 
 
@@ -73,6 +75,40 @@ def test_validate_chunk_rejects_missing_config_required(monkeypatch):
     assert "bar" in errors
 
 
+def test_catalog_targets_from_validated_file_excludes_batch_columns():
+    cols = catalog_targets_from_validated_file(
+        [
+            "sku",
+            "brand",
+            "attr_1",
+            "_batch_id_",
+            "_source_row_number_",
+            "sku",  # duplicate
+        ]
+    )
+    assert cols == ["sku", "brand", "attr_1"]
+    assert not any(c.startswith("_") for c in cols)
+
+
+def test_parquet_promotion_includes_default_filled_columns():
+    """Validated file columns (incl. defaults) promote when allowlisted; batch cols skipped."""
+    file_cols = [
+        "sku",
+        "name",
+        "brand",
+        "attr_1",
+        "_batch_id_",
+        "_source_row_number_",
+    ]
+    allow = ["sku", "name", "brand", "attr_1", "organization_id"]
+    assert _parquet_promotion_columns(file_cols, allow) == [
+        "sku",
+        "name",
+        "brand",
+        "attr_1",
+    ]
+
+
 def test_assert_catalog_required_columns_present(monkeypatch):
     monkeypatch.setattr(
         "data_staging.services.catalog.catalog_registry.get_catalog_table",
@@ -117,3 +153,17 @@ def test_resolve_catalog_conflict_uses_config_unique_keys(monkeypatch):
         [["organization_id", "code"]],
     )
     assert picked == ["organization_id", "code"]
+
+
+def test_pick_upsert_prefers_exact_sku_pk_over_composite():
+    """unique_keys=['sku'] must bind ON CONFLICT to skus_pk, not (organization_id, sku)."""
+    from data_staging.services.history.history_schema import pick_upsert_conflict_columns
+
+    db = {"organization_id": "organization_id", "sku": "sku", "name": "name"}
+    picked = pick_upsert_conflict_columns(
+        ["sku"],
+        {"organization_id", "sku", "name"},
+        [["sku"], ["organization_id", "sku"]],
+        lambda key: db.get(key),
+    )
+    assert picked == ["sku"]

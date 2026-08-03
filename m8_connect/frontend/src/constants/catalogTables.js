@@ -40,7 +40,7 @@ export const FALLBACK_CATALOG_TABLES = [
             'attr_6',
             'vendor_id',
         ],
-        unique_keys: ['organization_id', 'sku'],
+        unique_keys: ['sku'],
         ignored_file_headers: [
             'sku_id',
             'organization_id',
@@ -58,7 +58,7 @@ export const FALLBACK_CATALOG_TABLES = [
         ],
         enums: { status: ['active', 'inactive', 'discontinued', 'new_launch'] },
         validation_hints: [
-            'Clave única: (organization_id, sku)',
+            'Clave única (PK): sku',
             'status es obligatorio en el mapping',
             'organization_id se asigna automáticamente del usuario',
         ],

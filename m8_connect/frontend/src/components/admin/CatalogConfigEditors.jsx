@@ -92,6 +92,35 @@ export const RequiredColumnToggle = ({ checked, onChange, disabled = false }) =>
     </label>
 );
 
+export const DefaultColumnControl = ({
+    enabled,
+    value,
+    onEnabledChange,
+    onValueChange,
+    disabled = false,
+}) => (
+    <div className={`flex flex-col gap-1.5 min-w-[10rem] ${disabled ? 'opacity-60' : ''}`}>
+        <label className={`inline-flex items-center gap-2 select-none ${disabled ? 'cursor-not-allowed' : 'cursor-pointer'}`}>
+            <input
+                type="checkbox"
+                className="accent-brand-600 h-4 w-4"
+                checked={Boolean(enabled)}
+                onChange={(e) => onEnabledChange(e.target.checked)}
+                disabled={disabled}
+            />
+            <span className="text-sm text-slate-600 dark:text-slate-300">Usar default</span>
+        </label>
+        <Input
+            type="text"
+            value={value ?? ''}
+            onChange={(e) => onValueChange(e.target.value)}
+            placeholder="Ej. N/A"
+            disabled={disabled || !enabled}
+            className="h-8 text-sm"
+        />
+    </div>
+);
+
 export const ConfigTabs = ({ tabs, activeTab, onTabChange }) => (
     <div className="flex flex-wrap gap-2 mb-4">
         {tabs.map((t) => (
@@ -111,6 +140,10 @@ export const CatalogColumnsEditor = ({
     schemaColumns,
     columnRequired,
     onRequiredChange,
+    columnDefaultEnabled = {},
+    columnDefaultValues = {},
+    onDefaultEnabledChange,
+    onDefaultValueChange,
     organizationName,
     classifyColumn = classifyCatalogColumn,
     readOnly = false,
@@ -163,7 +196,7 @@ export const CatalogColumnsEditor = ({
             return <ColumnLegend>{AUTO_WIZARD_LEGEND}</ColumnLegend>;
         }
         return (
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between w-full">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between w-full">
                 <div className="flex flex-col gap-1">
                     {mappableLegend ? (
                         <ColumnLegend>{mappableLegend}</ColumnLegend>
@@ -174,6 +207,15 @@ export const CatalogColumnsEditor = ({
                         disabled={readOnly || requiredLockedColumns.includes(col.name)}
                     />
                 </div>
+                {onDefaultEnabledChange && onDefaultValueChange ? (
+                    <DefaultColumnControl
+                        enabled={Boolean(columnDefaultEnabled[col.name])}
+                        value={columnDefaultValues[col.name] ?? ''}
+                        onEnabledChange={(value) => onDefaultEnabledChange(col.name, value)}
+                        onValueChange={(value) => onDefaultValueChange(col.name, value)}
+                        disabled={readOnly}
+                    />
+                ) : null}
             </div>
         );
     };
@@ -181,9 +223,10 @@ export const CatalogColumnsEditor = ({
     const defaultFooter = (
         <>
             Las columnas PK, <code className="font-mono">organization_id</code> y auditoría no se configuran:
-            se asignan automáticamente. Lo obligatorio lo define la configuración del catálogo
-            (toggle Obligatorio); al guardar, la validación de carga usa esa lista — no el NOT NULL de la BD.
-            En un catálogo nuevo, se sugiere Obligatorio según NOT NULL de la BD hasta que guardes.
+            se asignan automáticamente. Lo obligatorio lo define el toggle Obligatorio.
+            “Usar default” rellena la columna si no viene en el archivo o llega vacía (no afecta PK ni
+            columnas de sistema). En un catálogo nuevo, se sugiere Obligatorio según NOT NULL de la BD
+            hasta que guardes.
         </>
     );
 

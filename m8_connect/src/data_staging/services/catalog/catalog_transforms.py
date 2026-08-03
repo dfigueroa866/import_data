@@ -12,7 +12,11 @@ import polars as pl
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from data_staging.services.catalog.catalog_registry import get_catalog_table, load_full_config
+from data_staging.services.catalog.catalog_registry import (
+    catalog_column_defaults,
+    get_catalog_table,
+    load_full_config,
+)
 
 _EMPTY_TOKENS = {"", "nan", "none", "null", "n/a", "na"}
 AUDIT_COLUMNS = frozenset({"created_at", "updated_at", "imported_at"})
@@ -341,7 +345,7 @@ def apply_catalog_transforms(
     table_name: str,
     mapped_columns: Optional[frozenset[str]] = None,
 ) -> pd.DataFrame:
-    """Apply config transformation_rules to mapped catalog data (no default fill)."""
+    """Apply config transformation_rules, then fill configured column defaults."""
     catalog = get_catalog_table(table_name)
     if not catalog:
         return pdf
@@ -364,7 +368,18 @@ def apply_catalog_transforms(
         if mapped_columns is not None
         else list(out.columns)
     )
-    return sanitize_empty_values_in_dataframe(out, scope_cols)
+    out = sanitize_empty_values_in_dataframe(out, scope_cols)
+
+    # Config defaults: fill missing columns or empty cells (never overwrite real values).
+    for col, default_val in catalog_column_defaults(catalog).items():
+        if col not in out.columns:
+            out[col] = default_val
+            continue
+        out[col] = out[col].apply(
+            lambda v, d=default_val: d if is_empty_value(v) else v
+        )
+
+    return out
 
 
 def apply_catalog_transforms_polars(

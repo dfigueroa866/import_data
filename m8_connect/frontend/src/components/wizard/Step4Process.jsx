@@ -541,6 +541,7 @@ const Step4Process = ({
                         const recovered = await tryRecoverPromotedState(batchId);
                         if (recovered) return;
                         stopPromotePolling();
+                        promotionEnqueueRef.current = null;
                         setPromoteError(
                             progressData?.error_message
                             || progressData?.current_operation
@@ -564,6 +565,7 @@ const Step4Process = ({
                             return;
                         }
                         stopPromotePolling();
+                        promotionEnqueueRef.current = null;
                         setPromoteError(
                             latest?.error_message
                             || latest?.current_operation
@@ -590,6 +592,7 @@ const Step4Process = ({
                         const recovered = await tryRecoverPromotedState(batchId);
                         if (recovered) return;
                         stopPromotePolling();
+                        promotionEnqueueRef.current = null;
                         setPromoteError(
                             resolveApiErrorMessage(err)
                                 || 'No se pudo consultar el progreso de la promoción.'
@@ -674,6 +677,7 @@ const Step4Process = ({
                 }
                 const recovered = await tryRecoverPromotedState(batchId);
                 if (recovered) return;
+                promotionEnqueueRef.current = null;
                 setPromoteError(
                     resolveApiErrorMessage(err) || 'No se pudo iniciar la carga a producción.'
                 );
@@ -753,6 +757,7 @@ const Step4Process = ({
                 if (progressData.status === 'FAILED') {
                     const recovered = await tryRecoverPromotedState(batchId);
                     if (recovered || cancelled) return;
+                    promotionEnqueueRef.current = null;
                     setPromoteError(progressData.error_message || 'La promoción falló.');
                     setPromoting(false);
                     return;
@@ -773,6 +778,7 @@ const Step4Process = ({
                 }
                 const recovered = await tryRecoverPromotedState(batchId);
                 if (recovered) return;
+                promotionEnqueueRef.current = null;
                 setPromoteError(
                     resolveApiErrorMessage(err) || 'No se pudo iniciar la carga a producción.'
                 );
@@ -969,6 +975,8 @@ const Step4Process = ({
     const handlePromote = async () => {
         try {
             setPromoteError('');
+            // Allow a fresh PROMOTE_BATCH enqueue after a previous failed attempt.
+            promotionEnqueueRef.current = null;
             const progressData = await getProcessingProgress(wizardData.batchId);
             if (progressData.status === 'PROMOTED') {
                 setProgress(progressData);
@@ -998,6 +1006,7 @@ const Step4Process = ({
             }
             const recovered = await tryRecoverPromotedState(wizardData.batchId);
             if (recovered) return;
+            promotionEnqueueRef.current = null;
             setPromoteError(
                 resolveApiErrorMessage(err) || 'No se pudo reintentar la carga a producción.'
             );

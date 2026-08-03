@@ -38,6 +38,33 @@ export function getCatalogConfigRequiredTargets(catalogMeta) {
     return out;
 }
 
+/** Non-empty config defaults for mappable columns (excludes system targets). */
+export function getCatalogColumnDefaults(catalogMeta) {
+    if (!catalogMeta || typeof catalogMeta.defaults !== 'object' || !catalogMeta.defaults) {
+        return {};
+    }
+    const skip = new Set(catalogMeta.non_mappable_targets || []);
+    skip.add('organization_id');
+    const out = {};
+    for (const [key, value] of Object.entries(catalogMeta.defaults)) {
+        const name = String(key || '').trim();
+        if (!name || skip.has(name)) continue;
+        const text = value == null ? '' : String(value).trim();
+        if (!text) continue;
+        out[name] = text;
+    }
+    return out;
+}
+
+/**
+ * Required targets that still need a wizard file/manual mapping
+ * (config default covers the rest).
+ */
+export function getCatalogRequiredTargetsNeedingMapping(catalogMeta) {
+    const defaults = getCatalogColumnDefaults(catalogMeta);
+    return getCatalogConfigRequiredTargets(catalogMeta).filter((c) => !(c in defaults));
+}
+
 /**
  * @param {string} fileCol
  * @param {{ targetTable?: string, catalogMeta?: object, loadMode?: string }} [options]
@@ -101,7 +128,7 @@ export function isSystemManagedTargetColumn(col, { targetTable, catalogMeta, loa
 
 export function getCatalogRequiredMappingColumns(targetTable, catalogMeta, loadMode) {
     if (isCatalogLoad({ loadMode, catalogMeta })) {
-        return getCatalogConfigRequiredTargets(catalogMeta);
+        return getCatalogRequiredTargetsNeedingMapping(catalogMeta);
     }
     if (catalogDefinesList(catalogMeta, 'required_mapping_columns')) {
         return catalogMeta.required_mapping_columns;
@@ -112,10 +139,10 @@ export function getCatalogRequiredMappingColumns(targetTable, catalogMeta, loadM
     return [];
 }
 
-/** Required destination columns for catalog mapping validation (step 2). */
+/** Required destination columns that still need mapping (step 2). */
 export function getCatalogRequiredTargetColumns(targetTable, catalogMeta, loadMode) {
     if (isCatalogLoad({ loadMode, catalogMeta })) {
-        return getCatalogConfigRequiredTargets(catalogMeta);
+        return getCatalogRequiredTargetsNeedingMapping(catalogMeta);
     }
 
     const names = new Set();
@@ -140,7 +167,7 @@ export function isRequiredMappingTargetColumn(col, { targetTable, catalogMeta, l
     }
 
     if (isCatalogLoad({ loadMode, catalogMeta })) {
-        return getCatalogConfigRequiredTargets(catalogMeta).includes(col.name);
+        return getCatalogRequiredTargetsNeedingMapping(catalogMeta).includes(col.name);
     }
 
     if (catalogDefinesList(catalogMeta, 'required_mapping_columns')) {
@@ -174,4 +201,38 @@ export function isExcludedMappingTarget(
     const col = productionColumns.find((c) => c.name === targetName);
     if (!col) return false;
     return isSystemManagedTargetColumn(col, { targetTable, catalogMeta, loadMode });
+}
+
+/**
+ * Column keys for catalog Step 3 preview table (visual only).
+ * Shows mapped targets present in the sample rows, plus organization_id.
+ * Hides batch bookkeeping columns (names starting with '_').
+ */
+export function getCatalogPreviewColumnKeys(
+    rows,
+    columnMappings = {},
+    columnToggles = {},
+) {
+    if (!rows?.length) return [];
+    const rowKeys = Object.keys(rows[0] || {});
+    const rowKeySet = new Set(rowKeys);
+
+    const mapped = new Set();
+    for (const [fileCol, config] of Object.entries(columnMappings || {})) {
+        if (columnToggles?.[fileCol] === false) continue;
+        const target = config?.target;
+        if (!target || target === '__new__' || target === 'organization_id') continue;
+        if (String(target).startsWith('_')) continue;
+        if (rowKeySet.has(target)) mapped.add(target);
+    }
+
+    if (mapped.size === 0) {
+        return rowKeys.filter((k) => !String(k).startsWith('_'));
+    }
+
+    return rowKeys.filter((k) => {
+        if (String(k).startsWith('_')) return false;
+        if (k === 'organization_id') return true;
+        return mapped.has(k);
+    });
 }

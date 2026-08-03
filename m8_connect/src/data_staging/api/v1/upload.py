@@ -410,9 +410,16 @@ def _delete_batch_files(
     file_path_column: Optional[str],
     *,
     batch_status: Optional[str] = None,
+    force: bool = False,
 ) -> None:
+    """
+    Delete upload artifacts for a batch.
+
+    ``force=True`` is for explicit user deletes (Batches UI): always remove the
+    load folder even when catalog promotion had set preserve_upload_files.
+    """
     meta = normalize_metadata(row_metadata)
-    if should_preserve_upload_files(meta, batch_status=batch_status):
+    if not force and should_preserve_upload_files(meta, batch_status=batch_status):
         logger.info(
             "Conservando archivos en disco para batch %s (catálogo promovido)",
             batch_id,
@@ -566,6 +573,7 @@ def _purge_batches_bulk(db: Session, rows: list) -> int:
             row.metadata,
             row.file_path,
             batch_status=getattr(row, "status", None),
+            force=True,
         )
 
     return len(batch_ids)
@@ -1785,7 +1793,7 @@ async def save_column_mapping(
         })
         if load_type == "catalog":
             from data_staging.services.catalog.catalog_registry import (
-                catalog_required_targets,
+                catalog_required_targets_needing_mapping,
                 get_catalog_table,
             )
 
@@ -1801,7 +1809,7 @@ async def save_column_mapping(
                     catalog_entry.get("target_table") or catalog_slug
                 )
 
-            required_targets = catalog_required_targets(catalog_entry)
+            required_targets = catalog_required_targets_needing_mapping(catalog_entry)
             if required_targets:
                 mapped_targets = {
                     str(cfg.get("target")).strip()

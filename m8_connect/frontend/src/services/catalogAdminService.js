@@ -1,6 +1,7 @@
 import api from './api';
 import {
     buildColumnRequiredMap,
+    buildColumnDefaultsState,
     deriveCatalogMappingFields,
 } from '../utils/catalogColumnRules';
 
@@ -53,6 +54,7 @@ export const emptyCatalogForm = () => ({
     non_mappable_targets: [],
     column_aliases: {},
     enums: {},
+    defaults: {},
     validation_hints: [],
 });
 
@@ -71,10 +73,11 @@ export const catalogToForm = (catalog) => ({
     non_mappable_targets: [...(catalog.non_mappable_targets || [])],
     column_aliases: { ...(catalog.column_aliases || {}) },
     enums: { ...(catalog.enums || {}) },
+    defaults: { ...(catalog.defaults || {}) },
     validation_hints: [...(catalog.validation_hints || [])],
 });
 
-export { buildColumnRequiredMap, deriveCatalogMappingFields };
+export { buildColumnRequiredMap, buildColumnDefaultsState, deriveCatalogMappingFields };
 
 export const buildCatalogPayload = (
     form,
@@ -82,7 +85,7 @@ export const buildCatalogPayload = (
     columnRequiredMap,
     aliasesJson,
     enumsJson,
-    { isNew = false } = {}
+    { isNew = false, columnDefaultEnabledMap = {}, columnDefaultValuesMap = {} } = {}
 ) => {
     let column_aliases = {};
     let enums = {};
@@ -96,15 +99,33 @@ export const buildCatalogPayload = (
     const targetTable = (form.target_table || '').trim();
     const catalogName = isNew ? targetTable : (form.name || targetTable);
 
+    if (schemaColumns.length > 0) {
+        for (const col of schemaColumns) {
+            const name = col?.name;
+            if (!name || !columnDefaultEnabledMap[name]) continue;
+            if (!String(columnDefaultValuesMap[name] ?? '').trim()) {
+                throw new Error(
+                    `La columna "${name}" tiene "Usar default" activo pero el valor está vacío`
+                );
+            }
+        }
+    }
+
     const derived =
         schemaColumns.length > 0
-            ? deriveCatalogMappingFields(schemaColumns, columnRequiredMap)
+            ? deriveCatalogMappingFields(
+                  schemaColumns,
+                  columnRequiredMap,
+                  columnDefaultEnabledMap,
+                  columnDefaultValuesMap
+              )
             : {
                   required_mapping_columns: form.required_mapping_columns,
                   required_columns: form.required_columns,
                   optional_columns: form.optional_columns,
                   non_mappable_targets: form.non_mappable_targets,
                   ignored_file_headers: form.ignored_file_headers,
+                  defaults: form.defaults || {},
               };
 
     return {
@@ -115,5 +136,6 @@ export const buildCatalogPayload = (
         config_file: form.config_file || `${targetTable}_config.json`,
         column_aliases,
         enums,
+        defaults: derived.defaults || {},
     };
 };

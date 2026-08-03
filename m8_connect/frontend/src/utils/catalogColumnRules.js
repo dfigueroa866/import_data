@@ -178,12 +178,20 @@ export function buildColumnRequiredMap(
 
 /**
  * Derive persisted catalog lists from admin column toggles + schema metadata.
+ * @param {object} [columnDefaultEnabledMap]
+ * @param {object} [columnDefaultValuesMap]
  */
-export function deriveCatalogMappingFields(schemaColumns, columnRequiredMap = {}) {
+export function deriveCatalogMappingFields(
+    schemaColumns,
+    columnRequiredMap = {},
+    columnDefaultEnabledMap = {},
+    columnDefaultValuesMap = {}
+) {
     const required_mapping_columns = [];
     const optional_columns = [];
     const non_mappable_targets = [];
     const ignored_file_headers = [];
+    const defaults = {};
 
     (schemaColumns || []).forEach((col) => {
         const kind = classifyCatalogColumn(col);
@@ -212,6 +220,13 @@ export function deriveCatalogMappingFields(schemaColumns, columnRequiredMap = {}
         } else {
             optional_columns.push(name);
         }
+
+        if (columnDefaultEnabledMap[name]) {
+            const text = String(columnDefaultValuesMap[name] ?? '').trim();
+            if (text) {
+                defaults[name] = text;
+            }
+        }
     });
 
     return {
@@ -220,7 +235,27 @@ export function deriveCatalogMappingFields(schemaColumns, columnRequiredMap = {}
         optional_columns,
         non_mappable_targets,
         ignored_file_headers,
+        defaults,
     };
+}
+
+/** Build default enabled/value maps from saved catalog.defaults. */
+export function buildColumnDefaultsState(schemaColumns, savedDefaults = {}) {
+    const enabled = {};
+    const values = {};
+    const raw = savedDefaults && typeof savedDefaults === 'object' ? savedDefaults : {};
+    (schemaColumns || []).forEach((col) => {
+        if (!isCatalogColumnMappable(col)) return;
+        const text = raw[col.name] == null ? '' : String(raw[col.name]).trim();
+        if (text) {
+            enabled[col.name] = true;
+            values[col.name] = text;
+        } else {
+            enabled[col.name] = false;
+            values[col.name] = '';
+        }
+    });
+    return { enabled, values };
 }
 
 export function getCatalogRequiredMappingColumnNames(catalogMeta) {

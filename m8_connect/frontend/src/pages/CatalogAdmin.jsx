@@ -14,6 +14,7 @@ import {
     emptyCatalogForm,
     catalogToForm,
     buildColumnRequiredMap,
+    buildColumnDefaultsState,
     buildCatalogPayload,
 } from '../services/catalogAdminService';
 import { getSchemas, getTables } from '../services/systemService';
@@ -39,6 +40,8 @@ const CatalogAdmin = () => {
     const [form, setForm] = useState(emptyCatalogForm());
     const [schemaColumns, setSchemaColumns] = useState([]);
     const [columnRequired, setColumnRequired] = useState({});
+    const [columnDefaultEnabled, setColumnDefaultEnabled] = useState({});
+    const [columnDefaultValues, setColumnDefaultValues] = useState({});
     const [aliasesJson, setAliasesJson] = useState('{}');
     const [enumsJson, setEnumsJson] = useState('{}');
     const [dbSchemas, setDbSchemas] = useState([]);
@@ -55,6 +58,12 @@ const CatalogAdmin = () => {
                 requiredCols || []
             )
         );
+    }, []);
+
+    const syncColumnDefaultsFromForm = useCallback((cols, savedDefaults) => {
+        const state = buildColumnDefaultsState(cols, savedDefaults || {});
+        setColumnDefaultEnabled(state.enabled);
+        setColumnDefaultValues(state.values);
     }, []);
 
     const loadList = useCallback(async () => {
@@ -111,10 +120,12 @@ const CatalogAdmin = () => {
         }
     }, [form.target_schema]);
 
-    const fetchSchemaColumns = useCallback(async (schema, table, mappingRequired, optionalCols, requiredCols) => {
+    const fetchSchemaColumns = useCallback(async (schema, table, mappingRequired, optionalCols, requiredCols, savedDefaults) => {
         if (!schema || !table) {
             setSchemaColumns([]);
             setColumnRequired({});
+            setColumnDefaultEnabled({});
+            setColumnDefaultValues({});
             return [];
         }
         try {
@@ -126,13 +137,16 @@ const CatalogAdmin = () => {
                 optionalCols || [],
                 requiredCols || []
             );
+            syncColumnDefaultsFromForm(cols, savedDefaults || {});
             return cols;
         } catch {
             setSchemaColumns([]);
             setColumnRequired({});
+            setColumnDefaultEnabled({});
+            setColumnDefaultValues({});
             return [];
         }
-    }, [syncColumnRequiredFromForm]);
+    }, [syncColumnRequiredFromForm, syncColumnDefaultsFromForm]);
 
     useEffect(() => {
         fetchSchemaColumns(
@@ -140,7 +154,8 @@ const CatalogAdmin = () => {
             form.target_table,
             form.required_mapping_columns,
             form.optional_columns,
-            form.required_columns
+            form.required_columns,
+            form.defaults
         );
     }, [form.target_schema, form.target_table, fetchSchemaColumns]);
 
@@ -159,7 +174,8 @@ const CatalogAdmin = () => {
                 f.target_table,
                 f.required_mapping_columns,
                 f.optional_columns,
-                f.required_columns
+                f.required_columns,
+                f.defaults
             );
             setTab('general');
         } catch (err) {
@@ -176,11 +192,24 @@ const CatalogAdmin = () => {
         setEnumsJson('{}');
         setSchemaColumns([]);
         setColumnRequired({});
+        setColumnDefaultEnabled({});
+        setColumnDefaultValues({});
         setTab('general');
     };
 
     const handleRequiredChange = (colName, required) => {
         setColumnRequired((prev) => ({ ...prev, [colName]: required }));
+    };
+
+    const handleDefaultEnabledChange = (colName, enabled) => {
+        setColumnDefaultEnabled((prev) => ({ ...prev, [colName]: enabled }));
+        if (!enabled) {
+            setColumnDefaultValues((prev) => ({ ...prev, [colName]: '' }));
+        }
+    };
+
+    const handleDefaultValueChange = (colName, value) => {
+        setColumnDefaultValues((prev) => ({ ...prev, [colName]: value }));
     };
 
     const handleSave = async () => {
@@ -203,7 +232,11 @@ const CatalogAdmin = () => {
                 columnRequired,
                 aliasesJson,
                 enumsJson,
-                { isNew }
+                {
+                    isNew,
+                    columnDefaultEnabledMap: columnDefaultEnabled,
+                    columnDefaultValuesMap: columnDefaultValues,
+                }
             );
             if (isNew) {
                 await createCatalogDefinition(payload);
@@ -229,6 +262,8 @@ const CatalogAdmin = () => {
             setSelectedName(null);
             setForm(emptyCatalogForm());
             setColumnRequired({});
+            setColumnDefaultEnabled({});
+            setColumnDefaultValues({});
         } catch (err) {
             setError(err.response?.data?.detail || 'Error al desactivar');
         } finally {
@@ -317,6 +352,8 @@ const CatalogAdmin = () => {
                                                 }));
                                                 setSchemaColumns([]);
                                                 setColumnRequired({});
+                                                setColumnDefaultEnabled({});
+                                                setColumnDefaultValues({});
                                             }}
                                             disabled={loadingDbMeta && dbSchemas.length === 0}
                                         >
@@ -335,6 +372,8 @@ const CatalogAdmin = () => {
                                                 updateForm('target_table', e.target.value);
                                                 setSchemaColumns([]);
                                                 setColumnRequired({});
+                                                setColumnDefaultEnabled({});
+                                                setColumnDefaultValues({});
                                             }}
                                             disabled={!form.target_schema || loadingDbMeta}
                                         >
@@ -374,7 +413,12 @@ const CatalogAdmin = () => {
                                         schemaColumns={schemaColumns}
                                         columnRequired={columnRequired}
                                         onRequiredChange={handleRequiredChange}
+                                        columnDefaultEnabled={columnDefaultEnabled}
+                                        columnDefaultValues={columnDefaultValues}
+                                        onDefaultEnabledChange={handleDefaultEnabledChange}
+                                        onDefaultValueChange={handleDefaultValueChange}
                                         organizationName={organizationName}
+                                        readOnly={readOnly}
                                     />
                                     <ChipListEditor
                                         label="Notas de validación (UI del wizard)"

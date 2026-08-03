@@ -134,6 +134,8 @@ def pick_upsert_conflict_columns(
 ) -> List[str]:
     """
     Elige columnas ON CONFLICT que existan como índice único en BD y estén en el INSERT.
+    Prioriza coincidencia exacta con preferred_keys (p. ej. PK sku) para no elegir
+    un índice compuesto más largo que no sea el constraint que realmente dispara.
     resolve_name(key) -> nombre físico de columna o None.
     """
     insert_lower = {c.lower(): c for c in insert_columns}
@@ -143,16 +145,23 @@ def pick_upsert_conflict_columns(
         if col and col.lower() in insert_lower:
             resolved_preferred.append(insert_lower[col.lower()])
 
-    best_cols: Optional[List[str]] = None
-    best_score = -1
-
+    pref_lower = {c.lower() for c in resolved_preferred}
+    usable: List[List[str]] = []
     for index_cols in unique_indexes:
         if not all(c.lower() in insert_lower for c in index_cols):
             continue
         physical = [insert_lower[c.lower()] for c in index_cols]
-        pref_lower = {c.lower() for c in resolved_preferred}
+        usable.append(physical)
+        if pref_lower and {c.lower() for c in physical} == pref_lower:
+            return physical
+
+    best_cols: Optional[List[str]] = None
+    best_score = -1
+
+    for physical in usable:
         overlap = sum(1 for c in physical if c.lower() in pref_lower)
-        score = overlap * 100 + len(physical)
+        # Prefer higher overlap; on ties prefer shorter indexes (PK over composites).
+        score = overlap * 100 - len(physical)
         if score > best_score:
             best_score = score
             best_cols = physical
