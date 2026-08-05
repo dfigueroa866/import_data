@@ -36,11 +36,16 @@ export const HISTORY_PREVIEW_COLUMN_ORDER = [
     'pieces',
     'sku',
     'period_start',
+    'iso_year',
+    'iso_week',
     'organization_id',
     'quantity',
     'sales_channel',
     'granularity',
     'source',
+    'stockout_flag',
+    'markdown_pct',
+    'promo_flag',
 ];
 
 /** Extensión del archivo original (p. ej. csv, xlsx). */
@@ -50,7 +55,17 @@ export const sourceFromFileName = (fileName) => {
 };
 
 /** Columnas de destino que el wizard rellena automáticamente (no mapear desde archivo). */
-export const HISTORY_AUTO_MAPPING_COLUMNS = ['organization_id', 'granularity', 'source', 'sales_channel'];
+export const HISTORY_AUTO_MAPPING_COLUMNS = [
+    'organization_id',
+    'granularity',
+    'source',
+    'sales_channel',
+    'iso_year',
+    'iso_week',
+    'stockout_flag',
+    'markdown_pct',
+    'promo_flag',
+];
 
 /**
  * Añade organization_id a filas de preview cuando aplica (contexto de sesión).
@@ -95,7 +110,16 @@ export const HISTORY_TABLE_META = {
         'granularity',
     ],
     ignored_file_headers: ['id'],
-    non_mappable_targets: ['granularity', 'source', 'sales_channel'],
+    non_mappable_targets: [
+        'granularity',
+        'source',
+        'sales_channel',
+        'iso_year',
+        'iso_week',
+        'stockout_flag',
+        'markdown_pct',
+        'promo_flag',
+    ],
     optional_columns: ['pieces'],
     column_aliases: {
         period_start: ['period_start', 'start_date', 'fecha', 'date', 'week_monday'],
@@ -109,10 +133,12 @@ export const HISTORY_TABLE_META = {
         'Destino: public.sales_history',
         'Mapea location_code, sku (o sku_code) y period_start, quantity, pieces',
         'UPSERT: organization_id + location_code + sku + period_start + granularity',
-        'granularity se toma del tipo de proceso del paso 1',
+        'granularity se toma del campo Granularidad (tipo de proceso) del paso 1',
         'source se toma de la extensión del archivo subido',
         'sales_channel se aplica automáticamente como SELL_IN',
         'organization_id se aplica automáticamente del usuario',
+        'iso_year e iso_week se derivan de period_start (tras agregación)',
+        'stockout_flag=false, markdown_pct=0, promo_flag=false (automáticos)',
     ],
     process_types: FALLBACK_PROCESS_TYPES,
 };

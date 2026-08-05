@@ -249,6 +249,40 @@ def _resolve_sku_id_from_row(
     return None
 
 
+def apply_history_derived_columns_polars(df: pl.DataFrame) -> pl.DataFrame:
+    """
+    MVP2 auto columns: ISO calendar from period_start + constant flags.
+
+    Call after period_start is a Date/Datetime (validation) and again after
+    aggregation truncate so ISO matches the promoted bucket.
+    """
+    if df.is_empty():
+        return df
+
+    out = df
+    exprs: List[pl.Expr] = [
+        pl.lit(False).alias("stockout_flag"),
+        pl.lit(0).alias("markdown_pct"),
+        pl.lit(False).alias("promo_flag"),
+    ]
+
+    if "period_start" in out.columns:
+        period = pl.col("period_start")
+        dtype = out.schema.get("period_start")
+        if dtype == pl.Datetime:
+            period = period.cast(pl.Date)
+        elif dtype != pl.Date:
+            period = period.cast(pl.Date, strict=False)
+        exprs.extend(
+            [
+                period.dt.iso_year().alias("iso_year"),
+                period.dt.week().alias("iso_week"),
+            ]
+        )
+
+    return out.with_columns(exprs)
+
+
 def apply_history_transforms_polars(
     df: pl.DataFrame,
     *,
@@ -282,9 +316,10 @@ def apply_history_transforms_polars(
                     "sku_id"
                 )
             )
-        return _apply_sales_channel_polars(
+        out = _apply_sales_channel_polars(
             out, validate=False, sales_channel_default=sales_channel_default
         )
+        return apply_history_derived_columns_polars(out)
 
     if "sku_code" in out.columns:
         if "sku" in out.columns:
@@ -328,4 +363,4 @@ def apply_history_transforms_polars(
             )
         )
 
-    return out
+    return apply_history_derived_columns_polars(out)

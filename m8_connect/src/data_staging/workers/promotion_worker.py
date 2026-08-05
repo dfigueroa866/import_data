@@ -283,13 +283,26 @@ def _ensure_history_promotion_batch(
     arrow_batch,
     valid_db_target_cols: List[str],
     sales_channel_default: Optional[str] = None,
+    process_type: Optional[str] = None,
 ):
-    """Rellena sales_channel con el default configurado si falta o viene vacío."""
-    from data_staging.services.history.history_config import get_sales_channel_default
+    """Rellena auto-columnas de historia (granularity desde processType, sales_channel, ISO, flags)."""
+    from data_staging.services.history.history_config import (
+        get_sales_channel_default,
+        granularity_for_process_type,
+        is_valid_process_type,
+    )
 
     default_val = sales_channel_default or get_sales_channel_default()
-
-    if "sales_channel" not in valid_db_target_cols:
+    needed = {
+        "granularity",
+        "sales_channel",
+        "iso_year",
+        "iso_week",
+        "stockout_flag",
+        "markdown_pct",
+        "promo_flag",
+    }
+    if not needed.intersection(valid_db_target_cols):
         return arrow_batch
 
     import pyarrow as pa
@@ -298,14 +311,46 @@ def _ensure_history_promotion_batch(
         return arrow_batch
 
     df = arrow_batch.to_pandas()
-    if "sales_channel" not in df.columns:
-        df["sales_channel"] = default_val
-    else:
-        empty = df["sales_channel"].isna() | (
-            df["sales_channel"].astype(str).str.strip() == ""
-        )
-        if empty.any():
-            df.loc[empty, "sales_channel"] = default_val
+
+    # granularity siempre desde process_type del Paso 1 (select Granularidad)
+    if "granularity" in valid_db_target_cols and is_valid_process_type(process_type):
+        df["granularity"] = granularity_for_process_type(process_type)
+
+    if "sales_channel" in valid_db_target_cols:
+        if "sales_channel" not in df.columns:
+            df["sales_channel"] = default_val
+        else:
+            empty = df["sales_channel"].isna() | (
+                df["sales_channel"].astype(str).str.strip() == ""
+            )
+            if empty.any():
+                df.loc[empty, "sales_channel"] = default_val
+
+    if "stockout_flag" in valid_db_target_cols:
+        df["stockout_flag"] = False
+    if "promo_flag" in valid_db_target_cols:
+        df["promo_flag"] = False
+    if "markdown_pct" in valid_db_target_cols:
+        df["markdown_pct"] = 0
+
+    need_iso = (
+        ("iso_year" in valid_db_target_cols or "iso_week" in valid_db_target_cols)
+        and "period_start" in df.columns
+    )
+    if need_iso:
+        period = df["period_start"]
+        if "iso_year" in valid_db_target_cols:
+            df["iso_year"] = period.apply(
+                lambda v: None
+                if v is None or (isinstance(v, float) and pd.isna(v))
+                else pd.Timestamp(v).isocalendar()[0]
+            )
+        if "iso_week" in valid_db_target_cols:
+            df["iso_week"] = period.apply(
+                lambda v: None
+                if v is None or (isinstance(v, float) and pd.isna(v))
+                else pd.Timestamp(v).isocalendar()[1]
+            )
 
     return pa.RecordBatch.from_pandas(df, preserve_index=False)
 
@@ -1067,10 +1112,12 @@ def _promote_from_parquet(
     is_history = _is_history_promotion(metadata, target_schema, target_table, load_type)
     effective_load_type = "history" if is_history else load_type
     history_sales_channel_default = None
+    history_process_type = None
     if is_history:
         from data_staging.services.history.history_config import resolve_history_rules
 
         history_sales_channel_default = resolve_history_rules(metadata).get("sales_channel_default")
+        history_process_type = metadata.get("process_type")
     insert_cols: List[str] = []
     staging_cols: List[str] = []
     conflict_clause = ""
@@ -1106,6 +1153,7 @@ def _promote_from_parquet(
                     arrow_batch,
                     valid_db_target_cols,
                     sales_channel_default=history_sales_channel_default,
+                    process_type=history_process_type,
                 )
             batch_columns = list(arrow_batch.schema.names)
 
@@ -1217,10 +1265,12 @@ def _promote_from_parquet_single_pass(
     is_history = _is_history_promotion(metadata, target_schema, target_table, load_type)
     effective_load_type = "history" if is_history else load_type
     history_sales_channel_default = None
+    history_process_type = None
     if is_history:
         from data_staging.services.history.history_config import resolve_history_rules
 
         history_sales_channel_default = resolve_history_rules(metadata).get("sales_channel_default")
+        history_process_type = metadata.get("process_type")
     use_arrow_copy = not (load_type == "catalog" and catalog_slug)
 
     insert_cols: List[str] = []
@@ -1253,6 +1303,7 @@ def _promote_from_parquet_single_pass(
                     arrow_batch,
                     valid_db_target_cols,
                     sales_channel_default=history_sales_channel_default,
+                    process_type=history_process_type,
                 )
             batch_columns = list(arrow_batch.schema.names)
 

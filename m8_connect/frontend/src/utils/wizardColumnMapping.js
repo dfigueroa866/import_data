@@ -176,7 +176,16 @@ export const appendFixedHistoryAutoMappings = (
 
     const nextMappings = { ...mappings };
     const nextToggles = { ...toggles };
-    const autoTargets = ['granularity', 'source', 'sales_channel'];
+    const autoTargets = [
+        'granularity',
+        'source',
+        'sales_channel',
+        'iso_year',
+        'iso_week',
+        'stockout_flag',
+        'markdown_pct',
+        'promo_flag',
+    ];
 
     Object.keys(nextMappings).forEach((fileCol) => {
         if (autoTargets.includes(nextMappings[fileCol]?.target)) {

@@ -413,7 +413,8 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
                         </div>
                         <p className="info-hint">
                             Columnas clave: location_code, sku, period_start, quantity.
-                            granularity y source (extensión del archivo) se asignan automáticamente.
+                            granularity se toma del campo Granularidad (tipo de proceso) de arriba;
+                            source viene de la extensión del archivo.
                         </p>
                         <ul className="history-hints-list">
                             {validationHints.map((hint) => (

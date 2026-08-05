@@ -205,6 +205,11 @@ def aggregate_validated_parquet(
             pl.lit(source_ext).alias("source"),
             pl.lit(sales_channel_default).alias("sales_channel"),
         ])
+        from data_staging.services.history.history_transforms import (
+            apply_history_derived_columns_polars,
+        )
+
+        agg_df = apply_history_derived_columns_polars(agg_df)
         stored_types = meta_dict.get("target_column_types") or {}
         if stored_types:
             from data_staging.utils.parquet_typing import cast_dataframe_to_target_types

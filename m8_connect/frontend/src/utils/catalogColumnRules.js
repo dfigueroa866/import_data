@@ -28,7 +28,16 @@ export function isCatalogColumnMappable(col) {
     return classifyCatalogColumn(col) === 'mappable';
 }
 
-const HISTORY_AUTO_COLUMNS = new Set(['granularity', 'source', 'sales_channel']);
+const HISTORY_AUTO_COLUMNS = new Set([
+    'granularity',
+    'source',
+    'sales_channel',
+    'iso_year',
+    'iso_week',
+    'stockout_flag',
+    'markdown_pct',
+    'promo_flag',
+]);
 
 /** Columnas que se mapean desde el archivo en el paso 2 (aunque formen parte de la clave UPSERT). */
 export const HISTORY_FILE_MAPPING_COLUMNS = new Set([

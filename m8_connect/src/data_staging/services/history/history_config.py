@@ -9,7 +9,16 @@ HISTORY_TARGET_TABLE = "sales_history"
 HISTORY_SOURCE_NAME = "sales_history"
 
 # Columnas actualizadas en ON CONFLICT DO UPDATE (promoción fase 2)
-HISTORY_UPSERT_UPDATE_COLUMNS = ["quantity", "pieces", "imported_at"]
+HISTORY_UPSERT_UPDATE_COLUMNS = [
+    "quantity",
+    "pieces",
+    "imported_at",
+    "iso_year",
+    "iso_week",
+    "stockout_flag",
+    "markdown_pct",
+    "promo_flag",
+]
 
 # Clave natural en BD (índice único) — UPSERT en promoción
 HISTORY_UNIQUE_KEYS = [
@@ -49,10 +58,29 @@ HISTORY_REQUIRED_MAPPING_COLUMNS = [
 HISTORY_LOGICAL_COLUMNS = ["sku_code"]
 
 # Campos generados por el sistema (no mapear desde archivo)
-HISTORY_NON_MAPPABLE_TARGETS = ["granularity", "source", "sales_channel"]
+HISTORY_NON_MAPPABLE_TARGETS = [
+    "granularity",
+    "source",
+    "sales_channel",
+    "iso_year",
+    "iso_week",
+    "stockout_flag",
+    "markdown_pct",
+    "promo_flag",
+]
 
 # Columnas inyectadas por el sistema en promoción aunque no estén en el mapeo del wizard
-HISTORY_AUTO_PROMOTION_COLUMNS = ["organization_id", "granularity", "source", "sales_channel"]
+HISTORY_AUTO_PROMOTION_COLUMNS = [
+    "organization_id",
+    "granularity",
+    "source",
+    "sales_channel",
+    "iso_year",
+    "iso_week",
+    "stockout_flag",
+    "markdown_pct",
+    "promo_flag",
+]
 
 
 def is_sales_history_target(target_schema: str, target_table: str) -> bool:
