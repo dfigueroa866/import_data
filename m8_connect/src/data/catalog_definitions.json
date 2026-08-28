@@ -99,8 +99,6 @@
         ]
       },
       "defaults": {
-        "brand": "N/A",
-        "class": "N/A",
         "subclass": "N/A",
         "attr_1": "N/A",
         "attr_2": "N/A",
@@ -225,6 +223,7 @@
         ]
       },
       "defaults": {
+        "country": "NA",
         "city": "N/A"
       },
       "validation_hints": [

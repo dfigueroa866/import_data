@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Generator, Iterator, Tuple
 
 import polars as pl
+import pyarrow as pa
 import pyarrow.csv as pacsv
 import pyarrow.parquet as pq
 
@@ -67,6 +68,23 @@ def parquet_column_names(file_path: Path) -> list[str]:
     return list(pl.read_parquet(file_path, n_rows=0).columns)
 
 
+def csv_column_names(
+    file_path: Path,
+    delimiter: str = ",",
+    encoding: str = "utf-8",
+) -> list[str]:
+    """CSV headers without type inference (all columns as Utf8)."""
+    pl_encoding = encoding_for_polars(encoding)
+    header_df = pl.read_csv(
+        file_path,
+        n_rows=0,
+        separator=delimiter,
+        encoding=pl_encoding,
+        infer_schema_length=0,
+    )
+    return list(header_df.columns)
+
+
 def iter_parquet_chunks(file_path: Path, chunk_size: int) -> Iterator[pl.DataFrame]:
     pf = pq.ParquetFile(file_path)
     for batch in pf.iter_batches(batch_size=chunk_size):
@@ -79,10 +97,17 @@ def iter_csv_chunks(
     delimiter: str = ",",
     encoding: str = "utf-8",
 ) -> Iterator[pl.DataFrame]:
-    """Yield Polars DataFrames of up to chunk_size rows via PyArrow CSV blocks."""
+    """Yield Polars DataFrames of up to chunk_size rows; columns are always strings."""
     parse_options = pacsv.ParseOptions(delimiter=delimiter)
     read_options = pacsv.ReadOptions(block_size=max(1 << 20, chunk_size * 512))
-    convert_options = pacsv.ConvertOptions(strings_can_be_null=True)
+    column_types = {
+        name: pa.large_string()
+        for name in csv_column_names(file_path, delimiter, encoding)
+    }
+    convert_options = pacsv.ConvertOptions(
+        strings_can_be_null=True,
+        column_types=column_types,
+    )
     reader = pacsv.open_csv(
         file_path,
         read_options=read_options,

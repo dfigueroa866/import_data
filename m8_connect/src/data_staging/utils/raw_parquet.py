@@ -41,6 +41,7 @@ def csv_to_raw_parquet(
             n_rows=0,
             separator=delimiter,
             encoding=pl_encoding,
+            infer_schema_length=0,
         )
         file_column_types = map_file_headers_to_target_types(
             list(header_df.columns),

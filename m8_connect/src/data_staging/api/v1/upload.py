@@ -783,7 +783,7 @@ class FileUploadService:
                         encoding=pl_encoding,
                         ignore_errors=True,
                         truncate_ragged_lines=True,
-                        infer_schema_length=100,
+                        infer_schema_length=0,
                     )
 
                     if len(sample_df.columns) == 1:
@@ -803,7 +803,7 @@ class FileUploadService:
                                     encoding=pl_encoding,
                                     ignore_errors=True,
                                     truncate_ragged_lines=True,
-                                    infer_schema_length=100,
+                                    infer_schema_length=0,
                                 )
                     detected_delimiter = curr_delimiter
                 except Exception as e:
