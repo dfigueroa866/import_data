@@ -283,6 +283,35 @@ def apply_history_derived_columns_polars(df: pl.DataFrame) -> pl.DataFrame:
     return out.with_columns(exprs)
 
 
+def apply_history_column_defaults_polars(
+    df: pl.DataFrame,
+    history_rules: Optional[Dict[str, Any]] = None,
+) -> pl.DataFrame:
+    """Fill configured column defaults for missing or empty cells (never overwrite values)."""
+    if df.is_empty():
+        return df
+
+    from data_staging.services.history.history_registry import history_column_defaults
+
+    defaults = history_column_defaults(history_rules)
+    if not defaults:
+        return df
+
+    exprs: List[pl.Expr] = []
+    for col, default_val in defaults.items():
+        if col in df.columns:
+            exprs.append(
+                pl.when(_is_empty_expr(col))
+                .then(pl.lit(default_val))
+                .otherwise(pl.col(col))
+                .alias(col)
+            )
+        else:
+            exprs.append(pl.lit(default_val).alias(col))
+
+    return df.with_columns(exprs) if exprs else df
+
+
 def apply_history_transforms_polars(
     df: pl.DataFrame,
     *,
@@ -305,7 +334,9 @@ def apply_history_transforms_polars(
     from data_staging.services.history.history_config import resolve_history_rules
 
     rules = history_rules or resolve_history_rules()
+    features = rules.get("features") or {}
     sales_channel_default = rules.get("sales_channel_default") or HISTORY_SALES_CHANNEL_VALUE
+    table_name = rules.get("name") or rules.get("target_table")
 
     out = df
 
@@ -316,10 +347,13 @@ def apply_history_transforms_polars(
                     "sku_id"
                 )
             )
-        out = _apply_sales_channel_polars(
-            out, validate=False, sales_channel_default=sales_channel_default
-        )
-        return apply_history_derived_columns_polars(out)
+        if features.get("auto_sales_channel", True):
+            out = _apply_sales_channel_polars(
+                out, validate=False, sales_channel_default=sales_channel_default
+            )
+        if features.get("derived_iso_flags", True):
+            return apply_history_derived_columns_polars(out)
+        return out
 
     if "sku_code" in out.columns:
         if "sku" in out.columns:
@@ -337,24 +371,25 @@ def apply_history_transforms_polars(
     if organization_id:
         out = out.with_columns(pl.lit(str(organization_id)).alias("organization_id"))
 
-    if process_type:
+    if process_type and features.get("auto_granularity", True):
         from data_staging.services.history.history_config import granularity_for_process_type
 
-        gran = granularity_for_process_type(process_type)
+        gran = granularity_for_process_type(process_type, table_name)
         out = out.with_columns(pl.lit(gran).alias("granularity"))
 
-    if source_extension:
+    if source_extension and features.get("auto_source", True):
         src = str(source_extension).strip().lower()
         if src == "parquet":
             src = "csv"
         if src and src != "unknown":
             out = out.with_columns(pl.lit(src).alias("source"))
 
-    out = _apply_sales_channel_polars(
-        out,
-        validate=not fast_validation,
-        sales_channel_default=sales_channel_default,
-    )
+    if features.get("auto_sales_channel", True):
+        out = _apply_sales_channel_polars(
+            out,
+            validate=not fast_validation,
+            sales_channel_default=sales_channel_default,
+        )
 
     if resolve_sku_id and sku_resolver:
         out = out.with_columns(
@@ -363,4 +398,6 @@ def apply_history_transforms_polars(
             )
         )
 
-    return apply_history_derived_columns_polars(out)
+    if features.get("derived_iso_flags", True):
+        out = apply_history_derived_columns_polars(out)
+    return apply_history_column_defaults_polars(out, rules)

@@ -471,12 +471,26 @@ def process_aggregation(
     if not path.exists():
         raise AggregationError(f"File not found: {file_path}")
 
-    from data_staging.services.history.history_config import is_valid_process_type, valid_process_type_keys
+    from data_staging.services.history.history_config import (
+        is_valid_process_type,
+        resolve_history_rules,
+        resolve_history_table_name,
+        valid_process_type_keys,
+    )
 
-    if not is_valid_process_type(process_type):
-        valid = ", ".join(valid_process_type_keys()) or "Weekly, Monthly"
+    meta_dict = metadata if isinstance(metadata, dict) else {}
+    history_name = resolve_history_table_name(meta_dict)
+    if not is_valid_process_type(process_type, history_name):
+        valid = ", ".join(valid_process_type_keys(history_name)) or "Weekly, Monthly"
         raise AggregationError(
             f"process_type inválido: {process_type!r}. Use: {valid}"
+        )
+
+    rules = resolve_history_rules(meta_dict)
+    if not rules.get("supports_aggregation", True):
+        raise AggregationError(
+            f"La tabla '{history_name}' no usa agregación semanal/mensual; "
+            "use el pipeline de validación por parquet."
         )
 
     use_streaming = getattr(settings, "AGGREGATION_CHUNK_SIZE", 500_000) > 0

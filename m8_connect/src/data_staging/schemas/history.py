@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -15,6 +15,7 @@ class ProcessTypeConfig(BaseModel):
 
 
 class HistoryDefinitionPayload(BaseModel):
+    name: Optional[str] = None
     label: Optional[str] = None
     unique_keys: List[str] = Field(default_factory=list)
     required_mapping_columns: List[str] = Field(default_factory=list)
@@ -26,3 +27,4 @@ class HistoryDefinitionPayload(BaseModel):
     sales_channel_default: str = "SELL_IN"
     process_types: List[ProcessTypeConfig] = Field(default_factory=list)
     validation_hints: List[str] = Field(default_factory=list)
+    defaults: Dict[str, str] = Field(default_factory=dict)

@@ -11,7 +11,7 @@ from datetime import datetime
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
 # Add src to path for imports
 current_dir = Path(__file__).parent
@@ -233,6 +233,60 @@ async def global_exception_handler(request, exc):
             "timestamp": datetime.now().isoformat()
         }
     )
+
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_FRONTEND_DIST = _PROJECT_ROOT / "frontend" / "dist"
+_FRONTEND_DEV_URL = os.getenv("FRONTEND_DEV_URL", "http://127.0.0.1:5173").rstrip("/")
+
+_API_PATH_PREFIXES = ("/api/", "/docs", "/redoc", "/openapi.json", "/health")
+
+
+def _is_api_path(path: str) -> bool:
+    if path == "/":
+        return False
+    return path.startswith(_API_PATH_PREFIXES)
+
+
+def _register_frontend_routes() -> None:
+    """Serve built SPA or redirect browser UI routes to Vite in development."""
+    index_html = _FRONTEND_DIST / "index.html"
+    if index_html.is_file():
+        assets_dir = _FRONTEND_DIST / "assets"
+        if assets_dir.is_dir():
+            from fastapi.staticfiles import StaticFiles
+
+            app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="frontend-assets")
+
+        @app.get("/{full_path:path}", include_in_schema=False)
+        async def serve_spa(full_path: str):
+            if _is_api_path(f"/{full_path}"):
+                raise HTTPException(status_code=404, detail="Not Found")
+            candidate = _FRONTEND_DIST / full_path
+            if full_path and candidate.is_file():
+                return FileResponse(candidate)
+            return FileResponse(index_html)
+
+        logger.info("Frontend SPA served from %s", _FRONTEND_DIST)
+        return
+
+    if not settings.is_development:
+        return
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def redirect_ui_to_vite(full_path: str):
+        path = f"/{full_path}" if full_path else "/"
+        if _is_api_path(path):
+            raise HTTPException(status_code=404, detail="Not Found")
+        return RedirectResponse(url=f"{_FRONTEND_DEV_URL}{path}", status_code=307)
+
+    logger.info(
+        "Frontend dev redirect enabled: UI routes → %s (run: cd frontend && npm run dev)",
+        _FRONTEND_DEV_URL,
+    )
+
+
+_register_frontend_routes()
 
 
 if __name__ == "__main__":

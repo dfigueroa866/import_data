@@ -56,18 +56,22 @@ def _output_path_for_validated(validated_path: Path) -> Path:
     return validated_path.parent / f"{stem}_agglomerated.parquet"
 
 
-def _truncate_period_start(chunk: pl.DataFrame, truncate_interval: str) -> pl.DataFrame:
+def _truncate_period_start(
+    chunk: pl.DataFrame,
+    truncate_interval: str,
+    period_col: str = PERIOD_COL,
+) -> pl.DataFrame:
     """Agrupa por periodo: truncate sobre pl.Date ya validado en paso 2 (sin re-parsear)."""
-    series = chunk.get_column(PERIOD_COL)
+    series = chunk.get_column(period_col)
     if series.dtype == pl.Datetime:
-        chunk = chunk.with_columns(pl.col(PERIOD_COL).dt.date().alias(PERIOD_COL))
+        chunk = chunk.with_columns(pl.col(period_col).dt.date().alias(period_col))
     elif series.dtype != pl.Date:
         raise TypeError(
-            f"{PERIOD_COL} debe ser Date tras la validación (paso 2); "
+            f"{period_col} debe ser Date tras la validación (paso 2); "
             f"tipo recibido: {series.dtype}"
         )
     return chunk.with_columns(
-        pl.col(PERIOD_COL).dt.truncate(truncate_interval).alias(PERIOD_COL)
+        pl.col(period_col).dt.truncate(truncate_interval).alias(period_col)
     )
 
 
@@ -101,15 +105,48 @@ def aggregate_validated_parquet(
     validated_path = Path(validated_path)
     output_path = _output_path_for_validated(validated_path)
 
+    meta_dict = metadata if isinstance(metadata, dict) else {}
+    rules = resolve_history_rules(meta_dict)
+    if not rules.get("supports_aggregation", True):
+        valid_rows = (
+            int(valid_rows_hint)
+            if valid_rows_hint is not None and valid_rows_hint > 0
+            else count_parquet_rows(validated_path)
+        )
+        preview_df = pl.read_parquet(validated_path).head(20)
+        import shutil
+
+        shutil.copy2(validated_path, output_path)
+        return {
+            "has_error": False,
+            "total_rows": valid_rows,
+            "grouped_rows": valid_rows,
+            "df_before_dropna": valid_rows,
+            "df_after_dropna": valid_rows,
+            "dropped_rows": 0,
+            "consolidated_rows": valid_rows,
+            "compression_factor": 1.0,
+            "preview_data": _preview_dicts_from_df(preview_df),
+        }, output_path
+
+    period_col = str(rules.get("period_column") or PERIOD_COL)
     schema_cols = list(pl.read_parquet(validated_path, n_rows=0).columns)
     dims = [c for c in HISTORY_GROUP_DIMS if c in schema_cols]
+    if period_col != PERIOD_COL and period_col in schema_cols:
+        dims = [
+            c if c != PERIOD_COL else period_col
+            for c in dims
+            if c in schema_cols or c == PERIOD_COL
+        ]
+        dims = [period_col if c == PERIOD_COL else c for c in dims]
+        dims = [c for c in dims if c in schema_cols]
     metrics = _history_agg_metrics(schema_cols)
 
-    if PERIOD_COL not in schema_cols or "quantity" not in schema_cols:
+    if period_col not in schema_cols or "quantity" not in schema_cols:
         return {
             "has_error": True,
             "error_detail": (
-                f"El archivo validado debe incluir '{PERIOD_COL}' y 'quantity'."
+                f"El archivo validado debe incluir '{period_col}' y 'quantity'."
             ),
         }, validated_path
 
@@ -126,7 +163,10 @@ def aggregate_validated_parquet(
         else count_parquet_rows(validated_path)
     )
     chunks_total = max(1, (valid_rows + chunk_size - 1) // chunk_size)
-    truncate_interval = date_truncate_for_process_type(process_type)
+    truncate_interval = date_truncate_for_process_type(
+        process_type,
+        rules.get("name") or rules.get("target_table"),
+    )
 
     if batch_id:
         cleanup_agg_partial_files(batch_id, metadata)
@@ -148,7 +188,7 @@ def aggregate_validated_parquet(
                 progress_callback(rows_done, valid_rows, chunk_idx, chunks_total)
             continue
 
-        partial = _truncate_period_start(chunk, truncate_interval).group_by(dims).agg(metrics)
+        partial = _truncate_period_start(chunk, truncate_interval, period_col).group_by(dims).agg(metrics)
 
         if batch_id and not partial.is_empty():
             partial_path = _agg_partial_path(batch_id, chunk_idx, metadata)
@@ -195,27 +235,36 @@ def aggregate_validated_parquet(
         reduce_progress_callback(1, 1)
 
     meta_dict = metadata if isinstance(metadata, dict) else {}
-    sales_channel_default = resolve_history_rules(meta_dict).get("sales_channel_default") or "SELL_IN"
-    granularity_val = granularity_for_process_type(process_type)
+    features = rules.get("features") or {}
+    sales_channel_default = rules.get("sales_channel_default") or "SELL_IN"
+    granularity_val = granularity_for_process_type(
+        process_type,
+        rules.get("name") or rules.get("target_table"),
+    )
     source_ext = (meta_dict.get("source_extension") or "csv").strip().lower() or "csv"
 
     if not agg_df.is_empty():
-        agg_df = agg_df.with_columns([
-            pl.lit(granularity_val).alias("granularity"),
-            pl.lit(source_ext).alias("source"),
-            pl.lit(sales_channel_default).alias("sales_channel"),
-        ])
-        from data_staging.services.history.history_transforms import (
-            apply_history_derived_columns_polars,
-        )
+        post_exprs = []
+        if features.get("auto_granularity", True):
+            post_exprs.append(pl.lit(granularity_val).alias("granularity"))
+        if features.get("auto_source", True):
+            post_exprs.append(pl.lit(source_ext).alias("source"))
+        if features.get("auto_sales_channel", True):
+            post_exprs.append(pl.lit(sales_channel_default).alias("sales_channel"))
+        if post_exprs:
+            agg_df = agg_df.with_columns(post_exprs)
+        if features.get("derived_iso_flags", True):
+            from data_staging.services.history.history_transforms import (
+                apply_history_derived_columns_polars,
+            )
 
-        agg_df = apply_history_derived_columns_polars(agg_df)
+            agg_df = apply_history_derived_columns_polars(agg_df)
         stored_types = meta_dict.get("target_column_types") or {}
         if stored_types:
             from data_staging.utils.parquet_typing import cast_dataframe_to_target_types
 
             types_without_period = {
-                k: v for k, v in stored_types.items() if k != PERIOD_COL
+                k: v for k, v in stored_types.items() if k != period_col
             }
             if types_without_period:
                 agg_df = cast_dataframe_to_target_types(

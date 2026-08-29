@@ -85,9 +85,39 @@ HISTORY_AUTO_PROMOTION_COLUMNS = [
 
 def is_sales_history_target(target_schema: str, target_table: str) -> bool:
     """True si el destino físico es public.sales_history."""
+    return is_history_target(target_schema, target_table, table_name=HISTORY_TARGET_TABLE)
+
+
+def is_history_target(
+    target_schema: str,
+    target_table: str,
+    *,
+    table_name: Optional[str] = None,
+) -> bool:
+    """True si schema+tabla coinciden con una definición de historia activa."""
+    schema = (target_schema or "").lower()
+    table = (target_table or "").lower()
+    if table_name:
+        entry = _definition_from_store(table_name)
+        if entry:
+            return (
+                table == str(entry.get("target_table") or table_name).lower()
+                and schema == str(entry.get("target_schema") or HISTORY_TARGET_SCHEMA).lower()
+            )
+    try:
+        from data_staging.services.history.history_registry import list_history_tables
+
+        for entry in list_history_tables(active_only=True):
+            if (
+                table == str(entry.get("target_table") or entry.get("name") or "").lower()
+                and schema == str(entry.get("target_schema") or HISTORY_TARGET_SCHEMA).lower()
+            ):
+                return True
+    except Exception:
+        pass
     return (
-        (target_table or "").lower() == HISTORY_TARGET_TABLE.lower()
-        and (target_schema or "").lower() == HISTORY_TARGET_SCHEMA.lower()
+        table == HISTORY_TARGET_TABLE.lower()
+        and schema == HISTORY_TARGET_SCHEMA.lower()
     )
 
 HISTORY_IGNORED_FILE_HEADERS = ["id"]
@@ -123,18 +153,33 @@ PROCESS_TYPE_GRANULARITY = {
 }
 
 
-def _definition_from_store() -> Dict[str, Any]:
+def _definition_from_store(table_name: Optional[str] = None) -> Dict[str, Any]:
     try:
         from data_staging.services.history.history_store import get_definition
 
-        return get_definition()
+        return get_definition(table_name)
     except Exception:
         return {}
 
 
-def get_process_types() -> List[Dict[str, str]]:
+def _resolve_table_name(
+    metadata: Optional[Dict[str, Any]] = None,
+    table_name: Optional[str] = None,
+) -> str:
+    if table_name:
+        return table_name.strip()
+    if metadata:
+        snapshot = metadata.get("history_config") or {}
+        if snapshot.get("name"):
+            return str(snapshot["name"])
+        if metadata.get("target_table"):
+            return str(metadata["target_table"])
+    return HISTORY_TARGET_TABLE
+
+
+def get_process_types(table_name: Optional[str] = None) -> List[Dict[str, str]]:
     """Tipos de proceso / granularity configurables (desde store o builtin)."""
-    stored = _definition_from_store().get("process_types")
+    stored = _definition_from_store(table_name).get("process_types")
     if stored:
         return list(stored)
     return [
@@ -143,28 +188,37 @@ def get_process_types() -> List[Dict[str, str]]:
     ]
 
 
-def get_process_type_config(process_type: Optional[str]) -> Optional[Dict[str, str]]:
+def get_process_type_config(
+    process_type: Optional[str],
+    table_name: Optional[str] = None,
+) -> Optional[Dict[str, str]]:
     key = (process_type or "").strip()
     if not key:
         return None
-    for pt in get_process_types():
+    for pt in get_process_types(table_name):
         if pt.get("key") == key:
             return dict(pt)
     return None
 
 
-def is_valid_process_type(process_type: Optional[str]) -> bool:
-    return get_process_type_config(process_type) is not None
+def is_valid_process_type(
+    process_type: Optional[str],
+    table_name: Optional[str] = None,
+) -> bool:
+    return get_process_type_config(process_type, table_name) is not None
 
 
-def valid_process_type_keys() -> tuple:
-    return tuple(pt["key"] for pt in get_process_types())
+def valid_process_type_keys(table_name: Optional[str] = None) -> tuple:
+    return tuple(pt["key"] for pt in get_process_types(table_name))
 
 
-def date_truncate_for_process_type(process_type: Optional[str]) -> str:
-    pt = get_process_type_config(process_type)
+def date_truncate_for_process_type(
+    process_type: Optional[str],
+    table_name: Optional[str] = None,
+) -> str:
+    pt = get_process_type_config(process_type, table_name)
     if not pt:
-        valid = ", ".join(valid_process_type_keys()) or "Weekly, Monthly"
+        valid = ", ".join(valid_process_type_keys(table_name)) or "Weekly, Monthly"
         raise ValueError(f"process_type inválido: {process_type!r}. Use: {valid}")
     return pt["date_truncate"]
 
@@ -192,22 +246,47 @@ def get_auto_promotion_columns(rules: Optional[Dict[str, Any]] = None) -> List[s
     return auto
 
 
+def resolve_history_table_name(
+    metadata: Optional[Dict[str, Any]] = None,
+    table_name: Optional[str] = None,
+) -> str:
+    """Nombre lógico de la tabla de historia (p. ej. sales_history, inventory_snapshot)."""
+    return _resolve_table_name(metadata, table_name)
+
+
 def resolve_history_rules(metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Reglas efectivas para validación/transformación/promoción.
     Prioridad: snapshot metadata['history_config'] → store vivo → builtins.
     """
     snapshot = (metadata or {}).get("history_config")
+    table_name = _resolve_table_name(metadata)
     if isinstance(snapshot, dict) and snapshot.get("required_mapping_columns") is not None:
         base = dict(snapshot)
     else:
-        base = get_history_table_meta()
+        base = get_history_table_meta(table_name)
 
     sales_channel_default = str(
         base.get("sales_channel_default") or get_sales_channel_default()
     ).strip() or HISTORY_SALES_CHANNEL_VALUE
 
+    table_name = str(base.get("name") or base.get("target_table") or HISTORY_TARGET_TABLE)
+    features = dict(base.get("features") or {})
     rules = {
+        "name": table_name,
+        "target_schema": str(base.get("target_schema") or HISTORY_TARGET_SCHEMA),
+        "target_table": str(base.get("target_table") or table_name),
+        "supports_aggregation": bool(base.get("supports_aggregation", True)),
+        "period_column": str(base.get("period_column") or "period_start"),
+        "upsert_update_columns": list(
+            base.get("upsert_update_columns") or HISTORY_UPSERT_UPDATE_COLUMNS
+        ),
+        "features": {
+            "auto_granularity": bool(features.get("auto_granularity", True)),
+            "auto_source": bool(features.get("auto_source", True)),
+            "auto_sales_channel": bool(features.get("auto_sales_channel", True)),
+            "derived_iso_flags": bool(features.get("derived_iso_flags", True)),
+        },
         "required_mapping_columns": list(
             base.get("required_mapping_columns") or HISTORY_REQUIRED_MAPPING_COLUMNS
         ),
@@ -224,7 +303,8 @@ def resolve_history_rules(metadata: Optional[Dict[str, Any]] = None) -> Dict[str
             base.get("non_mappable_targets") or HISTORY_NON_MAPPABLE_TARGETS
         ),
         "sales_channel_default": sales_channel_default,
-        "process_types": list(base.get("process_types") or get_process_types()),
+        "process_types": list(base.get("process_types") or get_process_types(table_name)),
+        "defaults": dict(base.get("defaults") or {}),
     }
     rules["auto_promotion_columns"] = get_auto_promotion_columns(rules)
     return rules
@@ -295,26 +375,47 @@ def enrich_history_preview_rows(
     return enriched
 
 
-def granularity_for_process_type(process_type: Optional[str]) -> str:
-    pt = get_process_type_config(process_type)
+def granularity_for_process_type(
+    process_type: Optional[str],
+    table_name: Optional[str] = None,
+) -> str:
+    pt = get_process_type_config(process_type, table_name)
     if pt and pt.get("granularity"):
         return pt["granularity"]
     gran = PROCESS_TYPE_GRANULARITY.get(process_type or "")
     if not gran:
-        valid = ", ".join(valid_process_type_keys()) or "Weekly, Monthly"
+        valid = ", ".join(valid_process_type_keys(table_name)) or "Weekly, Monthly"
         raise ValueError(f"process_type inválido: {process_type!r}. Use: {valid}")
     return gran
 
 
-def get_history_table_meta() -> Dict[str, Any]:
+def get_history_upsert_update_columns(rules: Optional[Dict[str, Any]] = None) -> List[str]:
+    src = rules or {}
+    return list(src.get("upsert_update_columns") or HISTORY_UPSERT_UPDATE_COLUMNS)
+
+
+def get_history_table_meta(table_name: Optional[str] = None) -> Dict[str, Any]:
     """Metadatos para wizard/API (misma forma que catálogos)."""
-    stored = _definition_from_store()
+    name = _resolve_table_name(table_name=table_name)
+    stored = _definition_from_store(name)
     if stored:
+        features = stored.get("features") or {}
         meta = {
-            "name": stored.get("name", HISTORY_TARGET_TABLE),
+            "name": stored.get("name", name),
             "label": stored.get("label", "Historial de ventas"),
             "target_schema": stored.get("target_schema", HISTORY_TARGET_SCHEMA),
-            "target_table": stored.get("target_table", HISTORY_TARGET_TABLE),
+            "target_table": stored.get("target_table", name),
+            "supports_aggregation": bool(stored.get("supports_aggregation", True)),
+            "period_column": stored.get("period_column") or "period_start",
+            "upsert_update_columns": list(
+                stored.get("upsert_update_columns") or HISTORY_UPSERT_UPDATE_COLUMNS
+            ),
+            "features": {
+                "auto_granularity": bool(features.get("auto_granularity", True)),
+                "auto_source": bool(features.get("auto_source", True)),
+                "auto_sales_channel": bool(features.get("auto_sales_channel", True)),
+                "derived_iso_flags": bool(features.get("derived_iso_flags", True)),
+            },
             "required_columns": list(HISTORY_REQUIRED_COLUMNS),
             "optional_columns": list(stored.get("optional_columns") or []),
             "required_mapping_columns": list(stored.get("required_mapping_columns") or HISTORY_REQUIRED_MAPPING_COLUMNS),
@@ -324,8 +425,9 @@ def get_history_table_meta() -> Dict[str, Any]:
             "ignored_file_headers": list(stored.get("ignored_file_headers") or HISTORY_IGNORED_FILE_HEADERS),
             "non_mappable_targets": list(stored.get("non_mappable_targets") or HISTORY_NON_MAPPABLE_TARGETS),
             "sales_channel_default": get_sales_channel_default(),
-            "process_types": get_process_types(),
+            "process_types": get_process_types(name),
             "validation_hints": list(stored.get("validation_hints") or []),
+            "defaults": dict(stored.get("defaults") or {}),
         }
         return meta
 

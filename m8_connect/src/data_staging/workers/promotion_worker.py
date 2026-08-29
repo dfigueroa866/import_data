@@ -230,6 +230,7 @@ def _catalog_upsert_clause(
     load_type: str,
     insert_cols: List[str],
     conflict_cols: Optional[List[str]] = None,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> str:
     if load_type not in ("catalog", "history") or not conflict_cols:
         return ""
@@ -238,11 +239,19 @@ def _catalog_upsert_clause(
     insert_lower = {c.strip('"').lower(): c.strip('"') for c in insert_cols}
 
     if load_type == "history":
-        from data_staging.services.history.history_config import HISTORY_UPSERT_UPDATE_COLUMNS
+        from data_staging.services.history.history_config import get_history_upsert_update_columns
 
+        history_rules = {}
+        try:
+            from data_staging.services.history.history_config import resolve_history_rules
+
+            history_rules = resolve_history_rules(metadata)
+        except Exception:
+            pass
+        update_keys = get_history_upsert_update_columns(history_rules)
         update_cols = [
             insert_lower[key.lower()]
-            for key in HISTORY_UPSERT_UPDATE_COLUMNS
+            for key in update_keys
             if key.lower() in insert_lower
         ]
     else:
@@ -284,6 +293,7 @@ def _ensure_history_promotion_batch(
     valid_db_target_cols: List[str],
     sales_channel_default: Optional[str] = None,
     process_type: Optional[str] = None,
+    history_table_name: Optional[str] = None,
 ):
     """Rellena auto-columnas de historia (granularity desde processType, sales_channel, ISO, flags)."""
     from data_staging.services.history.history_config import (
@@ -313,8 +323,11 @@ def _ensure_history_promotion_batch(
     df = arrow_batch.to_pandas()
 
     # granularity siempre desde process_type del Paso 1 (select Granularidad)
-    if "granularity" in valid_db_target_cols and is_valid_process_type(process_type):
-        df["granularity"] = granularity_for_process_type(process_type)
+    if (
+        "granularity" in valid_db_target_cols
+        and is_valid_process_type(process_type, history_table_name)
+    ):
+        df["granularity"] = granularity_for_process_type(process_type, history_table_name)
 
     if "sales_channel" in valid_db_target_cols:
         if "sales_channel" not in df.columns:
@@ -577,7 +590,7 @@ def _prepare_insert_query(
         conflict_cols = _resolve_history_conflict_columns(
             meta, db_columns, db_lower, insert_col_names, indexes
         )
-    conflict_clause = _catalog_upsert_clause(load_type, insert_cols, conflict_cols)
+    conflict_clause = _catalog_upsert_clause(load_type, insert_cols, conflict_cols, meta)
     insert_query = f"""
         INSERT INTO {target_schema}.{target_table} ({insert_cols_str})
         VALUES %s
@@ -1113,11 +1126,17 @@ def _promote_from_parquet(
     effective_load_type = "history" if is_history else load_type
     history_sales_channel_default = None
     history_process_type = None
+    history_table_name = None
     if is_history:
-        from data_staging.services.history.history_config import resolve_history_rules
+        from data_staging.services.history.history_config import (
+            resolve_history_rules,
+            resolve_history_table_name,
+        )
 
-        history_sales_channel_default = resolve_history_rules(metadata).get("sales_channel_default")
+        history_rules = resolve_history_rules(metadata)
+        history_sales_channel_default = history_rules.get("sales_channel_default")
         history_process_type = metadata.get("process_type")
+        history_table_name = resolve_history_table_name(metadata)
     insert_cols: List[str] = []
     staging_cols: List[str] = []
     conflict_clause = ""
@@ -1154,6 +1173,7 @@ def _promote_from_parquet(
                     valid_db_target_cols,
                     sales_channel_default=history_sales_channel_default,
                     process_type=history_process_type,
+                    history_table_name=history_table_name,
                 )
             batch_columns = list(arrow_batch.schema.names)
 
@@ -1266,11 +1286,17 @@ def _promote_from_parquet_single_pass(
     effective_load_type = "history" if is_history else load_type
     history_sales_channel_default = None
     history_process_type = None
+    history_table_name = None
     if is_history:
-        from data_staging.services.history.history_config import resolve_history_rules
+        from data_staging.services.history.history_config import (
+            resolve_history_rules,
+            resolve_history_table_name,
+        )
 
-        history_sales_channel_default = resolve_history_rules(metadata).get("sales_channel_default")
+        history_rules = resolve_history_rules(metadata)
+        history_sales_channel_default = history_rules.get("sales_channel_default")
         history_process_type = metadata.get("process_type")
+        history_table_name = resolve_history_table_name(metadata)
     use_arrow_copy = not (load_type == "catalog" and catalog_slug)
 
     insert_cols: List[str] = []
@@ -1304,6 +1330,7 @@ def _promote_from_parquet_single_pass(
                     valid_db_target_cols,
                     sales_channel_default=history_sales_channel_default,
                     process_type=history_process_type,
+                    history_table_name=history_table_name,
                 )
             batch_columns = list(arrow_batch.schema.names)
 
@@ -1516,8 +1543,8 @@ def promote_batch_job(payload: Dict[str, Any]):
             )
 
             load_type = "history"
-            target_schema = HISTORY_TARGET_SCHEMA
-            target_table = HISTORY_TARGET_TABLE
+            target_schema = metadata.get("target_schema") or HISTORY_TARGET_SCHEMA
+            target_table = metadata.get("target_table") or HISTORY_TARGET_TABLE
         else:
             from data_staging.services.history.history_config import (
                 HISTORY_TARGET_SCHEMA,

@@ -200,21 +200,14 @@ const Step2Mapping = ({ wizardData, updateWizardData, nextStep, prevStep }) => {
                 return;
             }
 
-            const catalogRequiredNames =
-                wizardData.loadMode === 'catalog'
+            const requiredNames =
+                wizardData.loadMode === 'catalog' || wizardData.loadMode === 'history'
                     ? getCatalogRequiredTargetColumns(
                           mappingCtx.targetTable,
                           mappingCtx.catalogMeta,
                           mappingCtx.loadMode
                       )
                     : [];
-
-            const historyRequiredNames =
-                wizardData.loadMode === 'history'
-                    ? mappingCtx.catalogMeta?.required_mapping_columns || []
-                    : [];
-
-            const requiredNames = [...catalogRequiredNames, ...historyRequiredNames];
 
             const requiredCols = productionColumns.filter(
                 (col) =>

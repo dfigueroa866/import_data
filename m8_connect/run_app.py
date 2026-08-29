@@ -334,6 +334,8 @@ def main():
         print("\n🌐 Starting API server...")
         print("📍 API will be available at: http://localhost:8000")
         print("📚 API docs at: http://localhost:8000/docs")
+        print("🖥️  UI (login): http://localhost:5173/login  —  cd frontend && npm run dev")
+        print("   (Rutas /login en :8000 redirigen a Vite si no hay frontend/dist)")
         print("\nPress CTRL+C to stop\n")
         
         # Run with import string to support reload

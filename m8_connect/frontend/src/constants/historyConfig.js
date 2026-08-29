@@ -152,3 +152,53 @@ export const HISTORY_LOGICAL_COLUMN_DEFS = [
         default: null,
     },
 ];
+
+export const INVENTORY_SNAPSHOT_TABLE_META = {
+    name: 'inventory_snapshot',
+    label: 'Inventario (snapshot)',
+    target_schema: HISTORY_TARGET_SCHEMA,
+    target_table: 'inventory_snapshot',
+    supports_aggregation: false,
+    period_column: 'snapshot_date',
+    required_mapping_columns: ['snapshot_date', 'sku', 'location_code', 'on_hand_qty'],
+    optional_columns: [
+        'allocated_qty',
+        'reserved_qty',
+        'blocked_qty',
+        'quarantine_qty',
+        'supplier_id',
+        'lead_time_days',
+        'review_period_days',
+        'moq',
+        'lot_multiple',
+        'unit_cost',
+        'currency',
+    ],
+    sku_mapping_targets: ['sku'],
+    logical_columns: ['sku_code'],
+    unique_keys: ['organization_id', 'sku', 'location_code', 'snapshot_date'],
+    ignored_file_headers: ['snapshot_id', 'organization_id', 'created_at'],
+    non_mappable_targets: ['organization_id', 'snapshot_id', 'created_at'],
+    features: {
+        auto_granularity: false,
+        auto_source: false,
+        auto_sales_channel: false,
+        derived_iso_flags: false,
+    },
+    process_types: [
+        {
+            key: 'Snapshot',
+            label: 'Snapshot (sin agregación)',
+            granularity: 'snapshot',
+            date_truncate: '1d',
+        },
+    ],
+    validation_hints: [
+        'Destino: public.inventory_snapshot',
+        'Mapea snapshot_date, sku, location_code y on_hand_qty como mínimo',
+        'snapshot_id y created_at los genera la base de datos',
+        'organization_id se aplica automáticamente del usuario',
+    ],
+};
+
+export const FALLBACK_HISTORY_TABLES = [HISTORY_TABLE_META, INVENTORY_SNAPSHOT_TABLE_META];

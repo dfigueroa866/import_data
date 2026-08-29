@@ -11,6 +11,10 @@ function isCatalogLoad({ loadMode, catalogMeta } = {}) {
     return loadMode === 'catalog' && Boolean(catalogMeta?.name);
 }
 
+function isHistoryLoad({ loadMode, catalogMeta } = {}) {
+    return loadMode === 'history' && Boolean(catalogMeta?.name);
+}
+
 /** True when the catalog definition explicitly defines this list (even if empty). */
 function catalogDefinesList(catalogMeta, key) {
     return Boolean(catalogMeta && Array.isArray(catalogMeta[key]));
@@ -63,6 +67,52 @@ export function getCatalogColumnDefaults(catalogMeta) {
 export function getCatalogRequiredTargetsNeedingMapping(catalogMeta) {
     const defaults = getCatalogColumnDefaults(catalogMeta);
     return getCatalogConfigRequiredTargets(catalogMeta).filter((c) => !(c in defaults));
+}
+
+/**
+ * Required destination columns from history config.
+ * Excludes organization_id and non_mappable_targets.
+ */
+export function getHistoryConfigRequiredTargets(historyMeta) {
+    if (!historyMeta) return [];
+    const skip = new Set(historyMeta.non_mappable_targets || []);
+    skip.add('organization_id');
+    const seen = new Set();
+    const out = [];
+    for (const col of historyMeta.required_mapping_columns || []) {
+        const name = String(col || '').trim();
+        if (!name || skip.has(name) || seen.has(name)) continue;
+        seen.add(name);
+        out.push(name);
+    }
+    return out;
+}
+
+/** Non-empty config defaults for mappable history columns (excludes system targets). */
+export function getHistoryColumnDefaults(historyMeta) {
+    if (!historyMeta || typeof historyMeta.defaults !== 'object' || !historyMeta.defaults) {
+        return {};
+    }
+    const skip = new Set(historyMeta.non_mappable_targets || []);
+    skip.add('organization_id');
+    const out = {};
+    for (const [key, value] of Object.entries(historyMeta.defaults)) {
+        const name = String(key || '').trim();
+        if (!name || skip.has(name)) continue;
+        const text = value == null ? '' : String(value).trim();
+        if (!text) continue;
+        out[name] = text;
+    }
+    return out;
+}
+
+/**
+ * Required history targets that still need a wizard file/manual mapping
+ * (config default covers the rest).
+ */
+export function getHistoryRequiredTargetsNeedingMapping(historyMeta) {
+    const defaults = getHistoryColumnDefaults(historyMeta);
+    return getHistoryConfigRequiredTargets(historyMeta).filter((c) => !(c in defaults));
 }
 
 /**
@@ -130,6 +180,9 @@ export function getCatalogRequiredMappingColumns(targetTable, catalogMeta, loadM
     if (isCatalogLoad({ loadMode, catalogMeta })) {
         return getCatalogRequiredTargetsNeedingMapping(catalogMeta);
     }
+    if (isHistoryLoad({ loadMode, catalogMeta })) {
+        return getHistoryRequiredTargetsNeedingMapping(catalogMeta);
+    }
     if (catalogDefinesList(catalogMeta, 'required_mapping_columns')) {
         return catalogMeta.required_mapping_columns;
     }
@@ -143,6 +196,9 @@ export function getCatalogRequiredMappingColumns(targetTable, catalogMeta, loadM
 export function getCatalogRequiredTargetColumns(targetTable, catalogMeta, loadMode) {
     if (isCatalogLoad({ loadMode, catalogMeta })) {
         return getCatalogRequiredTargetsNeedingMapping(catalogMeta);
+    }
+    if (isHistoryLoad({ loadMode, catalogMeta })) {
+        return getHistoryRequiredTargetsNeedingMapping(catalogMeta);
     }
 
     const names = new Set();
@@ -168,6 +224,10 @@ export function isRequiredMappingTargetColumn(col, { targetTable, catalogMeta, l
 
     if (isCatalogLoad({ loadMode, catalogMeta })) {
         return getCatalogRequiredTargetsNeedingMapping(catalogMeta).includes(col.name);
+    }
+
+    if (isHistoryLoad({ loadMode, catalogMeta })) {
+        return getHistoryRequiredTargetsNeedingMapping(catalogMeta).includes(col.name);
     }
 
     if (catalogDefinesList(catalogMeta, 'required_mapping_columns')) {

@@ -1569,7 +1569,6 @@ async def upload_file_temp(
 
         if normalized_load_type == "history":
             from data_staging.services.history.history_config import (
-                HISTORY_SOURCE_NAME,
                 HISTORY_TARGET_SCHEMA,
                 HISTORY_TARGET_TABLE,
                 get_history_table_meta,
@@ -1577,17 +1576,26 @@ async def upload_file_temp(
                 source_from_filename,
                 valid_process_type_keys,
             )
+            from data_staging.services.history.history_registry import get_history_table
 
-            if not is_valid_process_type(process_type):
-                valid = ", ".join(valid_process_type_keys()) or "Weekly, Monthly"
+            history_name = (target_table or HISTORY_TARGET_TABLE).strip()
+            history_entry = get_history_table(history_name)
+            if not history_entry:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Tabla de historia desconocida o inactiva: {history_name}",
+                )
+
+            if not is_valid_process_type(process_type, history_name):
+                valid = ", ".join(valid_process_type_keys(history_name)) or "Weekly, Monthly"
                 raise HTTPException(
                     status_code=400,
                     detail=f"Selecciona un tipo de proceso válido: {valid}.",
                 )
 
-            target_schema = HISTORY_TARGET_SCHEMA
-            target_table = HISTORY_TARGET_TABLE
-            source_name = HISTORY_SOURCE_NAME
+            target_schema = history_entry.get("target_schema") or HISTORY_TARGET_SCHEMA
+            target_table = history_entry.get("target_table") or history_name
+            source_name = history_entry.get("name") or history_name
         elif normalized_load_type == "catalog":
             if not target_table:
                 raise HTTPException(
@@ -1684,8 +1692,9 @@ async def upload_file_temp(
             metadata["catalog_name"] = catalog_name
             metadata["production_table"] = production_table
         if normalized_load_type == "history":
-            metadata["history_config"] = get_history_table_meta()
-            metadata["unique_keys"] = get_history_table_meta().get("unique_keys", [])
+            history_meta = get_history_table_meta(target_table)
+            metadata["history_config"] = history_meta
+            metadata["unique_keys"] = history_meta.get("unique_keys", [])
             metadata["source_extension"] = source_from_filename(file.filename or "")
         if target_column_types:
             metadata["target_column_types"] = target_column_types
@@ -1830,18 +1839,57 @@ async def save_column_mapping(
                     )
         elif load_type == "history":
             from data_staging.services.history.history_config import (
-                HISTORY_SOURCE_NAME,
                 HISTORY_TARGET_SCHEMA,
                 HISTORY_TARGET_TABLE,
                 get_history_table_meta,
             )
+            from data_staging.services.history.history_registry import get_history_table
 
-            metadata["target_schema"] = HISTORY_TARGET_SCHEMA
-            metadata["target_table"] = HISTORY_TARGET_TABLE
-            metadata["history_config"] = get_history_table_meta()
-            metadata["unique_keys"] = get_history_table_meta().get("unique_keys", [])
-            mapping_data["target_schema"] = HISTORY_TARGET_SCHEMA
-            mapping_data["target_table"] = HISTORY_TARGET_TABLE
+            history_name = (
+                mapping_data.get("target_table")
+                or metadata.get("target_table")
+                or HISTORY_TARGET_TABLE
+            )
+            history_entry = get_history_table(history_name)
+            if not history_entry:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Tabla de historia desconocida o inactiva: {history_name}",
+                )
+            target_schema = history_entry.get("target_schema") or HISTORY_TARGET_SCHEMA
+            target_table = history_entry.get("target_table") or history_name
+            history_meta = get_history_table_meta(history_name)
+
+            metadata["target_schema"] = target_schema
+            metadata["target_table"] = target_table
+            metadata["history_config"] = history_meta
+            metadata["unique_keys"] = history_meta.get("unique_keys", [])
+            mapping_data["target_schema"] = target_schema
+            mapping_data["target_table"] = target_table
+
+            from data_staging.services.history.history_registry import (
+                history_required_targets_needing_mapping,
+            )
+
+            required_targets = history_required_targets_needing_mapping(history_entry)
+            if required_targets:
+                mapped_targets = {
+                    str(cfg.get("target")).strip()
+                    for fc, cfg in column_mappings.items()
+                    if column_toggles.get(fc, True)
+                    and isinstance(cfg, dict)
+                    and cfg.get("target")
+                    and cfg.get("target") != "__new__"
+                }
+                missing = [c for c in required_targets if c not in mapped_targets]
+                if missing:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "Debes mapear las columnas obligatorias de destino: "
+                            + ", ".join(missing)
+                        ),
+                    )
 
         trigger_validation = mapping_data.get("trigger_validation", True)
         if load_type in ("history", "catalog") and trigger_validation:
@@ -2031,11 +2079,13 @@ async def generate_preview(
         if load_type == "history":
             from data_staging.services.history.history_config import (
                 is_valid_process_type,
+                resolve_history_table_name,
                 valid_process_type_keys,
             )
 
-            if not is_valid_process_type(process_type):
-                valid = ", ".join(valid_process_type_keys()) or "Weekly, Monthly"
+            history_name = resolve_history_table_name(metadata)
+            if not is_valid_process_type(process_type, history_name):
+                valid = ", ".join(valid_process_type_keys(history_name)) or "Weekly, Monthly"
                 raise HTTPException(
                     status_code=400,
                     detail=f"Tipo de proceso inválido. Debe ser uno de: {valid}.",

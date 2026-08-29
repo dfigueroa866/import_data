@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import {
     uploadFileTemp,
+    getHistoryTables,
     getHistoryTable,
     getHistoryCatalogReadiness,
     saveColumnMapping,
@@ -12,8 +13,6 @@ import useSessionLoadGuard from '../../hooks/useSessionLoadGuard';
 import { useAuth } from '../../context/AuthContext';
 import { Button, LoadingSpinner, Alert, FormField, Select } from '../ui';
 import {
-    HISTORY_TARGET_SCHEMA,
-    HISTORY_TARGET_TABLE,
     HISTORY_TABLE_META,
     FALLBACK_PROCESS_TYPES,
 } from '../../constants/historyConfig';
@@ -28,6 +27,12 @@ import {
 } from '../../utils/wizardColumnMapping';
 import './Step1Upload.css';
 
+const formatHistoryDestination = (meta) => {
+    const schema = meta?.target_schema || 'public';
+    const table = meta?.target_table || meta?.name || 'sales_history';
+    return `${schema}.${table}`;
+};
+
 const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
     const { user } = useAuth();
     const organizationId = user?.organization_id || wizardData.organizationId || '';
@@ -37,9 +42,14 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
     const [validating, setValidating] = useState(false);
     const [validationProgress, setValidationProgress] = useState(null);
     const [error, setError] = useState('');
+    const [historyTables, setHistoryTables] = useState([]);
+    const [selectedHistoryTable, setSelectedHistoryTable] = useState(
+        wizardData.selectedTable || wizardData.historyTableMeta?.name || 'sales_history',
+    );
     const [historyMeta, setHistoryMeta] = useState(
         wizardData.historyTableMeta || HISTORY_TABLE_META
     );
+    const [tablesLoading, setTablesLoading] = useState(true);
     const [metaLoading, setMetaLoading] = useState(!wizardData.historyTableMeta?.process_types?.length);
     const [readinessLoading, setReadinessLoading] = useState(true);
     const [catalogReadiness, setCatalogReadiness] = useState(null);
@@ -75,10 +85,45 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
         let cancelled = false;
         (async () => {
             try {
+                setTablesLoading(true);
+                const data = await getHistoryTables();
+                const tables = data.tables || [];
+                if (!cancelled) {
+                    setHistoryTables(tables);
+                    if (tables.length > 0 && !tables.some((t) => t.name === selectedHistoryTable)) {
+                        setSelectedHistoryTable(tables[0].name);
+                    }
+                }
+            } catch {
+                if (!cancelled) {
+                    setHistoryTables([]);
+                }
+            } finally {
+                if (!cancelled) {
+                    setTablesLoading(false);
+                }
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, []);
+
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            if (!selectedHistoryTable) return;
+            try {
                 setMetaLoading(true);
-                const { table } = await getHistoryTable();
+                const { table } = await getHistoryTable(selectedHistoryTable);
                 if (!cancelled) {
                     setHistoryMeta(table);
+                    const pts = table?.process_types || [];
+                    if (pts.length === 1) {
+                        setProcessType(pts[0].key);
+                    } else if (!pts.some((pt) => pt.key === processType)) {
+                        setProcessType('');
+                    }
                 }
             } catch {
                 if (!cancelled) {
@@ -93,7 +138,7 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
         return () => {
             cancelled = true;
         };
-    }, []);
+    }, [selectedHistoryTable]);
 
     const processTypes = historyMeta?.process_types?.length
         ? historyMeta.process_types
@@ -103,8 +148,10 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
         ? historyMeta.validation_hints
         : HISTORY_TABLE_META.validation_hints;
 
+    const targetSchema = historyMeta?.target_schema || 'public';
+    const targetTable = historyMeta?.target_table || selectedHistoryTable || 'sales_history';
     const catalogBlocked = catalogReadiness != null && catalogReadiness.ready === false;
-    const uploadDisabled = catalogBlocked || readinessLoading || metaLoading;
+    const uploadDisabled = catalogBlocked || readinessLoading || metaLoading || tablesLoading;
     const missingCatalogsLabel = formatMissingCatalogs(catalogReadiness?.missing);
 
     const handleDrag = (e) => {
@@ -158,8 +205,8 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
 
             const response = await uploadFileTemp(
                 file,
-                HISTORY_TARGET_SCHEMA,
-                HISTORY_TARGET_TABLE,
+                targetSchema,
+                targetTable,
                 processType,
                 'history'
             );
@@ -167,12 +214,12 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
             const batchId = response.batch_id;
             const fileHeaders = response.file_headers || [];
 
-            const colsData = await getTableColumns(HISTORY_TARGET_SCHEMA, HISTORY_TARGET_TABLE);
+            const colsData = await getTableColumns(targetSchema, targetTable);
             const productionColumns = mergeHistoryProductionColumns(colsData.columns || []);
             const mappingCtx = buildMappingContext({
                 loadMode: 'history',
-                selectedSchema: HISTORY_TARGET_SCHEMA,
-                selectedTable: HISTORY_TARGET_TABLE,
+                selectedSchema: targetSchema,
+                selectedTable: targetTable,
                 historyTableMeta: historyMeta,
             });
 
@@ -208,8 +255,8 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
             await saveColumnMapping(
                 batchId,
                 {
-                    target_schema: HISTORY_TARGET_SCHEMA,
-                    target_table: HISTORY_TARGET_TABLE,
+                    target_schema: targetSchema,
+                    target_table: targetTable,
                     column_mappings: mappings,
                     column_toggles: toggles,
                 },
@@ -231,8 +278,8 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
                 file: file,
                 fileName: response.file_name,
                 fileHeaders,
-                selectedSchema: HISTORY_TARGET_SCHEMA,
-                selectedTable: HISTORY_TARGET_TABLE,
+                selectedSchema: targetSchema,
+                selectedTable: targetTable,
                 historyTableMeta: historyMeta,
                 sourceName: response.source_name,
                 batchId,
@@ -388,6 +435,24 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
                 <div className="selection-section">
                     <h3>Configuración</h3>
 
+                    <FormField label="Tabla de historia" htmlFor="historyTable" required className="form-group">
+                        <Select
+                            id="historyTable"
+                            value={selectedHistoryTable}
+                            onChange={(e) => setSelectedHistoryTable(e.target.value)}
+                            disabled={uploadDisabled}
+                        >
+                            <option value="">
+                                {tablesLoading ? 'Cargando tablas…' : '-- Seleccionar --'}
+                            </option>
+                            {historyTables.map((table) => (
+                                <option key={table.name} value={table.name}>
+                                    {table.label || table.name}
+                                </option>
+                            ))}
+                        </Select>
+                    </FormField>
+
                     <FormField label="Granularidad (tipo de proceso)" htmlFor="processType" required className="form-group">
                         <Select
                             id="processType"
@@ -409,13 +474,8 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
                     <div className="info-box history-target-box">
                         <div className="info-label">Tabla destino</div>
                         <div className="info-value">
-                            {HISTORY_TARGET_SCHEMA}.{HISTORY_TARGET_TABLE}
+                            {formatHistoryDestination(historyMeta)}
                         </div>
-                        <p className="info-hint">
-                            Columnas clave: location_code, sku, period_start, quantity.
-                            granularity se toma del campo Granularidad (tipo de proceso) de arriba;
-                            source viene de la extensión del archivo.
-                        </p>
                         <ul className="history-hints-list">
                             {validationHints.map((hint) => (
                                 <li key={hint}>{hint}</li>
@@ -433,7 +493,7 @@ const Step1Upload = ({ wizardData, updateWizardData, nextStep }) => {
                     onClick={handleSubmit}
                     loading={uploading}
                     loadingLabel="Subiendo archivo…"
-                    disabled={!file || !processType || validating || uploadDisabled}
+                    disabled={!file || !processType || !selectedHistoryTable || validating || uploadDisabled}
                 >
                     Siguiente: mapear columnas →
                 </Button>

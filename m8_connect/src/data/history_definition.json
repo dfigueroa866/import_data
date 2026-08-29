@@ -1,71 +1,189 @@
 {
-  "version": 1,
-  "definition": {
-    "name": "sales_history",
-    "label": "Historial de ventas",
-    "target_schema": "public",
-    "target_table": "sales_history",
-    "unique_keys": [
-      "organization_id",
-      "location_code",
-      "sku",
-      "period_start",
-      "granularity"
-    ],
-    "required_mapping_columns": [
-      "location_code",
-      "sku",
-      "period_start",
-      "quantity",
-      "pieces"
-    ],
-    "optional_columns": [],
-    "non_mappable_targets": [
-      "organization_id",
-      "granularity",
-      "sales_channel",
-      "source",
-      "iso_year",
-      "iso_week",
-      "stockout_flag",
-      "markdown_pct",
-      "promo_flag"
-    ],
-    "ignored_file_headers": [
-      "id",
-      "organization_id"
-    ],
-    "sku_mapping_targets": [
-      "sku"
-    ],
-    "logical_columns": [
-      "sku_code"
-    ],
-    "sales_channel_default": "SELL_IN",
-    "process_types": [
-      {
-        "key": "Weekly",
-        "label": "Weekly (agrupa por semana)",
-        "granularity": "week",
-        "date_truncate": "1w"
+  "version": 2,
+  "tables": [
+    {
+      "name": "sales_history",
+      "label": "Historial de ventas",
+      "target_schema": "public",
+      "target_table": "sales_history",
+      "is_active": true,
+      "supports_aggregation": true,
+      "period_column": "period_start",
+      "unique_keys": [
+        "organization_id",
+        "location_code",
+        "sku",
+        "period_start",
+        "granularity"
+      ],
+      "upsert_update_columns": [
+        "quantity",
+        "pieces",
+        "imported_at",
+        "iso_year",
+        "iso_week",
+        "stockout_flag",
+        "markdown_pct",
+        "promo_flag"
+      ],
+      "required_mapping_columns": [
+        "location_code",
+        "sku",
+        "period_start",
+        "quantity",
+        "pieces"
+      ],
+      "optional_columns": [],
+      "non_mappable_targets": [
+        "organization_id",
+        "granularity",
+        "sales_channel",
+        "source",
+        "iso_year",
+        "iso_week",
+        "stockout_flag",
+        "markdown_pct",
+        "promo_flag"
+      ],
+      "ignored_file_headers": [
+        "id",
+        "organization_id"
+      ],
+      "sku_mapping_targets": [
+        "sku"
+      ],
+      "logical_columns": [
+        "sku_code"
+      ],
+      "sales_channel_default": "SELL_IN",
+      "features": {
+        "auto_granularity": true,
+        "auto_source": true,
+        "auto_sales_channel": true,
+        "derived_iso_flags": true
       },
-      {
-        "key": "Monthly",
-        "label": "Monthly (agrupa por mes)",
-        "granularity": "month",
-        "date_truncate": "1mo"
-      }
-    ],
-    "validation_hints": [
-      "Destino fijo: public.sales_history",
-      "Mapea location_code, sku (o sku_code lógico) y period_start, quantity, pieces",
-      "UPSERT por: organization_id + location_code + sku + period_start + granularity",
-      "sales_channel se aplica automáticamente como SELL_IN",
+      "process_types": [
+        {
+          "key": "Weekly",
+          "label": "Weekly (agrupa por semana)",
+          "granularity": "week",
+          "date_truncate": "1w"
+        },
+        {
+          "key": "Monthly",
+          "label": "Monthly (agrupa por mes)",
+          "granularity": "month",
+          "date_truncate": "1mo"
+        }
+      ],
+      "validation_hints": [
+        "Destino fijo: public.sales_history",
+        "Mapea location_code, sku (o sku_code lógico) y period_start, quantity, pieces",
+        "UPSERT por: organization_id + location_code + sku + period_start + granularity",
+        "sales_channel se aplica automáticamente como SELL_IN",
         "granularity: del campo Granularidad / tipo de proceso del paso 1 (Weekly→week, Monthly→month)",
-      "source: extensión del archivo subido",
-      "organization_id se aplica automáticamente del usuario",
-      "iso_year e iso_week se derivan de period_start (tras agregación)",
-      "stockout_flag=false, markdown_pct=0, promo_flag=false (automáticos)"
-    ]
-  }
+        "source: extensión del archivo subido",
+        "organization_id se aplica automáticamente del usuario",
+        "iso_year e iso_week se derivan de period_start (tras agregación)",
+        "stockout_flag=false, markdown_pct=0, promo_flag=false (automáticos)"
+      ]
+    },
+    {
+      "name": "inventory_snapshot",
+      "label": "Inventario (snapshot)",
+      "target_schema": "public",
+      "target_table": "inventory_snapshot",
+      "is_active": true,
+      "supports_aggregation": false,
+      "period_column": "snapshot_date",
+      "unique_keys": [
+        "organization_id",
+        "sku",
+        "location_code",
+        "snapshot_date"
+      ],
+      "upsert_update_columns": [
+        "on_hand_qty",
+        "allocated_qty",
+        "reserved_qty",
+        "blocked_qty",
+        "quarantine_qty",
+        "supplier_id",
+        "lead_time_days",
+        "review_period_days",
+        "moq",
+        "lot_multiple",
+        "unit_cost",
+        "currency"
+      ],
+      "required_mapping_columns": [
+        "snapshot_date",
+        "sku",
+        "location_code",
+        "on_hand_qty",
+        "allocated_qty",
+        "reserved_qty",
+        "blocked_qty",
+        "quarantine_qty",
+        "lead_time_days",
+        "review_period_days",
+        "moq",
+        "lot_multiple"
+      ],
+      "optional_columns": [
+        "supplier_id",
+        "unit_cost",
+        "currency"
+      ],
+      "non_mappable_targets": [
+        "snapshot_id",
+        "organization_id",
+        "created_at"
+      ],
+      "ignored_file_headers": [
+        "id",
+        "snapshot_id",
+        "organization_id"
+      ],
+      "sku_mapping_targets": [
+        "sku"
+      ],
+      "logical_columns": [
+        "sku_code"
+      ],
+      "sales_channel_default": "SELL_IN",
+      "features": {
+        "auto_granularity": false,
+        "auto_source": false,
+        "auto_sales_channel": false,
+        "derived_iso_flags": false
+      },
+      "process_types": [
+        {
+          "key": "Snapshot",
+          "label": "Snapshot (sin agregación)",
+          "granularity": "snapshot",
+          "date_truncate": "1d"
+        }
+      ],
+      "validation_hints": [
+        "Destino: public.inventory_snapshot",
+        "Mapea snapshot_date, sku, location_code y on_hand_qty como mínimo",
+        "Clave natural sugerida: organization_id + sku + location_code + snapshot_date",
+        "snapshot_id y created_at los genera la base de datos",
+        "organization_id se aplica automáticamente del usuario",
+        "Sin agregación semanal/mensual: cada fila del archivo es un snapshot"
+      ],
+      "defaults": {
+        "allocated_qty": "0",
+        "reserved_qty": "0",
+        "blocked_qty": "0",
+        "quarantine_qty": "0",
+        "lead_time_days": "1",
+        "review_period_days": "0",
+        "moq": "0",
+        "lot_multiple": "0"
+      }
+    }
+  ]
 }

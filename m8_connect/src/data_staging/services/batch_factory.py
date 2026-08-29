@@ -95,8 +95,9 @@ def build_batch_metadata(
     if load_type == "history":
         from data_staging.services.history.history_config import get_history_table_meta
 
-        metadata["history_config"] = get_history_table_meta()
-        metadata["unique_keys"] = get_history_table_meta().get("unique_keys", [])
+        table_name = target_table or "sales_history"
+        metadata["history_config"] = get_history_table_meta(table_name)
+        metadata["unique_keys"] = get_history_table_meta(table_name).get("unique_keys", [])
     if target_column_types:
         metadata["target_column_types"] = target_column_types
     if column_mappings:

@@ -44,8 +44,14 @@ export const HISTORY_FILE_MAPPING_COLUMNS = new Set([
     'location_code',
     'sku',
     'period_start',
+    'snapshot_date',
     'quantity',
     'pieces',
+    'on_hand_qty',
+    'allocated_qty',
+    'reserved_qty',
+    'blocked_qty',
+    'quarantine_qty',
 ]);
 
 /**
@@ -97,11 +103,17 @@ export function buildHistoryColumnRequiredMap(
 /**
  * Derive persisted history mapping lists from admin column toggles.
  */
-export function deriveHistoryMappingFields(schemaColumns, columnRequiredMap = {}) {
+export function deriveHistoryMappingFields(
+    schemaColumns,
+    columnRequiredMap = {},
+    columnDefaultEnabledMap = {},
+    columnDefaultValuesMap = {}
+) {
     const required_mapping_columns = [];
     const optional_columns = [];
     const non_mappable_targets = [];
     const ignored_file_headers = ['id'];
+    const defaults = {};
 
     (schemaColumns || []).forEach((col) => {
         const kind = classifyHistoryColumn(col);
@@ -126,6 +138,13 @@ export function deriveHistoryMappingFields(schemaColumns, columnRequiredMap = {}
         } else {
             optional_columns.push(name);
         }
+
+        if (columnDefaultEnabledMap[name]) {
+            const text = String(columnDefaultValuesMap[name] ?? '').trim();
+            if (text) {
+                defaults[name] = text;
+            }
+        }
     });
 
     HISTORY_ALWAYS_REQUIRED_MAPPING.forEach((colName) => {
@@ -143,6 +162,7 @@ export function deriveHistoryMappingFields(schemaColumns, columnRequiredMap = {}
         optional_columns,
         non_mappable_targets: [...new Set(non_mappable_targets)],
         ignored_file_headers: [...new Set(ignored_file_headers)],
+        defaults,
     };
 }
 
@@ -246,6 +266,25 @@ export function deriveCatalogMappingFields(
         ignored_file_headers,
         defaults,
     };
+}
+
+/** Build default enabled/value maps from saved history.defaults. */
+export function buildHistoryColumnDefaultsState(schemaColumns, savedDefaults = {}) {
+    const enabled = {};
+    const values = {};
+    const raw = savedDefaults && typeof savedDefaults === 'object' ? savedDefaults : {};
+    (schemaColumns || []).forEach((col) => {
+        if (!isHistoryColumnMappable(col)) return;
+        const text = raw[col.name] == null ? '' : String(raw[col.name]).trim();
+        if (text) {
+            enabled[col.name] = true;
+            values[col.name] = text;
+        } else {
+            enabled[col.name] = false;
+            values[col.name] = '';
+        }
+    });
+    return { enabled, values };
 }
 
 /** Build default enabled/value maps from saved catalog.defaults. */

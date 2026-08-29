@@ -1,6 +1,6 @@
 import api from './api';
 import { FALLBACK_CATALOG_TABLES } from '../constants/catalogTables';
-import { FALLBACK_PROCESS_TYPES, HISTORY_TABLE_META } from '../constants/historyConfig';
+import { FALLBACK_PROCESS_TYPES, FALLBACK_HISTORY_TABLES, HISTORY_TABLE_META } from '../constants/historyConfig';
 import {
     MAX_STALE_POLLS,
     POLL_INTERVAL_PROMOTION_MS,
@@ -37,20 +37,47 @@ export const getCatalogTables = async () => {
 };
 
 /**
+ * History tables for upload wizard.
+ */
+export const getHistoryTables = async () => {
+    try {
+        const response = await api.get('/api/v1/system/history-tables');
+        const tables = response.data?.tables;
+        if (Array.isArray(tables) && tables.length > 0) {
+            return { tables, fromFallback: false };
+        }
+    } catch (error) {
+        const status = error.response?.status;
+        if (status && status !== 404 && status !== 502) {
+            console.warn('getHistoryTables:', error);
+        }
+    }
+
+    console.warn(
+        'history-tables API no disponible; usando lista local. Reinicia el backend: python run_app.py'
+    );
+    return { tables: FALLBACK_HISTORY_TABLES, fromFallback: true };
+};
+
+/**
  * History table metadata for upload wizard (process types, mapping rules).
  */
-export const getHistoryTable = async () => {
+export const getHistoryTable = async (tableName = 'sales_history') => {
     try {
-        const response = await api.get('/api/v1/system/history-table');
+        const response = await api.get('/api/v1/system/history-table', {
+            params: { name: tableName },
+        });
         const table = response.data?.table;
         if (table && typeof table === 'object') {
+            const fallback =
+                FALLBACK_HISTORY_TABLES.find((t) => t.name === tableName) || HISTORY_TABLE_META;
             return {
                 table: {
-                    ...HISTORY_TABLE_META,
+                    ...fallback,
                     ...table,
                     process_types: table.process_types?.length
                         ? table.process_types
-                        : FALLBACK_PROCESS_TYPES,
+                        : fallback.process_types || FALLBACK_PROCESS_TYPES,
                 },
                 fromFallback: false,
             };
@@ -65,7 +92,9 @@ export const getHistoryTable = async () => {
     console.warn(
         'history-table API no disponible; usando configuración local. Reinicia el backend: python run_app.py'
     );
-    return { table: HISTORY_TABLE_META, fromFallback: true };
+    const fallback =
+        FALLBACK_HISTORY_TABLES.find((t) => t.name === tableName) || HISTORY_TABLE_META;
+    return { table: fallback, fromFallback: true };
 };
 
 /** Whether promoted catalog batches exist before history upload. */

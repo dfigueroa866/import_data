@@ -176,15 +176,14 @@ export const appendFixedHistoryAutoMappings = (
 
     const nextMappings = { ...mappings };
     const nextToggles = { ...toggles };
+    const features = wizardData.historyTableMeta?.features || {};
     const autoTargets = [
-        'granularity',
-        'source',
-        'sales_channel',
-        'iso_year',
-        'iso_week',
-        'stockout_flag',
-        'markdown_pct',
-        'promo_flag',
+        ...(features.auto_granularity !== false ? ['granularity'] : []),
+        ...(features.auto_source !== false ? ['source'] : []),
+        ...(features.auto_sales_channel !== false ? ['sales_channel'] : []),
+        ...(features.derived_iso_flags !== false
+            ? ['iso_year', 'iso_week', 'stockout_flag', 'markdown_pct', 'promo_flag']
+            : []),
     ];
 
     Object.keys(nextMappings).forEach((fileCol) => {
@@ -204,38 +203,45 @@ export const appendFixedHistoryAutoMappings = (
         };
     }
 
-    const sourceExt = sourceFromFileName(wizardData.fileName);
-    if (!sourceExt || sourceExt === 'unknown') {
-        return {
-            mappings: nextMappings,
-            toggles: nextToggles,
-            error: 'No se pudo determinar source desde el archivo original (extensión).',
+    if (features.auto_granularity !== false) {
+        nextMappings[GRANULARITY_MAPPING_KEY] = {
+            target: 'granularity',
+            auto_mapped: false,
+            is_fixed: true,
+            from_process_type: true,
         };
+        nextToggles[GRANULARITY_MAPPING_KEY] = true;
     }
 
-    nextMappings[GRANULARITY_MAPPING_KEY] = {
-        target: 'granularity',
-        auto_mapped: false,
-        is_fixed: true,
-        from_process_type: true,
-    };
-    nextToggles[GRANULARITY_MAPPING_KEY] = true;
-    nextMappings[SOURCE_MAPPING_KEY] = {
-        target: 'source',
-        auto_mapped: false,
-        is_fixed: true,
-        from_source_file: true,
-    };
-    nextToggles[SOURCE_MAPPING_KEY] = true;
-    const salesChannelDefault =
-        wizardData.historyTableMeta?.sales_channel_default || HISTORY_SALES_CHANNEL_VALUE;
-    nextMappings[SALES_CHANNEL_MAPPING_KEY] = {
-        target: 'sales_channel',
-        default_value: salesChannelDefault,
-        auto_mapped: false,
-        is_fixed: true,
-    };
-    nextToggles[SALES_CHANNEL_MAPPING_KEY] = true;
+    if (features.auto_source !== false) {
+        const sourceExt = sourceFromFileName(wizardData.fileName);
+        if (!sourceExt || sourceExt === 'unknown') {
+            return {
+                mappings: nextMappings,
+                toggles: nextToggles,
+                error: 'No se pudo determinar source desde el archivo original (extensión).',
+            };
+        }
+        nextMappings[SOURCE_MAPPING_KEY] = {
+            target: 'source',
+            auto_mapped: false,
+            is_fixed: true,
+            from_source_file: true,
+        };
+        nextToggles[SOURCE_MAPPING_KEY] = true;
+    }
+
+    if (features.auto_sales_channel !== false) {
+        const salesChannelDefault =
+            wizardData.historyTableMeta?.sales_channel_default || HISTORY_SALES_CHANNEL_VALUE;
+        nextMappings[SALES_CHANNEL_MAPPING_KEY] = {
+            target: 'sales_channel',
+            default_value: salesChannelDefault,
+            auto_mapped: false,
+            is_fixed: true,
+        };
+        nextToggles[SALES_CHANNEL_MAPPING_KEY] = true;
+    }
 
     return { mappings: nextMappings, toggles: nextToggles };
 };

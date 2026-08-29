@@ -187,13 +187,25 @@ async def get_catalog_tables():
         raise HTTPException(status_code=500, detail=f"Failed to list catalog tables: {str(e)}")
 
 
+@router.get("/history-tables")
+async def get_history_tables():
+    """List history tables for upload wizard."""
+    try:
+        from data_staging.services.history.history_registry import list_history_tables
+
+        return {"tables": list_history_tables(active_only=True)}
+    except Exception as e:
+        logger.error(f"Error listing history tables: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to list history tables: {str(e)}")
+
+
 @router.get("/history-table")
-async def get_history_table():
+async def get_history_table(name: str = Query("sales_history", description="History table name")):
     """History table metadata for upload wizard (process types, mapping rules)."""
     try:
         from data_staging.services.history.history_config import get_history_table_meta
 
-        return {"table": get_history_table_meta()}
+        return {"table": get_history_table_meta(name)}
     except Exception as e:
         logger.error(f"Error loading history table meta: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to load history config: {str(e)}")

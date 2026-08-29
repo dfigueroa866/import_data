@@ -99,6 +99,8 @@
         ]
       },
       "defaults": {
+        "subcategory": "N/A",
+        "class": "N/A",
         "subclass": "N/A",
         "attr_1": "N/A",
         "attr_2": "N/A",

@@ -19,6 +19,7 @@ def test_resolve_history_rules_prefers_batch_snapshot():
             "sales_channel_default": "WHOLESALE",
             "unique_keys": ["organization_id", "sku"],
             "non_mappable_targets": ["granularity", "source", "sales_channel"],
+            "defaults": {"pieces": "0"},
         }
     }
     rules = resolve_history_rules(metadata)
@@ -26,6 +27,7 @@ def test_resolve_history_rules_prefers_batch_snapshot():
     assert rules["optional_columns"] == ["pieces"]
     assert rules["sales_channel_default"] == "WHOLESALE"
     assert rules["unique_keys"] == ["organization_id", "sku"]
+    assert rules["defaults"] == {"pieces": "0"}
     assert "organization_id" in rules["auto_promotion_columns"]
     assert "granularity" in rules["auto_promotion_columns"]
 
